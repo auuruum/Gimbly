@@ -553,7 +553,9 @@ impl GimblyApp {
                 SLOT
             };
             painter.rect_filled(r, CornerRadius::same(6), fill);
-            let text_color = if selected || device.is_some() {
+            let text_color = if selected {
+                ON_ACCENT
+            } else if device.is_some() {
                 TEXT
             } else {
                 TEXT_FAINT
@@ -767,7 +769,7 @@ impl GimblyApp {
                     ui.painter()
                         .circle(dot, 13.0, ACCENT, Stroke::new(2.0, Color32::WHITE));
                     ui.painter()
-                        .text(dot, Align2::CENTER_CENTER, "REC", font(9.0), Color32::WHITE);
+                        .text(dot, Align2::CENTER_CENTER, "REC", font(9.0), ON_ACCENT);
                     ui.painter()
                         .circle_filled(pos2(dot.x + 22.0, dot.y), 2.0, TEXT);
                     ui.painter().text(

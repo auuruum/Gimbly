@@ -853,7 +853,7 @@ fn device_page(ui: &mut Ui, view: &View<'_>) {
             Align2::CENTER_CENTER,
             (slot + 1).to_string(),
             font(14.0),
-            Color32::WHITE,
+            ON_ACCENT,
         );
         let Some(device) = device else { continue };
         let model = model_name(device);
@@ -1262,7 +1262,7 @@ fn segmented(ui: &mut Ui, labels: &[&str], selected: usize, item_width: f32) -> 
             Align2::CENTER_CENTER,
             *text,
             font(15.0),
-            TEXT,
+            if i == selected { ON_ACCENT } else { TEXT },
         );
         if response.clicked() && i != selected {
             clicked = Some(i);

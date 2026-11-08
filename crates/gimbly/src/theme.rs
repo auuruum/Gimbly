@@ -1,7 +1,6 @@
 //! Colours, fonts and egui style for the control panel.
 //!
-//! The palette follows the dark layout of OBSBOT Center's control panel
-//! (sampled from a screenshot); all drawing code is Gimbly's own.
+//! The dark palette uses the orange from Gimbly's logo as its accent.
 
 use eframe::egui::{self, Color32, FontData, FontDefinitions, FontFamily, FontId, TextStyle};
 
@@ -18,8 +17,9 @@ pub const SLOT: Color32 = Color32::from_rgb(0x36, 0x3A, 0x3B);
 pub const PIP_BUTTON: Color32 = Color32::from_rgb(0x55, 0x55, 0x5A);
 pub const FIELD: Color32 = Color32::from_rgb(0x19, 0x1A, 0x1B);
 pub const FIELD_STROKE: Color32 = Color32::from_rgb(0x3A, 0x3D, 0x40);
-pub const ACCENT: Color32 = Color32::from_rgb(0xFB, 0x00, 0x36);
-pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0xFF, 0x26, 0x56);
+pub const ACCENT: Color32 = Color32::from_rgb(0xFF, 0x8A, 0x3D);
+pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0xFF, 0xA3, 0x62);
+pub const ON_ACCENT: Color32 = FIELD;
 pub const TOGGLE_OFF: Color32 = Color32::from_rgb(0x55, 0x58, 0x5B);
 pub const TEXT: Color32 = Color32::from_rgb(0xF2, 0xF2, 0xF2);
 pub const TEXT_DIM: Color32 = Color32::from_rgb(0x9A, 0x9C, 0x9E);
@@ -74,7 +74,8 @@ pub fn apply(ctx: &egui::Context) {
         v.window_fill = CARD;
         v.extreme_bg_color = FIELD;
         v.override_text_color = Some(TEXT);
-        v.selection.bg_fill = ACCENT;
+        // egui uses the selection stroke for both selected text and the input focus border.
+        v.selection.bg_fill = ACCENT.gamma_multiply(0.55);
         v.selection.stroke.color = TEXT;
         v.widgets.inactive.bg_fill = BUTTON;
         v.widgets.inactive.weak_bg_fill = BUTTON;
@@ -83,7 +84,7 @@ pub fn apply(ctx: &egui::Context) {
         v.widgets.active.bg_fill = ACCENT;
         v.widgets.inactive.fg_stroke.color = TEXT;
         v.widgets.hovered.fg_stroke.color = TEXT;
-        v.widgets.active.fg_stroke.color = TEXT;
+        v.widgets.active.fg_stroke.color = ON_ACCENT;
         v.widgets.noninteractive.fg_stroke.color = TEXT;
 
         style.spacing.scroll = egui::style::ScrollStyle::solid();

@@ -13,7 +13,7 @@ fn hovered(ui: &Ui, response: &Response) -> bool {
     ui.is_enabled() && response.hovered()
 }
 
-/// Rounded rectangular button; red when `selected`.
+/// Rounded rectangular button with an accent fill when selected.
 pub fn pill(ui: &mut Ui, text: &str, selected: bool, size: Vec2) -> Response {
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     if ui.is_rect_visible(rect) {
@@ -25,8 +25,14 @@ pub fn pill(ui: &mut Ui, text: &str, selected: bool, size: Vec2) -> Response {
             (false, true) => BUTTON_HOVER,
         };
         ui.painter().rect_filled(rect, CornerRadius::same(6), fill);
-        ui.painter()
-            .text(rect.center(), Align2::CENTER_CENTER, text, font(14.0), TEXT);
+        let color = if selected { ON_ACCENT } else { TEXT };
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            text,
+            font(14.0),
+            color,
+        );
     }
     response
 }
@@ -46,7 +52,7 @@ pub fn pill_row(ui: &mut Ui, labels: &[&str], selected: Option<usize>, gap: f32)
     clicked
 }
 
-/// iOS-style switch; red when on.
+/// iOS-style switch with an accent fill when on.
 pub fn toggle(ui: &mut Ui, on: bool) -> Response {
     let size = vec2(40.0, 22.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
@@ -57,8 +63,9 @@ pub fn toggle(ui: &mut Ui, on: bool) -> Response {
         ui.painter()
             .rect_filled(rect, CornerRadius::same(radius as u8), fill);
         let x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), t);
+        let knob = if on { ON_ACCENT } else { Color32::WHITE };
         ui.painter()
-            .circle_filled(pos2(x, rect.center().y), radius - 3.0, Color32::WHITE);
+            .circle_filled(pos2(x, rect.center().y), radius - 3.0, knob);
     }
     response
 }
@@ -68,7 +75,7 @@ fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
 }
 
-/// Square icon button. `active` draws the red rounded highlight used for
+/// Square icon button. `active` draws the rounded accent highlight used for
 /// features that are switched on.
 pub fn icon_button(ui: &mut Ui, glyph: &str, size: f32, glyph_size: f32, active: bool) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
@@ -86,10 +93,10 @@ pub fn icon_button(ui: &mut Ui, glyph: &str, size: f32, glyph_size: f32, active:
             ui.painter()
                 .rect_filled(bg, CornerRadius::same(5), BUTTON_HOVER);
         }
-        let color = if active || hover {
-            TEXT
-        } else {
-            Color32::from_gray(0xE0)
+        let color = match (active, hover) {
+            (true, _) => ON_ACCENT,
+            (false, true) => TEXT,
+            (false, false) => Color32::from_gray(0xE0),
         };
         ui.painter().text(
             rect.center(),

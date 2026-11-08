@@ -6,6 +6,7 @@
 //! controls through the camera's UVC extension unit.
 
 use super::preview::{self, YuvRange};
+use super::sleep::SleepReadback;
 use super::{
     CaptureConfig, Command, DeviceInfo, GimbalCommand, PRESET_SLOTS, Preset, SessionState, Shared,
     VideoMode, Worker, ZoomRange, parse_usb_ids,
@@ -812,6 +813,7 @@ fn control_loop(
     // The control must be used from the multithreaded apartment.
     let _com = MfThread::init();
     let mut sleep_polled = Instant::now();
+    let mut sleep_readback = SleepReadback::default();
     let mut preset_retries = 0;
     loop {
         let mut wake = sleep_polled + Duration::from_secs(1);
@@ -837,6 +839,7 @@ fn control_loop(
                         Ok(()) => {
                             status.sleeping = sleep;
                             sleep_polled = Instant::now();
+                            sleep_readback.sent(sleep, sleep_polled);
                             preset_retries = 0;
                             zoom_refresh = if sleep {
                                 None
@@ -859,7 +862,10 @@ fn control_loop(
             }
         }
         if sleep_polled.elapsed() >= Duration::from_secs(1) {
-            if let Some(sleeping) = xu.read_sleep() {
+            if let Some(sleeping) = xu
+                .read_sleep()
+                .and_then(|sleeping| sleep_readback.observe(sleeping, Instant::now()))
+            {
                 let mut status = shared.status();
                 if status.sleeping != sleeping {
                     status.sleeping = sleeping;

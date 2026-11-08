@@ -11,6 +11,7 @@
 #![cfg_attr(not(windows), allow(dead_code))]
 
 mod preview;
+mod sleep;
 mod standby;
 mod vendor;
 

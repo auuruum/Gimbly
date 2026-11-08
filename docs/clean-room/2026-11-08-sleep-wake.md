@@ -73,3 +73,37 @@ frames before live video, with no OBSBOT standby frames detected.
 Three additional cycles checked at the shared-memory output also
 showed Gimbly frames after the sleep flag cleared and then live video.
 Discord itself was not verified with the fix.
+
+## Sleep status flicker
+
+**Source and method (2026-11-08):** Gimbly capture and control trace on a
+Tiny 3 Lite (`3564:ff04`, firmware release unknown), Windows 10 build
+19045, NV12 1920x1080 at 30 fps. The probe used the same sleep and wake
+commands as the panel, with the preview frame consumer and virtual
+camera active. FFmpeg read the virtual camera through DirectShow and
+logged frame checksums without recording video. OBSBOT Center was not
+used for this test.
+
+**Observed:** Before the fix, all three Sleep commands succeeded and the
+camera began sending its standby picture. Selector 6 still reported
+awake at the first two polls (about one and two seconds after Sleep) and
+reported asleep at the third. Gimbly cleared its sleeping state between
+the first and third polls without sending a wake command. The raw
+standby picture persisted throughout that interval.
+
+**Inferred:** A successful write and the sleep status flag can disagree
+during a transition. Gimbly keeps the requested state until the device
+confirms it, or until five seconds pass and a valid poll can correct it.
+An explicit Resume can replace a pending Sleep immediately.
+
+**Unknown:** Why the camera reports awake during this interval, and
+whether other models or firmware releases behave the same way.
+
+**Test:** `camera::sleep::tests` covers the observed poll sequence, a
+Resume before Sleep is confirmed, and a command that never confirms.
+In two three-cycle runs with the fix, the displayed state stayed asleep
+until Resume despite the same delayed readback. In the DirectShow run,
+the client received a continuous placeholder through each Sleep and
+wake transition, then live frames. The probe also exercised joystick
+commands with both frame consumers active. Direct interaction with the
+panel and Video Preview was not verified.

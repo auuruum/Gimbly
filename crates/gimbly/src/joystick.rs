@@ -271,7 +271,6 @@ pub fn overlay(ui: &mut Ui, rect: Rect, state: &mut OverlayState, enabled: bool)
             state.released = None;
         }
     }
-    response.on_hover_text("Drag to turn the camera. Hold Shift for fine control (1/3 speed).");
     drag
 }
 

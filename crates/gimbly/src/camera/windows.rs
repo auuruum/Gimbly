@@ -2,18 +2,17 @@
 //!
 //! Capture uses an `IMFSourceReader` with advanced video processing enabled,
 //! so Media Foundation decodes the camera's MJPEG stream and hands us NV12.
-//! Zoom uses the standard UVC camera-terminal control through
-//! `IAMCameraControl`, which the Media Foundation video capture source
-//! exposes. Vendor commands (sleep, gimbal, presets) are not implemented yet.
+//! Standard zoom uses `IAMCameraControl`. The Tiny 3 Lite uses vendor
+//! controls through the camera's UVC extension unit.
 
 use super::preview::{self, YuvRange};
 use super::vendor;
 use super::{
-    CaptureConfig, Command, DeviceInfo, GimbalCommand, SessionState, VideoMode, Worker, ZoomRange,
-    parse_usb_ids,
+    CaptureConfig, Command, DeviceInfo, GimbalCommand, PRESET_SLOTS, Preset, SessionState, Shared,
+    VideoMode, Worker, ZoomRange, parse_usb_ids,
 };
 use gimbly_vcam_shm::{Nv12View, SharedMemory, now_ms};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use windows::Win32::Media::DirectShow::{
     CameraControl_Flags_Manual, CameraControl_Zoom, IAMCameraControl,
 };
@@ -338,6 +337,19 @@ pub fn probe_controls(device: &DeviceInfo, script: Vec<String>) -> Result<Vec<St
                     // every 100 ms like the official app does.
                     let words: Vec<&str> = step.split(':').collect();
                     let vendor_step = match (xu.as_mut(), words.as_slice()) {
+                        (Some(xu), ["status"]) => {
+                            lines.push(format!("selector 6: {:?}", xu.get(vendor::SELECTOR_VIEW)));
+                            lines.push(format!("vendor zoom: {:?}", xu.read_zoom()));
+                            lines.push(format!("presets: {:?}", xu.presets()));
+                            Some(Ok(()))
+                        }
+                        (Some(xu), ["ptz"]) => {
+                            lines.push(format!(
+                                "current position bytes: {:?}",
+                                xu.request(vendor::READ_POSITION, Vec::new())
+                            ));
+                            Some(Ok(()))
+                        }
                         (Some(xu), ["move"]) => Some(xu.send(vendor::manual_move(true))),
                         (Some(xu), ["stop"]) => Some(
                             xu.send(vendor::speed(0.0, 0.0))
@@ -537,6 +549,7 @@ struct Xu {
     control: IKsControl,
     node: u32,
     sender: vendor::Sender,
+    last_write: Option<Instant>,
 }
 
 impl Xu {
@@ -552,6 +565,7 @@ impl Xu {
                 control: control.clone(),
                 node,
                 sender: vendor::Sender::default(),
+                last_write: None,
             })
             .find(|xu| xu.get(vendor::SELECTOR_COMMAND).is_ok())
     }
@@ -582,16 +596,181 @@ impl Xu {
         Ok(returned)
     }
 
-    fn send(&mut self, message: vendor::Message) -> Result<(), String> {
-        let mut block = self.sender.number(message);
-        self.property(vendor::SELECTOR_COMMAND, KSPROPERTY_TYPE_SET, &mut block)
-            .map(|_| ())
+    fn send(&mut self, mut message: vendor::Message) -> Result<(), String> {
+        self.sender.number(&mut message);
+        self.set(vendor::SELECTOR_COMMAND, &mut message.encode())
     }
 
-    fn get(&self, selector: u32) -> Result<[u8; vendor::MESSAGE_LEN], String> {
+    fn set(&mut self, selector: u32, block: &mut [u8; vendor::MESSAGE_LEN]) -> Result<(), String> {
+        // Separate successive writes, as in the capture. The device needs
+        // time to consume a SET before another message replaces it.
+        if let Some(delay) = self
+            .last_write
+            .and_then(|last| Duration::from_millis(20).checked_sub(last.elapsed()))
+        {
+            std::thread::sleep(delay);
+        }
+        let result = self
+            .property(selector, KSPROPERTY_TYPE_SET, block)
+            .map(|_| ());
+        self.last_write = Some(Instant::now());
+        result
+    }
+
+    fn get(&self, selector: u32) -> Result<([u8; vendor::MESSAGE_LEN], usize), String> {
         let mut block = [0u8; vendor::MESSAGE_LEN];
-        self.property(selector, KSPROPERTY_TYPE_GET, &mut block)?;
-        Ok(block)
+        let len = self.property(selector, KSPROPERTY_TYPE_GET, &mut block)? as usize;
+        if len > block.len() {
+            return Err("Camera returned an oversized extension unit block".into());
+        }
+        Ok((block, len))
+    }
+
+    fn request(&mut self, command: [u8; 2], data: Vec<u8>) -> Result<Vec<u8>, String> {
+        let mut request = vendor::Message::new(vendor::GIMBAL, command, data).requesting_reply();
+        self.sender.number(&mut request);
+        self.set(vendor::SELECTOR_COMMAND, &mut request.encode())?;
+        // The XU may still return an older reply before this one is ready.
+        std::thread::sleep(Duration::from_millis(40));
+        for _ in 0..5 {
+            if let Ok((block, len)) = self.get(vendor::SELECTOR_COMMAND)
+                && let Some(reply) = vendor::Message::decode(&block[..len])
+                && reply.matches_reply(&request)
+            {
+                return Ok(reply.data);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Err(format!(
+            "No matching camera reply for {:02x} {:02x}",
+            command[0], command[1]
+        ))
+    }
+
+    fn read_sleep(&self) -> Option<bool> {
+        let (block, len) = self.get(vendor::SELECTOR_VIEW).ok()?;
+        vendor::sleeping(&block[..len])
+    }
+
+    fn read_zoom(&mut self) -> Result<f32, String> {
+        vendor::read_zoom(&self.request(vendor::READ_ZOOM, Vec::new())?)
+            .ok_or_else(|| "Camera returned an invalid zoom ratio".into())
+    }
+
+    fn preset_ids(&mut self) -> Result<Vec<u8>, String> {
+        let data = self.request(vendor::LIST_PRESETS, Vec::new())?;
+        vendor::preset_ids(&data).ok_or("Camera returned an invalid preset list")?;
+        Ok(data)
+    }
+
+    fn preset_name(&mut self, id: u8) -> Result<String, String> {
+        let name = self.request(vendor::READ_PRESET_NAME, vendor::preset_id(id))?;
+        vendor::read_preset_name(&name)
+            .ok_or_else(|| "Camera returned an invalid preset name".into())
+    }
+
+    fn presets(&mut self) -> Result<Vec<Preset>, String> {
+        self.preset_ids()?
+            .into_iter()
+            .map(|id| {
+                let mut name = self.preset_name(id)?;
+                if name.trim().is_empty() {
+                    name = format!("Preset{}", u16::from(id) + 1);
+                }
+                let mut data = vendor::preset_id(id);
+                data.push(0);
+                let data = self.request(vendor::READ_PRESET_POSITION, data)?;
+                let position = vendor::read_preset_position(&data, id)
+                    .ok_or("Camera returned an invalid stored preset position")?;
+                Ok(Preset {
+                    id,
+                    name,
+                    position: Some(position),
+                })
+            })
+            .collect()
+    }
+
+    fn store_preset(&mut self, id: u8) -> Result<(), String> {
+        let current = self.request(vendor::READ_POSITION, Vec::new())?;
+        let ratio = self.read_zoom()?;
+        let message = vendor::store_preset(id, &current, ratio)
+            .ok_or("Camera returned an invalid gimbal position")?;
+        self.send(message)
+    }
+
+    fn preset_change(&mut self, command: GimbalCommand) -> Result<(), String> {
+        match command {
+            GimbalCommand::AddPreset => {
+                let ids = self.preset_ids()?;
+                let id = (0..PRESET_SLOTS as u8)
+                    .find(|id| !ids.contains(id))
+                    .filter(|_| ids.len() < PRESET_SLOTS)
+                    .ok_or("All preset slots are occupied")?;
+                let name = vendor::preset_name(id, &format!("Preset{}", id + 1))?;
+                self.store_preset(id)?;
+                self.send(name)
+            }
+            GimbalCommand::UpdatePreset { id } => {
+                // Writing the position also overwrites the stored name.
+                let name = self.preset_name(id)?;
+                let name = vendor::preset_name(id, &name)?;
+                self.store_preset(id)?;
+                self.send(name)
+            }
+            GimbalCommand::RenamePreset { id, name } => self.send(vendor::preset_name(id, &name)?),
+            GimbalCommand::DeletePreset(_) => {
+                self.send(vendor::for_gimbal(&command).ok_or("Unsupported preset command")?)
+            }
+            _ => Err("Unsupported preset command".into()),
+        }
+    }
+
+    fn gimbal(
+        &mut self,
+        command: GimbalCommand,
+        shared: &Shared,
+        zoom_refresh: &mut Option<Instant>,
+    ) -> Result<(), String> {
+        match command {
+            GimbalCommand::SetFov(fov) => {
+                if shared.status().fov == Some(fov) {
+                    return Ok(());
+                }
+                self.set(vendor::SELECTOR_VIEW, &mut vendor::field_of_view(fov))?;
+                shared.status().fov = Some(fov);
+                *zoom_refresh = Some(Instant::now() + Duration::from_secs(2));
+            }
+            GimbalCommand::ZoomRatio(ratio) => {
+                let (message, ratio) = vendor::zoom(ratio).ok_or("Zoom ratio is out of range")?;
+                if shared.status().zoom_ratio == Some(ratio) && shared.status().fov.is_none() {
+                    return Ok(());
+                }
+                self.send(message)?;
+                let mut status = shared.status();
+                status.zoom_ratio = Some(ratio);
+                status.fov = None;
+                *zoom_refresh = None;
+            }
+            GimbalCommand::AddPreset
+            | GimbalCommand::UpdatePreset { .. }
+            | GimbalCommand::RenamePreset { .. }
+            | GimbalCommand::DeletePreset(_) => {
+                let change = self.preset_change(command);
+                let presets = self.presets();
+                shared.status().presets = presets.as_ref().ok().cloned();
+                change?;
+                presets?;
+            }
+            _ => {
+                self.send(vendor::for_gimbal(&command).ok_or("Unsupported gimbal command")?)?;
+                if matches!(command, GimbalCommand::TriggerPreset(_)) {
+                    shared.status().fov = None;
+                    *zoom_refresh = Some(Instant::now() + Duration::from_secs(2));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -689,6 +868,25 @@ fn capture_loop(
     config: CaptureConfig,
     worker: &Worker,
 ) -> Result<(), String> {
+    // Read the initial controls before Media Foundation changes stream types.
+    // Only the Tiny 3 Lite has been checked against the official app so far.
+    let mut xu = (device.is_obsbot() && device.usb_product_id == Some(TINY_3_LITE))
+        .then(|| Xu::open(source))
+        .flatten();
+    let mut zoom_refresh = None;
+    if let Some(xu) = xu.as_mut() {
+        let sleeping = xu.read_sleep();
+        let ratio = xu.read_zoom().ok();
+        let presets = xu.presets().ok();
+        if ratio.is_none() {
+            zoom_refresh = Some(Instant::now() + Duration::from_secs(1));
+        }
+        let mut status = worker.shared.status();
+        status.sleeping = sleeping.unwrap_or(false);
+        status.zoom_ratio = ratio;
+        status.presets = presets;
+    }
+
     // SAFETY: plain Media Foundation setup calls with valid arguments.
     let reader = unsafe {
         let mut attributes = None;
@@ -725,17 +923,18 @@ fn capture_loop(
     set_nv12_output(&reader, width, height)?;
     let mut geometry = output_geometry(&reader)?;
 
-    let zoom = Zoom::open(source);
-    let mut xu = device.is_obsbot().then(|| Xu::open(source)).flatten();
+    let zoom = if xu.is_none() {
+        Zoom::open(source)
+    } else {
+        None
+    };
     {
         let mut status = worker.shared.status();
         status.format = Some(format!("{} {width}x{height} @ {fps:.0} fps", mode.codec));
         status.output = Some(config.output_size(width, height));
         status.zoom_range = zoom.as_ref().map(|z| z.range);
-        status.set_zoom(zoom.as_ref().and_then(Zoom::get));
-        // Only the Tiny 3 Lite was checked against the official app so far.
-        let verified = device.usb_product_id == Some(TINY_3_LITE);
-        status.vendor_control = xu.is_some() && verified;
+        status.zoom = zoom.as_ref().and_then(Zoom::get);
+        status.vendor_control = xu.is_some();
         status.vendor_control_untested = device.is_obsbot() && !status.vendor_control;
     }
 
@@ -743,6 +942,8 @@ fn capture_loop(
     let mut fps_window = (Instant::now(), 0u32);
     let mut first_frame = true;
     let mut zoom_polled = Instant::now();
+    let mut sleep_polled = Instant::now();
+    let mut preset_retries = 0;
     let mut snapshot_pending = false;
     let mut transform = config.transform;
     let mut turned_buf = Vec::new();
@@ -771,21 +972,68 @@ fn capture_loop(
                 }
                 Command::Snapshot => snapshot_pending = true,
                 Command::SetTransform(t) => transform = t,
-                Command::SetSleep(_) => {
-                    worker.shared.status().error = Some("Sleep is not implemented yet".into())
-                }
-                Command::Gimbal(GimbalCommand::ZoomRatio(ratio)) if zoom.is_some() => {
-                    zoom_request = zoom.as_ref().map(|z| z.range.value_for_ratio(ratio))
+                Command::SetSleep(sleep) => {
+                    let result = xu
+                        .as_mut()
+                        .ok_or_else(|| "Sleep is unsupported for this camera".to_string())
+                        .and_then(|xu| xu.send(vendor::sleep(sleep)));
+                    let mut status = worker.shared.status();
+                    match result {
+                        Ok(()) => {
+                            status.sleeping = sleep;
+                            sleep_polled = Instant::now();
+                            preset_retries = 0;
+                            zoom_refresh =
+                                (!sleep).then(|| Instant::now() + Duration::from_secs(3));
+                        }
+                        Err(error) => status.error = Some(error),
+                    }
+                    drop(status);
+                    (worker.repaint)();
                 }
                 Command::Gimbal(command) => {
-                    let result = match (xu.as_mut(), vendor::for_gimbal(&command)) {
-                        (Some(xu), Some(message)) => xu.send(message),
-                        (None, _) => Err("This camera does not accept gimbal commands".into()),
-                        (_, None) => Err(format!("{command:?} is not implemented yet")),
+                    let result = match xu.as_mut() {
+                        Some(xu) => xu.gimbal(command, &worker.shared, &mut zoom_refresh),
+                        None => Err("This camera does not accept gimbal commands".into()),
                     };
                     if let Err(e) = result {
                         worker.shared.status().error = Some(e);
                     }
+                }
+            }
+        }
+        if let Some(xu) = xu.as_mut() {
+            if sleep_polled.elapsed() >= Duration::from_secs(1) {
+                if let Some(sleeping) = xu.read_sleep() {
+                    let mut status = worker.shared.status();
+                    if status.sleeping != sleeping {
+                        status.sleeping = sleeping;
+                        preset_retries = 0;
+                        zoom_refresh = (!sleeping).then(|| Instant::now() + Duration::from_secs(2));
+                        drop(status);
+                        (worker.repaint)();
+                    }
+                }
+                sleep_polled = Instant::now();
+                // Opening or waking the stream can briefly interrupt replies.
+                let retry_presets = {
+                    let status = worker.shared.status();
+                    if status.presets.is_some() {
+                        preset_retries = 0;
+                    }
+                    !status.sleeping && status.presets.is_none() && preset_retries < 3
+                };
+                if retry_presets {
+                    preset_retries += 1;
+                    if let Ok(presets) = xu.presets() {
+                        worker.shared.status().presets = Some(presets);
+                    }
+                }
+            }
+            if zoom_refresh.is_some_and(|when| Instant::now() >= when) {
+                zoom_refresh = None;
+                if let Ok(ratio) = xu.read_zoom() {
+                    worker.shared.status().zoom_ratio = Some(ratio);
                 }
             }
         }
@@ -796,7 +1044,7 @@ fn capture_loop(
             };
             let mut status = worker.shared.status();
             match result {
-                Ok(v) => status.set_zoom(Some(v)),
+                Ok(v) => status.zoom = Some(v),
                 Err(e) => status.error = Some(e),
             }
             zoom_polled = Instant::now();
@@ -805,7 +1053,7 @@ fn capture_loop(
             .filter(|_| zoom_polled.elapsed().as_millis() >= 250)
         {
             // The camera zooms smoothly; keep its reported position current.
-            worker.shared.status().set_zoom(z.get());
+            worker.shared.status().zoom = z.get();
             zoom_polled = Instant::now();
         }
 

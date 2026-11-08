@@ -6,7 +6,7 @@
 //! `--mode WxH@FPS` (e.g. `3840x2160@30`) captures that mode instead of
 //! stepping the zoom; `--portrait` adds the 9:16 crop.
 
-use crate::camera::{self, CaptureConfig, Command, GimbalCommand, SessionState};
+use crate::camera::{self, CaptureConfig, Command, Fov, GimbalCommand, SessionState};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -29,45 +29,107 @@ fn next_frame(session: &camera::Session) -> Option<camera::PreviewFrame> {
     None
 }
 
-/// `--gimbal DIR PITCH:YAW:MS ...`: turns the gimbal through the same
-/// commands the joystick sends and saves a preview frame to DIR before the
-/// first turn and after each one.
+fn control_step(step: &str) -> Option<Command> {
+    let parts: Vec<_> = step.splitn(3, ':').collect();
+    let command = match parts.as_slice() {
+        ["sleep"] => return Some(Command::SetSleep(true)),
+        ["wake"] => return Some(Command::SetSleep(false)),
+        ["reset"] => GimbalCommand::Reset,
+        ["wide"] => GimbalCommand::SetFov(Fov::Wide),
+        ["medium"] => GimbalCommand::SetFov(Fov::Medium),
+        ["narrow"] => GimbalCommand::SetFov(Fov::Narrow),
+        ["zoom", ratio] => GimbalCommand::ZoomRatio(ratio.parse().ok()?),
+        ["go", id] => GimbalCommand::TriggerPreset(id.parse().ok()?),
+        ["add"] => GimbalCommand::AddPreset,
+        ["update", id] => GimbalCommand::UpdatePreset {
+            id: id.parse().ok()?,
+        },
+        ["delete", id] => GimbalCommand::DeletePreset(id.parse().ok()?),
+        ["rename", id, name] => GimbalCommand::RenamePreset {
+            id: id.parse().ok()?,
+            name: (*name).to_owned(),
+        },
+        _ => return None,
+    };
+    Some(Command::Gimbal(command))
+}
+
+/// `--gimbal DIR STEP ...` sends the same commands as the panel and saves
+/// a frame before and after each step. `PITCH:YAW:MS` moves the joystick.
 fn gimbal(session: &camera::Session, args: &[String]) -> i32 {
     let Some((dir, turns)) = args.split_first() else {
-        eprintln!("usage: --gimbal DIR PITCH:YAW:MS ...");
+        eprintln!("usage: --gimbal DIR STEP ...");
         return 2;
     };
     let save = |step: usize| {
-        let saved = next_frame(session)
+        let status = session.status();
+        let frame = if status.sleeping {
+            session.send(Command::Snapshot);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut snapshot = session.take_snapshot();
+            while snapshot.is_none() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+                snapshot = session.take_snapshot();
+            }
+            snapshot
+        } else {
+            next_frame(session)
+        };
+        let saved = frame
             .ok_or("no frame".to_string())
             .and_then(|f| crate::snapshot::save(&f, Path::new(dir), [0, 0, 0, 0, 0, step as u16]));
         let status = session.status();
         println!(
-            "step {step}: {saved:?}, vendor control {}, error {:?}",
-            status.vendor_control, status.error
+            "step {step}: {saved:?}, vendor control {}, sleeping {}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
+            status.vendor_control,
+            status.sleeping,
+            status.zoom_ratio,
+            status.fov,
+            status.presets,
+            status.error
         );
+        saved.is_ok() && status.error.is_none() && status.vendor_control
     };
     std::thread::sleep(Duration::from_secs(2));
-    save(0);
+    if !save(0) {
+        return 1;
+    }
     for (step, turn) in turns.iter().enumerate() {
-        let parts: Vec<f32> = turn.split(':').filter_map(|p| p.parse().ok()).collect();
-        let [pitch, yaw, ms] = parts[..] else {
-            eprintln!("bad turn {turn:?}");
-            return 2;
-        };
-        session.send(Command::Gimbal(GimbalCommand::Drag(true)));
-        let until = Instant::now() + Duration::from_secs_f32(ms / 1000.0);
-        while Instant::now() < until {
-            session.send(Command::Gimbal(GimbalCommand::Speed { pitch, yaw }));
-            std::thread::sleep(crate::joystick::REPEAT_EVERY);
+        println!("{turn}");
+        if let Some(command) = control_step(turn) {
+            session.send(command);
+        } else {
+            let parts: Vec<_> = turn.split(':').collect();
+            let [pitch, yaw, ms] = parts.as_slice() else {
+                eprintln!("bad step {turn:?}");
+                return 2;
+            };
+            let (Ok(pitch), Ok(yaw), Ok(ms)) =
+                (pitch.parse::<f32>(), yaw.parse::<f32>(), ms.parse::<u64>())
+            else {
+                eprintln!("bad turn {turn:?}");
+                return 2;
+            };
+            if !pitch.is_finite() || !yaw.is_finite() || ms > 60_000 {
+                eprintln!("bad turn {turn:?}");
+                return 2;
+            }
+            session.send(Command::Gimbal(GimbalCommand::Drag(true)));
+            let until = Instant::now() + Duration::from_millis(ms);
+            while Instant::now() < until {
+                session.send(Command::Gimbal(GimbalCommand::Speed { pitch, yaw }));
+                std::thread::sleep(crate::joystick::REPEAT_EVERY);
+            }
+            session.send(Command::Gimbal(GimbalCommand::Speed {
+                pitch: 0.0,
+                yaw: 0.0,
+            }));
+            session.send(Command::Gimbal(GimbalCommand::Drag(false)));
         }
-        session.send(Command::Gimbal(GimbalCommand::Speed {
-            pitch: 0.0,
-            yaw: 0.0,
-        }));
-        session.send(Command::Gimbal(GimbalCommand::Drag(false)));
-        std::thread::sleep(Duration::from_millis(1500));
-        save(step + 1);
+        std::thread::sleep(Duration::from_millis(3500));
+        if !save(step + 1) {
+            return 1;
+        }
     }
     0
 }
@@ -186,7 +248,14 @@ pub fn run() -> i32 {
                     vec![r.min, r.snap((r.min + r.max) / 2), r.max, r.default]
                 }
                 None => {
-                    println!("no zoom control reported");
+                    if status.vendor_control {
+                        println!(
+                            "vendor zoom: {:?}; use --gimbal DIR zoom:RATIO to exercise it",
+                            status.zoom_ratio
+                        );
+                    } else {
+                        println!("no zoom control reported");
+                    }
                     Vec::new()
                 }
             });

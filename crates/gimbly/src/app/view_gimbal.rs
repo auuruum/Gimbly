@@ -5,7 +5,10 @@
 //! Gimbly's own.
 
 use super::{GimblyApp, NOT_YET};
-use crate::camera::{Command, Fov, GimbalCommand, Preset, SessionState, ZOOM_RATIO_MAX};
+use crate::camera::{
+    Command, Fov, GimbalCommand, PRESET_NAME_MAX, PRESET_SLOTS, Preset, SessionState,
+    ZOOM_RATIO_MAX,
+};
 use crate::gimbal::{self, PanelPull, SpeedMode};
 use crate::joystick::{self, Drag, DragState};
 use crate::theme::*;
@@ -17,8 +20,6 @@ use eframe::egui::{
 use egui_phosphor::regular as icon;
 use std::time::{Duration, Instant};
 
-/// Presets the Preset section shows (OBSBOT Center has three slots).
-const PRESET_SLOTS: usize = 3;
 /// How long the zoom controls keep showing the value the user picked while
 /// the camera zooms towards it.
 const ZOOM_HOLD: Duration = Duration::from_millis(1500);
@@ -194,7 +195,7 @@ impl GimblyApp {
             top: 20,
             bottom: 20,
         };
-        let ready = self.gimbal_ready();
+        let ready = self.gimbal_ready() && self.status.presets.is_some();
         let presets = self.status.presets.clone().unwrap_or_default();
         band(ui, SECTION, margin, |ui| {
             let gap = 16.0;
@@ -301,10 +302,7 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
                 }
             });
         match chosen {
-            Some("Update PTZ") => self.gimbal(GimbalCommand::UpdatePreset {
-                id: preset.id,
-                name: preset.name.clone(),
-            }),
+            Some("Update PTZ") => self.gimbal(GimbalCommand::UpdatePreset { id: preset.id }),
             Some("Delete") => self.gimbal(GimbalCommand::DeletePreset(preset.id)),
             Some("Rename") => self.gimbal_ui.rename = Some((preset.id, preset.name.clone())),
             _ => {}
@@ -337,7 +335,7 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
                 let edit = ui.add(
                     egui::TextEdit::singleline(&mut text)
                         .desired_width(178.0)
-                        .char_limit(protocol_name_limit()),
+                        .char_limit(PRESET_NAME_MAX),
                 );
                 edit.request_focus();
                 let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -615,7 +613,7 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
             return;
         };
         let ratio = (ratio.clamp(1.0, max) * 100.0).round() / 100.0;
-        if self.gimbal_ui.zoom_target.map(|(r, _)| r) == Some(ratio) {
+        if self.shown_zoom_ratio() == Some(ratio) {
             return;
         }
         self.gimbal_ui.zoom_target = Some((ratio, Instant::now()));
@@ -665,11 +663,6 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
             self.set_zoom_ratio(ratio + direction * ZOOM_STEP);
         }
     }
-}
-
-/// Longest preset name that fits one vendor message.
-fn protocol_name_limit() -> usize {
-    40
 }
 
 /// Horizontal slider with a 4-px track and a white round handle; `fill`

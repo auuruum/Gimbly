@@ -32,9 +32,8 @@
   selector 2, always 60 bytes. For commands that expect an answer it reads
   selector 2 back with `GET_CUR` (60 bytes). It asks `GET_LEN` first each
   time.
-- Selector 6 is read (`GET_CUR`, 60 bytes) roughly once a second; one byte
-  of it changes between two values over the capture (meaning **unknown**,
-  possibly the sleep state).
+- Selector 6 is read (`GET_CUR`, 60 bytes) roughly once a second. See the
+  [sleep/wake notes](2026-11-08-sleep-wake.md) for its status block.
 - Selector 4 carries file-like transfers (names of image and video files
   inside the camera). Not needed; not used.
 - Message layout (little-endian):
@@ -42,15 +41,15 @@
   | bytes | content |
   | --- | --- |
   | 0 | `aa` |
-  | 1 | flags: `01`, `21`, `25` from the app; `29` in replies |
+  | 1 | flags: `01`, `05`, `21`, `25` from the app; `29` in replies |
   | 2 | sequence number, counting up per channel |
   | 3 | channel (the app used 1, 2, 12, 13 at the same time) |
   | 4-5 | `0c 00` |
   | 6-7 | checksum of bytes 0-11 |
   | 8, 9 | source, destination (`0a` the app; `04` and `02` in the camera); replies swap them |
   | 10-11 | command |
-  | 12-13 | data length |
-  | 14-15 | checksum of the data, `00 00` when there is no data |
+  | 12-13 | data length, present when flag `20` is set |
+  | 14-15 | checksum of the data, present when flag `20` is set |
   | 16- | data; the rest of the 60 bytes is left over from earlier messages |
 
 - Both checksums are CRC-16 with the reflected polynomial 0x8005, initial
@@ -58,22 +57,28 @@
   with bytes 6-7 taken as zero; the data checksum covers bytes 12-15 (bytes
   14-15 as zero) plus the data. Found by fitting the CRC parameters to the
   captured messages; all 1 156 intact messages of the capture match.
-- The camera did not care about the sequence number in the black-box test:
+- New captures of Reset, zoom, sleep and presets on the same device (USB
+  descriptor revision `0x0510`) show that bytes 12 onward can retain old data
+  when bit `20` is clear. Replies matched the request's command, sequence and
+  channel, with the source and destination swapped. The GET requests
+  generally followed the SET by roughly 40–60 ms.
+- The camera did not care about the sequence number for joystick writes:
   messages with sequence 0 every time were carried out.
 
 ## Inferred
 
-- Flag `0x25` marks commands sent without waiting for a reply (no `GET_CUR`
-  followed them), `0x08` marks replies.
+- Bit `0x20` marks messages with data, `0x04` marks commands sent without
+  waiting for a reply, and `0x08` marks replies.
 - Byte 4-5 is the length of the part covered by the header checksum.
 
 ## Unknown
 
-- The meaning of most command IDs seen while idle (`04 01`, `84 54`,
-  `04 3d`, `02 1d`, ...), probably status polling.
+- The meaning of some command IDs seen while idle (`84 54`, `02 1d`, ...).
+  See the [preset notes](2026-11-08-presets.md) for `04 3d` and `04 01`.
 - Firmware differences between camera models.
 
 ## Test
 
-`camera::vendor::tests` encodes two captured messages byte for byte, decodes
-a captured reply, and checks that damaged messages are rejected.
+`camera::vendor::tests` compares encoded messages with captured bytes,
+checks reply matching, rejects malformed payloads and verifies that
+no-data commands ignore stale payload bytes.

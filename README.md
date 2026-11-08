@@ -16,17 +16,18 @@ Tech.
 
 ## Status
 
-Early development. Only Windows has a camera backend so far; Linux and macOS
-build but cannot capture yet.
+Early development. Windows has a camera backend. Linux and macOS builds
+currently lack camera capture.
 
-Works on Windows: the control panel, live video preview with rotate and
-mirror, snapshots, zoom, the virtual camera (DirectShow, 64-bit apps), and
-Software Settings. On the OBSBOT Tiny 3 Lite the gimbal joystick and
-drag-to-turn in the Video Preview work too.
+The Windows app includes the control panel, live video preview with rotate
+and mirror, snapshots, standard UVC zoom, the virtual camera (DirectShow,
+64-bit apps), and Software Settings.
 
-Not implemented yet: gimbal reset, sleep/wake, field of view, presets, AI
-tracking, image settings, recording. Their controls are visible but either
-disabled or report that they are not implemented.
+On the OBSBOT Tiny 3 Lite, Gimbly also supports the gimbal joystick,
+drag-to-turn in Video Preview, reset, Wide/Medium/Narrow field of view,
+1×–4× zoom, sleep/wake, and camera presets. See the
+[tested device matrix](docs/devices.md) for hardware results.
+AI tracking, image settings and recording are planned.
 
 ## Build and run
 

@@ -69,20 +69,6 @@ impl ZoomRange {
         let steps = (clamped - self.min + self.step / 2) / self.step;
         (self.min + steps * self.step).min(self.max)
     }
-
-    // shortcut: maps 1x..ZOOM_RATIO_MAX linearly onto the UVC zoom range;
-    // switch to the official app's vendor zoom once it is captured.
-    /// Zoom ratio shown for a UVC zoom value.
-    pub fn ratio(&self, value: i32) -> f32 {
-        let span = (self.max - self.min).max(1) as f32;
-        1.0 + (value - self.min) as f32 / span * (ZOOM_RATIO_MAX - 1.0)
-    }
-
-    /// UVC zoom value for a ratio between 1 and [`ZOOM_RATIO_MAX`].
-    pub fn value_for_ratio(&self, ratio: f32) -> i32 {
-        let t = ((ratio - 1.0) / (ZOOM_RATIO_MAX - 1.0)).clamp(0.0, 1.0);
-        self.snap(self.min + ((self.max - self.min) as f32 * t).round() as i32)
-    }
 }
 
 /// One native capture format reported by the camera.
@@ -198,14 +184,6 @@ pub struct SessionStatus {
     pub error: Option<String>,
 }
 
-impl SessionStatus {
-    /// Records a UVC zoom reading and the ratio it stands for.
-    fn set_zoom(&mut self, value: Option<i32>) {
-        self.zoom = value;
-        self.zoom_ratio = self.zoom_range.zip(value).map(|(r, v)| r.ratio(v));
-    }
-}
-
 #[derive(Debug)]
 pub enum Command {
     /// Zoom through the standard UVC control (cameras without OBSBOT vendor
@@ -216,15 +194,12 @@ pub enum Command {
     Snapshot,
     SetTransform(Transform),
     /// Put the camera to sleep (`true`) or wake it up.
-    #[allow(dead_code)] // read once vendor control is implemented
     SetSleep(bool),
     /// An OBSBOT vendor command (gimbal, zoom ratio, presets).
-    #[allow(dead_code)] // read once vendor control is implemented
     Gimbal(GimbalCommand),
 }
 
-/// Commands for OBSBOT cameras with a gimbal, carried out off the capture
-/// thread because some of them wait for the camera's answer.
+/// Commands for OBSBOT cameras with a gimbal, carried out off the UI thread.
 #[derive(Clone, Debug, PartialEq)]
 pub enum GimbalCommand {
     /// A joystick drag started (`true`) or ended.
@@ -245,7 +220,6 @@ pub enum GimbalCommand {
     /// Replace preset `id` with the current position, keeping its name.
     UpdatePreset {
         id: u8,
-        name: String,
     },
     DeletePreset(u8),
     RenamePreset {
@@ -268,6 +242,10 @@ impl Fov {
 
 /// Largest zoom ratio of the Tiny 3 Lite.
 pub const ZOOM_RATIO_MAX: f32 = 4.0;
+/// Number of preset slots on the Tiny 3 Lite.
+pub const PRESET_SLOTS: usize = 3;
+/// Bytes available for a preset name in one vendor message.
+pub const PRESET_NAME_MAX: usize = 40;
 
 /// A stored gimbal position as listed in the Preset section.
 #[derive(Clone, Debug, PartialEq)]
@@ -465,19 +443,5 @@ mod tests {
         assert_eq!(range.snap(125), 130);
         let unit = ZoomRange { step: 1, ..range };
         assert_eq!(unit.snap(123), 123);
-    }
-
-    #[test]
-    fn zoom_ratio_maps_onto_the_uvc_range() {
-        let range = ZoomRange {
-            min: 0,
-            max: 100,
-            step: 1,
-            default: 0,
-        };
-        assert_eq!(range.value_for_ratio(1.0), 0);
-        assert_eq!(range.value_for_ratio(2.5), 50);
-        assert_eq!(range.value_for_ratio(9.0), 100);
-        assert!((range.ratio(50) - 2.5).abs() < 1e-6);
     }
 }

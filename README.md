@@ -50,15 +50,6 @@ The Windows app has the control panel, live preview with rotate and mirror,
 snapshots, UVC zoom, a virtual camera (DirectShow, 64-bit apps), and
 Software Settings. AI tracking, image settings, and recording are planned.
 
-## Build
-
-```bash
-cargo build --workspace
-cargo run -p gimbly
-```
-
-Requirements and details are in [CONTRIBUTING.md](CONTRIBUTING.md).
-
 ## How it is built
 
 Gimbly is a clean-room implementation: we observe how the official app and the
@@ -69,7 +60,8 @@ is decompiled. This lowers the risk of copying; it is not a legal guarantee.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+Build instructions and the contributor guide are in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

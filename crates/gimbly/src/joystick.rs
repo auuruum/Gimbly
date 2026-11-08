@@ -200,7 +200,14 @@ impl OverlayState {
 /// and dragging shows a translucent ring centred where the drag began, with
 /// the knob under the pointer. Shift slows control; release animates only the drawing.
 pub fn overlay(ui: &mut Ui, rect: Rect, state: &mut OverlayState, enabled: bool) -> Drag {
-    let enabled = enabled && ui.is_enabled() && ui.input(|i| i.focused);
+    // Cancel on the focus-lost event, not on `!focused`: the click that
+    // focuses the preview arrives before the focus event and must start a drag.
+    let focus_lost = ui.input(|i| {
+        i.events
+            .iter()
+            .any(|e| matches!(e, egui::Event::WindowFocused(false)))
+    });
+    let enabled = enabled && ui.is_enabled() && !focus_lost;
     let response = ui.interact(
         rect,
         ui.id().with("gimbal-overlay"),
@@ -507,6 +514,43 @@ mod tests {
         let (drag, _) = frame(&ctx, &mut state, 0.04, Vec::new(), true);
         assert_eq!(drag, Drag::default());
         assert!(state.released.is_none());
+    }
+
+    #[test]
+    fn the_click_that_focuses_the_preview_starts_a_drag() {
+        let ctx = Context::default();
+        let mut state = OverlayState::default();
+        let mut unfocused = |time, events| {
+            ctx.run_ui(
+                RawInput {
+                    time: Some(time),
+                    focused: false,
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(640.0, 480.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let rect = ui.max_rect();
+                    assert_eq!(overlay(ui, rect, &mut state, true), Drag::default());
+                },
+            )
+            .textures_delta
+            .clear();
+        };
+        unfocused(0.0, vec![Event::PointerMoved(pos2(200.0, 200.0))]);
+        unfocused(0.01, vec![button(true)]);
+        let (drag, _) = frame(
+            &ctx,
+            &mut state,
+            0.02,
+            vec![
+                Event::WindowFocused(true),
+                Event::PointerMoved(pos2(240.0, 180.0)),
+            ],
+            true,
+        );
+        assert!(drag.started && drag.send);
+        assert_eq!(drag.offset, Some(vec2(40.0, -20.0)));
     }
 
     #[test]

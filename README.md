@@ -14,33 +14,33 @@ Rust with egui.
 **Unofficial.** Gimbly is not made, approved, or supported by OBSBOT or Remo
 Tech.
 
+## Supported webcams
+
+| Camera | Windows | Linux | macOS | What works |
+| --- | --- | --- | --- | --- |
+| OBSBOT Tiny 3 Lite | Tested | Not tested | Not tested | Gimbal joystick, drag-to-turn, reset, Wide/Medium/Narrow FOV, 1×–4× zoom, sleep/wake, presets, virtual camera |
+| Other OBSBOT models | Not tested | Not tested | Not tested | Standard UVC controls may work |
+
+Full test results are in [docs/devices.md](docs/devices.md). Tried another
+camera? See [CONTRIBUTING.md](CONTRIBUTING.md#tested-a-camera).
+
 ## Status
 
-Early development. Windows has a camera backend. Linux and macOS builds
+Early development. Windows has a camera backend; Linux and macOS builds
 currently lack camera capture.
 
-The Windows app includes the control panel, live video preview with rotate
-and mirror, snapshots, standard UVC zoom, the virtual camera (DirectShow,
-64-bit apps), and Software Settings.
+The Windows app has the control panel, live preview with rotate and mirror,
+snapshots, UVC zoom, a virtual camera (DirectShow, 64-bit apps), and
+Software Settings. AI tracking, image settings, and recording are planned.
 
-On the OBSBOT Tiny 3 Lite, Gimbly also supports the gimbal joystick,
-drag-to-turn in Video Preview, reset, Wide/Medium/Narrow field of view,
-1×–4× zoom, sleep/wake, and camera presets. See the
-[tested device matrix](docs/devices.md) for hardware results.
-AI tracking, image settings and recording are planned.
-
-## Build and run
-
-You need a stable Rust toolchain (1.95 or newer).
+## Build
 
 ```bash
 cargo build --workspace
 cargo run -p gimbly
 ```
 
-Build the whole workspace: the virtual camera DLL is a separate crate and
-must sit next to `gimbly.exe`. Close any other app that streams the camera
-first.
+Requirements and details are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## How it is built
 
@@ -49,7 +49,10 @@ camera behave, write that down in our own words in
 [docs/clean-room](docs/clean-room/README.md), and implement it from scratch.
 No OBSBOT code, SDK, assets, or documentation are used, and no OBSBOT software
 is decompiled. This lowers the risk of copying; it is not a legal guarantee.
-See [AGENTS.md](AGENTS.md) for the full rules.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="160" viewBox="0 0 640 160">
+  <title>Gimbly</title>
+  <defs>
+    <linearGradient id="gimbly-tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2A2D31"/>
+      <stop offset="1" stop-color="#141517"/>
+    </linearGradient>
+    <linearGradient id="gimbly-accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FF8A3D"/>
+      <stop offset="1" stop-color="#FF4D5E"/>
+    </linearGradient>
+    <radialGradient id="gimbly-iris" cx="0.4" cy="0.36" r="0.7">
+      <stop offset="0" stop-color="#5D6BFF"/>
+      <stop offset="0.55" stop-color="#26307A"/>
+      <stop offset="1" stop-color="#0B0E26"/>
+    </radialGradient>
+  </defs>
+  <!-- icon: same drawing as gimbly-icon.svg, scaled from 512 to 160 -->
+  <g transform="scale(0.3125)">
+    <rect width="512" height="512" rx="116" fill="url(#gimbly-tile)"/>
+    <path d="M362.1 149.9 A150 150 0 1 0 406 262 H330" fill="none" stroke="url(#gimbly-accent)" stroke-width="54" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="256" cy="262" r="82" fill="#0A0B0C" stroke="#3C4046" stroke-width="6.6"/>
+    <circle cx="256" cy="262" r="59" fill="url(#gimbly-iris)"/>
+    <circle cx="256" cy="262" r="24.6" fill="#05060A"/>
+    <ellipse cx="231.4" cy="237.4" rx="16.4" ry="9.8" fill="#FFFFFF" opacity="0.9" transform="rotate(-35 231.4 237.4)"/>
+    <circle cx="279" cy="283.3" r="5.7" fill="#FFFFFF" opacity="0.45"/>
+  </g>
+  <!-- wordmark "gimbly": monoline strokes on a 100-unit x-height -->
+  <g transform="translate(200 44) scale(0.72)">
+    <g fill="none" stroke="#1B1D20" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="50" cy="50" r="40"/>
+      <path d="M90 10 V100 C90 128 72 140 50 140 C34 140 22 134 14 124"/>
+      <path d="M128 10 V90"/>
+      <path d="M166 90 V40 C166 22 178 10 196 10 C214 10 226 22 226 40 V90 M226 40 C226 22 238 10 256 10 C274 10 286 22 286 40 V90"/>
+      <path d="M324 -40 V90"/>
+      <circle cx="364" cy="50" r="40"/>
+      <path d="M442 -40 V64 C442 82 450 90 468 90"/>
+      <path d="M498 10 V50 C498 74 512 90 534 90 C556 90 570 74 570 50 M570 10 V100 C570 128 552 140 530 140 C514 140 502 134 494 124"/>
+    </g>
+    <circle cx="128" cy="-28" r="15" fill="url(#gimbly-accent)"/>
+  </g>
+</svg>

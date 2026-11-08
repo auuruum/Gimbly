@@ -62,3 +62,14 @@ frames, dark live video, and a scene with similar colors. The fixture is
 synthetic. To check with the camera, open Discord's preview for Gimbly
 Virtual Camera, then use Sleep and Resume in Gimbly. The preview should
 switch directly from the Gimbly icon to live video.
+
+**Hardware check (2026-11-08):** Tiny 3 Lite, firmware release unknown,
+Windows 10 build 19045, NV12 1920x1080 at 30 fps. A local FFmpeg
+DirectShow client read Gimbly Virtual Camera while a probe sent the same
+sleep and wake commands as the panel. No video was saved. The build
+before the fix (`6657ed8`) sent 60 OBSBOT standby frames after Resume.
+With the fix (`5d47a9d`), the client received 59 Gimbly placeholder
+frames before live video, with no OBSBOT standby frames detected.
+Three additional cycles checked at the shared-memory output also
+showed Gimbly frames after the sleep flag cleared and then live video.
+Discord itself was not verified with the fix.

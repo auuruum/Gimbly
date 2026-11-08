@@ -774,6 +774,21 @@ impl Xu {
     }
 }
 
+fn run_gimbal(
+    xu: Option<&mut Xu>,
+    command: GimbalCommand,
+    shared: &Shared,
+    zoom_refresh: &mut Option<Instant>,
+) {
+    let result = match xu {
+        Some(xu) => xu.gimbal(command, shared, zoom_refresh),
+        None => Err("This camera does not accept gimbal commands".into()),
+    };
+    if let Err(e) = result {
+        shared.status().error = Some(e);
+    }
+}
+
 /// Locks a sample's buffer and exposes it as NV12 for the duration of `f`.
 fn with_nv12<R>(
     sample: &IMFSample,
@@ -952,6 +967,7 @@ fn capture_loop(
     while !worker.should_stop() {
         // Only the newest zoom request matters, e.g. while a slider is dragged.
         let mut zoom_request = None;
+        let mut speed = None;
         while let Ok(command) = worker.commands.try_recv() {
             match command {
                 Command::SetZoom(value) => zoom_request = Some(value),
@@ -991,16 +1007,19 @@ fn capture_loop(
                     drop(status);
                     (worker.repaint)();
                 }
+                // The joystick sends a speed every UI frame, faster than the
+                // camera accepts writes; sending each one would starve frames.
+                Command::Gimbal(command @ GimbalCommand::Speed { .. }) => speed = Some(command),
                 Command::Gimbal(command) => {
-                    let result = match xu.as_mut() {
-                        Some(xu) => xu.gimbal(command, &worker.shared, &mut zoom_refresh),
-                        None => Err("This camera does not accept gimbal commands".into()),
-                    };
-                    if let Err(e) = result {
-                        worker.shared.status().error = Some(e);
+                    // Keep order: a pending speed goes out before e.g. Drag(false).
+                    for command in speed.take().into_iter().chain([command]) {
+                        run_gimbal(xu.as_mut(), command, &worker.shared, &mut zoom_refresh);
                     }
                 }
             }
+        }
+        if let Some(command) = speed {
+            run_gimbal(xu.as_mut(), command, &worker.shared, &mut zoom_refresh);
         }
         if let Some(xu) = xu.as_mut() {
             if sleep_polled.elapsed() >= Duration::from_secs(1) {

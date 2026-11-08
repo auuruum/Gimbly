@@ -569,7 +569,7 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
         );
         let levels = gimbal::SPEED_LEVEL_MAX - 1;
         let t = (self.gimbal_ui.speed_level - 1) as f32 / levels as f32;
-        if let Some(t) = slider(ui, track, t, true, ACCENT, "gimbal-speed") {
+        if let Some(t) = slider(ui, track, t, true, "gimbal-speed") {
             self.gimbal_ui.speed_level = 1 + (t * levels as f32).round() as u8;
         }
     }
@@ -643,10 +643,8 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
         let t = (ratio - 1.0) / (max - 1.0).max(f32::EPSILON);
         let ui_enabled = ui.is_enabled() && enabled;
         let picked = place(ui, track, Layout::default(), "zoom-slider", |ui| {
-            ui.add_enabled_ui(ui_enabled, |ui| {
-                slider(ui, track, t, ui_enabled, Color32::WHITE, "zoom")
-            })
-            .inner
+            ui.add_enabled_ui(ui_enabled, |ui| slider(ui, track, t, ui_enabled, "zoom"))
+                .inner
         });
         if let Some(t) = picked {
             self.set_zoom_ratio(1.0 + t * (max - 1.0));
@@ -665,17 +663,9 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
     }
 }
 
-/// Horizontal slider with a 4-px track and a white round handle; `fill`
-/// colours the part left of the handle. Returns the new position (0-1)
-/// while it is dragged or clicked.
-fn slider(
-    ui: &mut Ui,
-    rect: Rect,
-    t: f32,
-    enabled: bool,
-    fill: Color32,
-    salt: &str,
-) -> Option<f32> {
+/// Horizontal slider with a 4-point track, an accent fill up to the handle,
+/// and a white round handle. Returns the new position (0–1) on drag or click.
+fn slider(ui: &mut Ui, rect: Rect, t: f32, enabled: bool, salt: &str) -> Option<f32> {
     let response = ui.interact(
         rect,
         ui.id().with(salt),
@@ -694,14 +684,12 @@ fn slider(
     let painter = ui.painter();
     let track = Rect::from_min_max(pos2(rect.left(), cy - 2.0), pos2(rect.right(), cy + 2.0));
     painter.rect_filled(track, CornerRadius::same(2), SLIDER_TRACK);
-    if fill != Color32::WHITE {
-        let left = Rect::from_min_max(track.min, pos2(x, track.bottom()));
-        painter.rect_filled(
-            left,
-            CornerRadius::same(2),
-            if enabled { fill } else { TEXT_FAINT },
-        );
-    }
+    let left = Rect::from_min_max(track.min, pos2(x, track.bottom()));
+    painter.rect_filled(
+        left,
+        CornerRadius::same(2),
+        if enabled { ACCENT } else { TEXT_FAINT },
+    );
     painter.circle_filled(
         pos2(x, cy),
         radius,

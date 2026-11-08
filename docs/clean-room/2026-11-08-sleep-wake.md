@@ -36,3 +36,29 @@ The meaning of the other changes in the selector 6 block.
 `camera::vendor::tests::view_commands_match_capture` checks sleep
 encoding and the status decoder against captured bytes. Hardware test
 with `gimbly --probe --gimbal DIR sleep wake`.
+
+## Virtual camera during wake
+
+**Source and method (2026-11-08):** User screenshots of Gimbly and the
+Discord preview with Gimbly Virtual Camera selected, in the Tiny 3 Lite
+sleep flow. The report did not record firmware, capture format, or an
+OBSBOT Center version. No OBSBOT software was inspected.
+
+**Observed:** Discord showed the Gimbly icon during sleep. After Resume,
+Gimbly's sleep overlay cleared and Discord briefly showed a red OBSBOT
+badge with a white ring on a flat, dark background. The badge is centered
+horizontally and sits a little above the middle of the picture.
+
+**Inferred:** The camera's standby image can outlast the change in the
+control state. Use a few luma and chroma samples on the raw Tiny 3 Lite
+frame to identify the standby picture even when the sleep flag is clear.
+Keep substituting Gimbly's frame until live video arrives.
+
+**Unknown:** Whether the standby picture differs on other firmware or in
+capture formats not shown in the report.
+
+**Test:** `camera::standby::tests` covers post-Resume and late standby
+frames, dark live video, and a scene with similar colors. The fixture is
+synthetic. To check with the camera, open Discord's preview for Gimbly
+Virtual Camera, then use Sleep and Resume in Gimbly. The preview should
+switch directly from the Gimbly icon to live video.

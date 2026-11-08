@@ -6,11 +6,11 @@
 //! controls through the camera's UVC extension unit.
 
 use super::preview::{self, YuvRange};
-use super::vendor;
 use super::{
     CaptureConfig, Command, DeviceInfo, GimbalCommand, PRESET_SLOTS, Preset, SessionState, Shared,
     VideoMode, Worker, ZoomRange, parse_usb_ids,
 };
+use super::{standby, vendor};
 use gimbly_vcam_shm::{Nv12View, SharedMemory, now_ms};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
@@ -1005,9 +1005,8 @@ fn capture_loop<'scope, 'env>(
 ) -> Result<(), String> {
     // Read the initial controls before Media Foundation changes stream types.
     // Only the Tiny 3 Lite has been checked against the official app so far.
-    let mut xu = (device.is_obsbot() && device.usb_product_id == Some(TINY_3_LITE))
-        .then(|| Xu::open(source))
-        .flatten();
+    let tiny_3_lite = device.is_obsbot() && device.usb_product_id == Some(TINY_3_LITE);
+    let mut xu = tiny_3_lite.then(|| Xu::open(source)).flatten();
     let mut zoom_refresh: ZoomRefresh = None;
     if let Some(xu) = xu.as_mut() {
         let sleeping = xu.read_sleep();
@@ -1088,7 +1087,7 @@ fn capture_loop<'scope, 'env>(
     let mut snapshot_pending = false;
     let mut transform = config.transform;
     let mut turned_buf = Vec::new();
-    let mut sleep_buf: Option<((usize, usize), Vec<u8>)> = None;
+    let mut sleep_buf: Option<((usize, usize, YuvRange), Vec<u8>)> = None;
 
     while !worker.should_stop() {
         // Only the newest zoom request matters, e.g. while a slider is dragged.
@@ -1173,6 +1172,7 @@ fn capture_loop<'scope, 'env>(
         let want_snapshot = std::mem::take(&mut snapshot_pending);
         let needed = shm.is_some() || want_preview || want_snapshot;
         let frames = with_nv12(&sample, geometry, |full| {
+            let use_placeholder = needed && standby::use_placeholder(asleep, tiny_3_lite, full);
             let cropped = config.portrait.then(|| full.crop_to_portrait()).flatten();
             let view = cropped.as_ref().unwrap_or(full);
             // Rotate/mirror once so the preview, snapshots and the virtual
@@ -1180,10 +1180,10 @@ fn capture_loop<'scope, 'env>(
             let turned = (needed && !transform.is_identity())
                 .then(|| gimbly_vcam_shm::pixel::transform_into(view, transform, &mut turned_buf));
             let view = turned.as_ref().unwrap_or(view);
-            // A sleeping camera keeps streaming the vendor's still picture;
-            // video apps and snapshots get our own instead.
-            let placeholder = if asleep {
-                let size = (view.width, view.height);
+            // Replace the standby picture during sleep and wake, using the
+            // same output size and range as the live frame.
+            let placeholder = if use_placeholder {
+                let size = (view.width, view.height, geometry.range);
                 if sleep_buf.as_ref().is_none_or(|(built, _)| *built != size) {
                     let icon = crate::branding::window_icon();
                     let frame = preview::sleep_frame(

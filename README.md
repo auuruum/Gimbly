@@ -16,10 +16,27 @@ Tech.
 
 ## Supported webcams
 
-| Camera | Windows | Linux | macOS | What works |
-| --- | --- | --- | --- | --- |
-| OBSBOT Tiny 3 Lite | Tested | Not tested | Not tested | Gimbal joystick, drag-to-turn, reset, Wide/Medium/Narrow FOV, 1×–4× zoom, sleep/wake, presets, virtual camera |
-| Other OBSBOT models | Not tested | Not tested | Not tested | Standard UVC controls may work |
+| Camera | 🪟 Windows | 🐧 Linux | 🍎 macOS |
+| :--- | :---: | :---: | :---: |
+| 📷 **OBSBOT Tiny 3 Lite** | ✅ | 🚧 | 🚧 |
+| 📷 Other OBSBOT models | ❔ | ❔ | ❔ |
+
+### 📷 OBSBOT Tiny 3 Lite
+
+| Feature | 🪟 Windows | 🐧 Linux | 🍎 macOS |
+| :--- | :---: | :---: | :---: |
+| 🕹️ Gimbal joystick and drag-to-turn | ✅ | 🚧 | 🚧 |
+| 🎯 Gimbal reset | ✅ | 🚧 | 🚧 |
+| 🔍 Zoom 1×–4× | ✅ | 🚧 | 🚧 |
+| 🖼️ Field of view (Wide / Medium / Narrow) | ✅ | 🚧 | 🚧 |
+| 📌 Presets | ✅ | 🚧 | 🚧 |
+| 💤 Sleep / wake | ✅ | 🚧 | 🚧 |
+| 🎥 Virtual camera | ✅ | 🚧 | 🚧 |
+| 🤖 AI tracking | 🗓️ | 🗓️ | 🗓️ |
+| 🎨 Image settings | 🗓️ | 🗓️ | 🗓️ |
+| ⏺️ Recording | 🗓️ | 🗓️ | 🗓️ |
+
+✅ tested on real hardware · 🚧 in progress · 🗓️ planned · ❔ not tested yet
 
 Full test results are in [docs/devices.md](docs/devices.md). Tried another
 camera? See [CONTRIBUTING.md](CONTRIBUTING.md#tested-a-camera).

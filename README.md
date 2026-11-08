@@ -16,7 +16,29 @@ Tech.
 
 ## Status
 
-Early development. Nothing works yet.
+Early development. Only Windows has a camera backend so far; Linux and macOS
+build but cannot capture yet.
+
+Works on Windows: the control panel, live video preview with rotate and
+mirror, snapshots, standard UVC zoom, the virtual camera (DirectShow, 64-bit
+apps), and Software Settings.
+
+Not implemented yet: sleep/wake, gimbal, field of view, presets, AI
+tracking, image settings, recording. Their controls are visible but
+disabled.
+
+## Build and run
+
+You need a stable Rust toolchain (1.95 or newer).
+
+```bash
+cargo build --workspace
+cargo run -p gimbly
+```
+
+Build the whole workspace: the virtual camera DLL is a separate crate and
+must sit next to `gimbly.exe`. Close any other app that streams the camera
+first.
 
 ## How it is built
 

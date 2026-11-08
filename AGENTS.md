@@ -28,7 +28,7 @@ Gimbly is a clean-room reimplementation: study features and behavior, document f
 - No reverse engineering of OBSBOT software: never decompile, disassemble, debug, or inspect the files or process memory of OBSBOT Center, libdev, the OBSBOT SDK, firmware, or any other OBSBOT binary. OBSBOT has forbidden this in writing, and the owner has told them it will not happen.
 - Never use the OBSBOT SDK: do not link it or read its headers, samples, or docs.
 - Do not copy proprietary code, firmware, UI assets, icons, artwork, sounds, screenshots, or substantial documentation text into the repository. Do not commit USB captures; describe them in the log.
-- Do not read or copy source code of other OBSBOT control projects or of the old `Gimbly-OLD` / `OBSBOTter` repository. Implement from our own notes and hardware observations.
+- Do not read or copy source code of other OBSBOT control projects or of the old `Gimbly-OLD` / `OBSBOTter` repository. The starting code (UI, video, virtual camera, settings) was carried over from the owner's own old repository once, on 2026-11-08, without its vendor protocol, its decompile-based joystick curve, and its notes. Implement everything new from our own notes and hardware observations.
 - A familiar layout and visually similar interface are explicit goals; draw everything in Gimbly's own code.
 - Keep the behavior and evidence log in `docs/clean-room/`. For each entry record the source or method, date, camera model and firmware, official app version where used, what was observed, and the test that checks it. Keep **observed**, **inferred**, and **unknown** apart.
 - A clean-room process lowers copying risk; it is not legal clearance. Never describe it as such.

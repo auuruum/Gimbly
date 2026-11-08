@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["crates/gimbly", "crates/gimbly-vcam-shm", "crates/gimbly-vcam-dshow"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.95"
+repository = "https://github.com/auuruum/Gimbly"
+
+[workspace.dependencies]
+gimbly-vcam-shm = { path = "crates/gimbly-vcam-shm" }
+windows = "0.62.2"
+windows-core = "0.62"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+panic = "abort"

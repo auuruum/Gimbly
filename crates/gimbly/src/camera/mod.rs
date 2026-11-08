@@ -184,7 +184,7 @@ pub struct SessionStatus {
     pub error: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Command {
     /// Zoom through the standard UVC control (cameras without OBSBOT vendor
     /// control).
@@ -197,6 +197,36 @@ pub enum Command {
     SetSleep(bool),
     /// An OBSBOT vendor command (gimbal, zoom ratio, presets).
     Gimbal(GimbalCommand),
+}
+
+/// Keeps only the newest gimbal speed and zoom ratio between other
+/// commands. The joystick and the zoom slider send a value every UI frame,
+/// faster than the camera takes writes; sending each one would leave the
+/// camera working through stale values long after the user stopped.
+/// Speed and zoom are independent, so a newer value takes the older one's
+/// place; nothing moves past any other command.
+pub(crate) fn coalesce(commands: impl IntoIterator<Item = Command>) -> Vec<Command> {
+    fn kind(command: &Command) -> Option<u8> {
+        match command {
+            Command::Gimbal(GimbalCommand::Speed { .. }) => Some(0),
+            Command::Gimbal(GimbalCommand::ZoomRatio(_)) => Some(1),
+            _ => None,
+        }
+    }
+    let mut out: Vec<Command> = Vec::new();
+    for command in commands {
+        let older = kind(&command).and_then(|k| {
+            out.iter_mut()
+                .rev()
+                .take_while(|c| kind(c).is_some())
+                .find(|c| kind(c) == Some(k))
+        });
+        match older {
+            Some(older) => *older = command,
+            None => out.push(command),
+        }
+    }
+    out
 }
 
 /// Commands for OBSBOT cameras with a gimbal, carried out off the UI thread.
@@ -420,6 +450,38 @@ pub fn parse_usb_ids(path: &str) -> (Option<u16>, Option<u16>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coalesce_keeps_newest_values_in_order() {
+        use GimbalCommand::*;
+        let speed = |yaw| Command::Gimbal(Speed { pitch: 0.0, yaw });
+        let zoom = |r| Command::Gimbal(ZoomRatio(r));
+        let batch = vec![
+            Command::Gimbal(Drag(true)),
+            speed(1.0),
+            zoom(1.5),
+            speed(2.0),
+            zoom(2.0),
+            zoom(2.5),
+            Command::Gimbal(Drag(false)),
+            zoom(3.0),
+            Command::SetSleep(true),
+            zoom(3.5),
+            zoom(4.0),
+        ];
+        assert_eq!(
+            coalesce(batch),
+            vec![
+                Command::Gimbal(Drag(true)),
+                speed(2.0),
+                zoom(2.5),
+                Command::Gimbal(Drag(false)),
+                zoom(3.0),
+                Command::SetSleep(true),
+                zoom(4.0),
+            ]
+        );
+    }
 
     #[test]
     fn parses_usb_ids_from_symbolic_link() {

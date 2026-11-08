@@ -20,12 +20,13 @@ Early development. Only Windows has a camera backend so far; Linux and macOS
 build but cannot capture yet.
 
 Works on Windows: the control panel, live video preview with rotate and
-mirror, snapshots, standard UVC zoom, the virtual camera (DirectShow, 64-bit
-apps), and Software Settings.
+mirror, snapshots, zoom, the virtual camera (DirectShow, 64-bit apps), and
+Software Settings. On the OBSBOT Tiny 3 Lite the gimbal joystick and
+drag-to-turn in the Video Preview work too.
 
-Not implemented yet: sleep/wake, gimbal, field of view, presets, AI
-tracking, image settings, recording. Their controls are visible but
-disabled.
+Not implemented yet: gimbal reset, sleep/wake, field of view, presets, AI
+tracking, image settings, recording. Their controls are visible but either
+disabled or report that they are not implemented.
 
 ## Build and run
 

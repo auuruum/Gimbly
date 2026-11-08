@@ -11,6 +11,7 @@
 #![cfg_attr(not(windows), allow(dead_code))]
 
 mod preview;
+mod vendor;
 
 #[cfg(windows)]
 mod windows;
@@ -67,6 +68,20 @@ impl ZoomRange {
         }
         let steps = (clamped - self.min + self.step / 2) / self.step;
         (self.min + steps * self.step).min(self.max)
+    }
+
+    // shortcut: maps 1x..ZOOM_RATIO_MAX linearly onto the UVC zoom range;
+    // switch to the official app's vendor zoom once it is captured.
+    /// Zoom ratio shown for a UVC zoom value.
+    pub fn ratio(&self, value: i32) -> f32 {
+        let span = (self.max - self.min).max(1) as f32;
+        1.0 + (value - self.min) as f32 / span * (ZOOM_RATIO_MAX - 1.0)
+    }
+
+    /// UVC zoom value for a ratio between 1 and [`ZOOM_RATIO_MAX`].
+    pub fn value_for_ratio(&self, ratio: f32) -> i32 {
+        let t = ((ratio - 1.0) / (ZOOM_RATIO_MAX - 1.0)).clamp(0.0, 1.0);
+        self.snap(self.min + ((self.max - self.min) as f32 * t).round() as i32)
     }
 }
 
@@ -181,6 +196,14 @@ pub struct SessionStatus {
     pub presets: Option<Vec<Preset>>,
     pub virtual_camera: bool,
     pub error: Option<String>,
+}
+
+impl SessionStatus {
+    /// Records a UVC zoom reading and the ratio it stands for.
+    fn set_zoom(&mut self, value: Option<i32>) {
+        self.zoom = value;
+        self.zoom_ratio = self.zoom_range.zip(value).map(|(r, v)| r.ratio(v));
+    }
 }
 
 #[derive(Debug)]
@@ -399,6 +422,11 @@ pub fn list_modes(device: &DeviceInfo) -> Result<Vec<VideoMode>, String> {
     backend::list_modes(device)
 }
 
+/// Lists the camera-terminal controls the camera answers, one line each.
+pub fn probe_controls(device: &DeviceInfo, script: Vec<String>) -> Result<Vec<String>, String> {
+    backend::probe_controls(device, script)
+}
+
 /// Extracts the USB vendor and product IDs from an OS device path such as
 /// `\\?\usb#vid_3564&pid_ff04&mi_00#...`.
 pub fn parse_usb_ids(path: &str) -> (Option<u16>, Option<u16>) {
@@ -437,5 +465,19 @@ mod tests {
         assert_eq!(range.snap(125), 130);
         let unit = ZoomRange { step: 1, ..range };
         assert_eq!(unit.snap(123), 123);
+    }
+
+    #[test]
+    fn zoom_ratio_maps_onto_the_uvc_range() {
+        let range = ZoomRange {
+            min: 0,
+            max: 100,
+            step: 1,
+            default: 0,
+        };
+        assert_eq!(range.value_for_ratio(1.0), 0);
+        assert_eq!(range.value_for_ratio(2.5), 50);
+        assert_eq!(range.value_for_ratio(9.0), 100);
+        assert!((range.ratio(50) - 2.5).abs() < 1e-6);
     }
 }

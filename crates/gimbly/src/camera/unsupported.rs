@@ -14,6 +14,10 @@ pub fn list_modes(_device: &DeviceInfo) -> Result<Vec<VideoMode>, String> {
     Err(NOT_YET.into())
 }
 
+pub fn probe_controls(_device: &DeviceInfo, _script: Vec<String>) -> Result<Vec<String>, String> {
+    Err(NOT_YET.into())
+}
+
 pub fn run_capture(
     _device: &DeviceInfo,
     _config: CaptureConfig,

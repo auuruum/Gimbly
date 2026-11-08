@@ -7,19 +7,28 @@
 //! exposes. Vendor commands (sleep, gimbal, presets) are not implemented yet.
 
 use super::preview::{self, YuvRange};
+use super::vendor;
 use super::{
-    CaptureConfig, Command, DeviceInfo, SessionState, VideoMode, Worker, ZoomRange, parse_usb_ids,
+    CaptureConfig, Command, DeviceInfo, GimbalCommand, SessionState, VideoMode, Worker, ZoomRange,
+    parse_usb_ids,
 };
 use gimbly_vcam_shm::{Nv12View, SharedMemory, now_ms};
 use std::time::Instant;
 use windows::Win32::Media::DirectShow::{
     CameraControl_Flags_Manual, CameraControl_Zoom, IAMCameraControl,
 };
+use windows::Win32::Media::KernelStreaming::{
+    IKsControl, IKsTopologyInfo, KSIDENTIFIER_0_0, KSNODETYPE_DEV_SPECIFIC, KSP_NODE,
+    KSPROPERTY_TYPE_GET, KSPROPERTY_TYPE_SET, KSPROPERTY_TYPE_TOPOLOGY,
+};
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{
     COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize,
 };
 use windows::core::{GUID, Interface, PWSTR};
+
+/// USB product ID of the OBSBOT Tiny 3 Lite.
+const TINY_3_LITE: u16 = 0xff04;
 
 const STREAM: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
 
@@ -277,6 +286,124 @@ pub fn list_modes(device: &DeviceInfo) -> Result<Vec<VideoMode>, String> {
     .map_err(|_| "Format query panicked".to_string())?
 }
 
+/// Reads every UVC camera-terminal control Windows maps to
+/// `IAMCameraControl` (property ids 0-19 of the KS camera-control set), for
+/// `gimbly --probe --controls`. One line per control the camera answers.
+/// Then runs `script`: `id=value` sets a control, a bare number waits that
+/// many milliseconds; pan, tilt and zoom are read after each step.
+pub fn probe_controls(device: &DeviceInfo, script: Vec<String>) -> Result<Vec<String>, String> {
+    let id = device.id.clone();
+    std::thread::spawn(move || {
+        let _mf = MfThread::init()?;
+        let activate = enumerate()?
+            .into_iter()
+            .find(|(info, _)| info.id == id)
+            .map(|(_, activate)| activate)
+            .ok_or("The camera is no longer connected")?;
+        // SAFETY: activation and shutdown of a capture source; all
+        // out-pointers are valid locals.
+        unsafe {
+            let source: IMFMediaSource = activate.ActivateObject().map_err(|e| e.to_string())?;
+            let mut lines = Vec::new();
+            if let Ok(control) = source.cast::<IAMCameraControl>() {
+                for property in 0..20 {
+                    let (mut min, mut max, mut step, mut default, mut flags) = (0, 0, 0, 0, 0);
+                    let range = control.GetRange(
+                        property,
+                        &mut min,
+                        &mut max,
+                        &mut step,
+                        &mut default,
+                        &mut flags,
+                    );
+                    let (mut value, mut value_flags) = (0, 0);
+                    let current = control.Get(property, &mut value, &mut value_flags);
+                    lines.push(match (range, current) {
+                        (Err(e), Err(_)) => format!("control {property}: unsupported ({e})"),
+                        _ => format!(
+                            "control {property}: range {min}..={max} step {step} default {default} \
+                             flags {flags:#x}, value {value} flags {value_flags:#x}"
+                        ),
+                    });
+                }
+                let mut xu = Xu::open(&source);
+                lines.push(format!(
+                    "vendor extension unit: {:?}",
+                    xu.as_ref().map(|x| x.node)
+                ));
+                let start = Instant::now();
+                for step in &script {
+                    // Vendor steps: `move` starts manual movement, `stop`
+                    // ends it, `turn:PITCH:YAW:MS` holds a speed, resent
+                    // every 100 ms like the official app does.
+                    let words: Vec<&str> = step.split(':').collect();
+                    let vendor_step = match (xu.as_mut(), words.as_slice()) {
+                        (Some(xu), ["move"]) => Some(xu.send(vendor::manual_move(true))),
+                        (Some(xu), ["stop"]) => Some(
+                            xu.send(vendor::speed(0.0, 0.0))
+                                .and_then(|_| xu.send(vendor::manual_move(false))),
+                        ),
+                        (Some(xu), ["turn", pitch, yaw, ms]) => {
+                            let (Ok(pitch), Ok(yaw), Ok(ms)) =
+                                (pitch.parse(), yaw.parse(), ms.parse::<u64>())
+                            else {
+                                return Err(format!("bad step {step:?}"));
+                            };
+                            let until = Instant::now() + std::time::Duration::from_millis(ms);
+                            let mut result = Ok(());
+                            while result.is_ok() && Instant::now() < until {
+                                result = xu.send(vendor::speed(pitch, yaw));
+                                std::thread::sleep(std::time::Duration::from_millis(100));
+                            }
+                            Some(result)
+                        }
+                        _ => None,
+                    };
+                    let result = match vendor_step {
+                        Some(r) => r,
+                        None => match step.split_once('=') {
+                            Some((id, value)) => {
+                                let (Ok(id), Ok(value)) = (id.parse(), value.parse()) else {
+                                    return Err(format!("bad step {step:?}"));
+                                };
+                                control
+                                    .Set(id, value, CameraControl_Flags_Manual.0)
+                                    .map_err(|e| e.to_string())
+                            }
+                            None => {
+                                let ms = step.parse().map_err(|_| format!("bad step {step:?}"))?;
+                                std::thread::sleep(std::time::Duration::from_millis(ms));
+                                Ok(())
+                            }
+                        },
+                    };
+                    let read = |p| {
+                        let (mut v, mut f) = (0, 0);
+                        control
+                            .Get(p, &mut v, &mut f)
+                            .map(|_| v)
+                            .unwrap_or(i32::MIN)
+                    };
+                    lines.push(format!(
+                        "{:>6} ms {step}: {result:?}; pan {} tilt {} zoom {}",
+                        start.elapsed().as_millis(),
+                        read(0),
+                        read(1),
+                        read(3)
+                    ));
+                }
+            } else {
+                lines.push("no IAMCameraControl".into());
+            }
+            let _ = source.Shutdown();
+            let _ = activate.ShutdownObject();
+            Ok(lines)
+        }
+    })
+    .join()
+    .map_err(|_| "Control query panicked".to_string())?
+}
+
 /// Geometry of the NV12 buffers the reader produces.
 #[derive(Clone, Copy, Debug)]
 struct OutputGeometry {
@@ -401,6 +528,70 @@ impl Zoom {
         }
         .map_err(|e| format!("Zoom failed: {e}"))?;
         Ok(self.get().unwrap_or(value))
+    }
+}
+
+/// The OBSBOT extension unit, reached through the kernel-streaming property
+/// interface the Media Foundation source exposes.
+struct Xu {
+    control: IKsControl,
+    node: u32,
+    sender: vendor::Sender,
+}
+
+impl Xu {
+    /// Finds the extension unit node that answers the vendor GUID.
+    fn open(source: &IMFMediaSource) -> Option<Self> {
+        let control: IKsControl = source.cast().ok()?;
+        let topology: IKsTopologyInfo = source.cast().ok()?;
+        // SAFETY: plain topology queries.
+        let nodes = unsafe { topology.NumNodes() }.ok()?;
+        (0..nodes)
+            .filter(|&n| unsafe { topology.get_NodeType(n) }.ok() == Some(KSNODETYPE_DEV_SPECIFIC))
+            .map(|node| Self {
+                control: control.clone(),
+                node,
+                sender: vendor::Sender::default(),
+            })
+            .find(|xu| xu.get(vendor::SELECTOR_COMMAND).is_ok())
+    }
+
+    fn property(&self, selector: u32, flags: u32, data: &mut [u8]) -> Result<u32, String> {
+        let mut property = KSP_NODE {
+            NodeId: self.node,
+            ..Default::default()
+        };
+        property.Property.Anonymous.Anonymous = KSIDENTIFIER_0_0 {
+            Set: GUID::from_u128(vendor::XU_GUID),
+            Id: selector,
+            Flags: flags | KSPROPERTY_TYPE_TOPOLOGY,
+        };
+        let mut returned = 0u32;
+        // SAFETY: `property` is a valid KSP_NODE, whose first member is the
+        // KSIDENTIFIER; `data` is valid for its length.
+        unsafe {
+            self.control.KsProperty(
+                &property.Property,
+                std::mem::size_of::<KSP_NODE>() as u32,
+                data.as_mut_ptr().cast(),
+                data.len() as u32,
+                &mut returned,
+            )
+        }
+        .map_err(|e| format!("Camera control failed: {e}"))?;
+        Ok(returned)
+    }
+
+    fn send(&mut self, message: vendor::Message) -> Result<(), String> {
+        let mut block = self.sender.number(message);
+        self.property(vendor::SELECTOR_COMMAND, KSPROPERTY_TYPE_SET, &mut block)
+            .map(|_| ())
+    }
+
+    fn get(&self, selector: u32) -> Result<[u8; vendor::MESSAGE_LEN], String> {
+        let mut block = [0u8; vendor::MESSAGE_LEN];
+        self.property(selector, KSPROPERTY_TYPE_GET, &mut block)?;
+        Ok(block)
     }
 }
 
@@ -535,14 +726,17 @@ fn capture_loop(
     let mut geometry = output_geometry(&reader)?;
 
     let zoom = Zoom::open(source);
+    let mut xu = device.is_obsbot().then(|| Xu::open(source)).flatten();
     {
         let mut status = worker.shared.status();
         status.format = Some(format!("{} {width}x{height} @ {fps:.0} fps", mode.codec));
         status.output = Some(config.output_size(width, height));
         status.zoom_range = zoom.as_ref().map(|z| z.range);
-        status.zoom = zoom.as_ref().and_then(Zoom::get);
-        status.vendor_control = false;
-        status.vendor_control_untested = device.is_obsbot();
+        status.set_zoom(zoom.as_ref().and_then(Zoom::get));
+        // Only the Tiny 3 Lite was checked against the official app so far.
+        let verified = device.usb_product_id == Some(TINY_3_LITE);
+        status.vendor_control = xu.is_some() && verified;
+        status.vendor_control_untested = device.is_obsbot() && !status.vendor_control;
     }
 
     let mut virtual_camera: Option<SharedMemory> = None;
@@ -580,9 +774,18 @@ fn capture_loop(
                 Command::SetSleep(_) => {
                     worker.shared.status().error = Some("Sleep is not implemented yet".into())
                 }
-                Command::Gimbal(_) => {
-                    worker.shared.status().error =
-                        Some("Gimbal control is not implemented yet".into())
+                Command::Gimbal(GimbalCommand::ZoomRatio(ratio)) if zoom.is_some() => {
+                    zoom_request = zoom.as_ref().map(|z| z.range.value_for_ratio(ratio))
+                }
+                Command::Gimbal(command) => {
+                    let result = match (xu.as_mut(), vendor::for_gimbal(&command)) {
+                        (Some(xu), Some(message)) => xu.send(message),
+                        (None, _) => Err("This camera does not accept gimbal commands".into()),
+                        (_, None) => Err(format!("{command:?} is not implemented yet")),
+                    };
+                    if let Err(e) = result {
+                        worker.shared.status().error = Some(e);
+                    }
                 }
             }
         }
@@ -593,7 +796,7 @@ fn capture_loop(
             };
             let mut status = worker.shared.status();
             match result {
-                Ok(v) => status.zoom = Some(v),
+                Ok(v) => status.set_zoom(Some(v)),
                 Err(e) => status.error = Some(e),
             }
             zoom_polled = Instant::now();
@@ -602,7 +805,7 @@ fn capture_loop(
             .filter(|_| zoom_polled.elapsed().as_millis() >= 250)
         {
             // The camera zooms smoothly; keep its reported position current.
-            worker.shared.status().zoom = z.get();
+            worker.shared.status().set_zoom(z.get());
             zoom_polled = Instant::now();
         }
 

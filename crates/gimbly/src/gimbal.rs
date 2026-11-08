@@ -33,7 +33,9 @@ impl SpeedMode {
 
 /// The panel joystick's pull, 0 (centre) to 1 (full speed). It is updated
 /// only when the pointer moves, so holding still keeps the speed.
-// shortcut: linear in the knob travel; tune the feel once gimbal control works on hardware.
+// shortcut: linear in the knob travel. The capture of 2026-11-08 confirms the
+// full-pull speeds (30, 20, 10) but not the knob-to-speed curve or which level
+// gave which; recapture with the knob held at known positions and levels.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PanelPull {
     ratio: f32,

@@ -28,7 +28,7 @@ const HEIGHT: f32 = 540.0 + TITLE_HEIGHT + BAR_HEIGHT;
 
 /// What the window shows this frame.
 pub struct PreviewInput<'a> {
-    pub texture: Option<&'a TextureHandle>,
+    pub texture: Option<(u64, &'a TextureHandle)>,
     pub status: &'a SessionStatus,
     pub device: Option<&'a str>,
     pub resolution: Resolution,
@@ -521,7 +521,10 @@ impl PreviewWindow {
         // A sleeping camera keeps streaming its own still picture; show ours.
         let asleep = input.status.sleeping && input.status.vendor_control;
         let live = input.status.state == SessionState::Streaming && !asleep;
-        if let (Some(texture), true) = (input.texture, live) {
+        if let Some((epoch, texture)) = input.texture
+            && live
+            && epoch == input.status.video_epoch
+        {
             let shown = preview_view::fit(texture.size_vec2(), rect);
             ui.painter().image(
                 texture.id(),
@@ -556,16 +559,18 @@ impl PreviewWindow {
                 .clone()
                 .unwrap_or_else(|| "The camera stopped".into()),
             (Some(name), SessionState::Opening) => format!("Opening {name}..."),
+            (Some(_), SessionState::Streaming) => "Waiting for live video...".to_string(),
             (Some(_), _) => "The camera stopped".to_string(),
         };
-        let height = if asleep { 220.0 } else { 140.0 };
+        let show_icon = asleep || live;
+        let height = if show_icon { 220.0 } else { 140.0 };
         let inner = Rect::from_center_size(rect.center(), vec2(rect.width().min(520.0), height));
         ui.scope_builder(
             UiBuilder::new()
                 .max_rect(inner)
                 .layout(Layout::top_down(Align::Center)),
             |ui| {
-                if asleep {
+                if show_icon {
                     ui.add(egui::Image::new((self.icon.id(), Vec2::splat(112.0))));
                     ui.add_space(16.0);
                 }
@@ -660,4 +665,62 @@ fn menu_item(ui: &mut Ui, text: &str, selected: bool) -> egui::Response {
         );
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resume_draws_the_placeholder_until_a_new_texture_arrives() {
+        let ctx = egui::Context::default();
+        let texture = |name, color| {
+            ctx.load_texture(
+                name,
+                egui::ColorImage::filled([2, 2], color),
+                egui::TextureOptions::NEAREST,
+            )
+        };
+        let logo = texture("logo", Color32::WHITE);
+        let old = texture("before sleep", Color32::RED);
+        let fresh = texture("after resume", Color32::GREEN);
+        let mut window = PreviewWindow::new(logo.clone());
+        let status = SessionStatus {
+            state: SessionState::Streaming,
+            vendor_control: true,
+            video_epoch: 2,
+            ..Default::default()
+        };
+        let mut draw = |texture| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let input = PreviewInput {
+                    texture: Some(texture),
+                    status: &status,
+                    device: Some("Test camera"),
+                    resolution: Resolution::Fhd30,
+                    preview_mode: PreviewMode::Landscape,
+                    virtual_camera: true,
+                    transform: Default::default(),
+                    toast: None,
+                    gimbal: false,
+                };
+                window.video(ui, ui.max_rect(), &input, &mut Vec::new());
+            });
+            output.textures_delta.clear();
+            output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Mesh(mesh) => Some(mesh.texture_id),
+                    egui::Shape::Rect(rect) => {
+                        rect.brush.as_ref().map(|brush| brush.fill_texture_id)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(draw((0, &old)), vec![logo.id()]);
+        assert_eq!(draw((2, &fresh)), vec![fresh.id()]);
+    }
 }

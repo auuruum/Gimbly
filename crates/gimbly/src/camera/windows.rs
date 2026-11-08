@@ -834,10 +834,9 @@ fn control_loop(
             match command {
                 Command::SetSleep(sleep) => {
                     let result = xu.send(vendor::sleep(sleep));
-                    let mut status = shared.status();
                     match result {
                         Ok(()) => {
-                            status.sleeping = sleep;
+                            shared.set_sleeping(sleep);
                             sleep_polled = Instant::now();
                             sleep_readback.sent(sleep, sleep_polled);
                             preset_retries = 0;
@@ -847,9 +846,8 @@ fn control_loop(
                                 read_zoom_in(Duration::from_secs(3))
                             };
                         }
-                        Err(error) => status.error = Some(error),
+                        Err(error) => shared.status().error = Some(error),
                     }
-                    drop(status);
                     repaint();
                 }
                 Command::Gimbal(command) => {
@@ -865,19 +863,15 @@ fn control_loop(
             if let Some(sleeping) = xu
                 .read_sleep()
                 .and_then(|sleeping| sleep_readback.observe(sleeping, Instant::now()))
+                && shared.set_sleeping(sleeping)
             {
-                let mut status = shared.status();
-                if status.sleeping != sleeping {
-                    status.sleeping = sleeping;
-                    preset_retries = 0;
-                    zoom_refresh = if sleeping {
-                        None
-                    } else {
-                        read_zoom_in(Duration::from_secs(2))
-                    };
-                    drop(status);
-                    repaint();
-                }
+                preset_retries = 0;
+                zoom_refresh = if sleeping {
+                    None
+                } else {
+                    read_zoom_in(Duration::from_secs(2))
+                };
+                repaint();
             }
             sleep_polled = Instant::now();
             // Opening or waking the stream can briefly interrupt replies.
@@ -1021,8 +1015,8 @@ fn capture_loop<'scope, 'env>(
         if ratio.is_none() {
             zoom_refresh = read_zoom_in(Duration::from_secs(1));
         }
+        worker.shared.set_sleeping(sleeping.unwrap_or(false));
         let mut status = worker.shared.status();
-        status.sleeping = sleeping.unwrap_or(false);
         status.zoom_ratio = ratio;
         status.presets = presets;
     }
@@ -1152,6 +1146,7 @@ fn capture_loop<'scope, 'env>(
             zoom_polled = Instant::now();
         }
 
+        let epoch = worker.shared.status().video_epoch;
         let mut flags = 0u32;
         let mut sample: Option<IMFSample> = None;
         // SAFETY: synchronous read with valid out-pointers.
@@ -1170,6 +1165,10 @@ fn capture_loop<'scope, 'env>(
 
         let asleep = {
             let status = worker.shared.status();
+            // A read started before Sleep or Resume may finish afterward.
+            if status.video_epoch != epoch {
+                continue;
+            }
             status.sleeping && status.vendor_control
         };
         // The preview window draws its own placeholder while the camera sleeps.
@@ -1224,8 +1223,9 @@ fn capture_loop<'scope, 'env>(
             *worker.shared.snapshot() = Some(frame);
             (worker.repaint)();
         }
-        if let Some(frame) = preview {
-            *worker.shared.frame() = Some(frame);
+        if let Some(frame) = preview
+            && worker.shared.publish_preview(epoch, frame)
+        {
             (worker.repaint)();
         }
 

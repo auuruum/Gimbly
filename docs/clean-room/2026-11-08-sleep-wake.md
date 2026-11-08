@@ -107,3 +107,36 @@ the client received a continuous placeholder through each Sleep and
 wake transition, then live frames. The probe also exercised joystick
 commands with both frame consumers active. Direct interaction with the
 panel and Video Preview was not verified.
+
+## Previous preview frame on Resume
+
+**Source and method (2026-11-08):** User report with Video Preview and
+Gimbly Virtual Camera active, inspection of Gimbly's preview path, and
+an egui draw test. Follow-up hardware probe on Tiny 3 Lite (`3564:ff04`,
+firmware release unknown), Windows 10 build 19045, NV12 1920x1080 at
+30 fps. OBSBOT Center was not used.
+
+**Observed:** The user removed their hand during Sleep and briefly saw
+the frame with their hand again on Resume. In Gimbly, the preview
+texture survived Sleep, and Resume made it eligible to be drawn before
+the first new frame arrived. The draw test reproduced that sequence
+with a synthetic texture.
+
+**Inferred:** The preview can show a cached image even when the camera
+does not resend it. Each sleep or wake transition now invalidates queued
+and in-flight preview frames. The window draws the Gimbly placeholder
+until a texture from the current video epoch is available.
+
+**Unknown:** Whether the reported flash was also visible in a separate
+virtual camera client.
+
+**Test:** `camera::tests::sleep_and_resume_discard_queued_and_in_flight_preview_frames`
+and `preview_window::tests::resume_draws_the_placeholder_until_a_new_texture_arrives`.
+In three hardware probe cycles the preview consumer received no frame
+while the session reported asleep and resumed receiving frames after
+wake. The DirectShow client received a continuous Gimbly placeholder
+through each transition. None of its first 30 frames after the
+placeholder matched the plane checksums of the last 30 frames before
+Sleep. The probe also exercised joystick commands with both consumers
+active. Only checksums were saved. The native window was not tested by
+clicking its controls.

@@ -11,6 +11,7 @@ code builds for that system but was not run there.
 | OBSBOT Tiny 3 Lite | `3564:ff04` | 0x0510 | unknown | Windows 10 Pro 19045 | Sleep and wake | verified through the capture session, selector 6 status and saved frames | 2026-11-08 |
 | OBSBOT Tiny 3 Lite | `3564:ff04` | not reread | unknown | Windows 10 build 19045 | Virtual camera output on Resume, 1080p30 NV12 | verified with a local DirectShow client: Gimbly placeholder then live video | 2026-11-08 |
 | OBSBOT Tiny 3 Lite | `3564:ff04` | not reread | unknown | Windows 10 build 19045 | Sleep state and virtual camera across repeated Sleep/Resume, 1080p30 NV12 | verified with the hardware probe and a local DirectShow client: stable sleep state and continuous placeholder until live video | 2026-11-08 |
+| OBSBOT Tiny 3 Lite | `3564:ff04` | not reread | unknown | Windows 10 build 19045 | Preview frames and virtual camera output on Resume, 1080p30 NV12 | three probe cycles: preview frames stopped during Sleep and resumed after wake. DirectShow received the placeholder followed by frames with new checksums | 2026-11-08 |
 | OBSBOT Tiny 3 Lite | `3564:ff04` | 0x0510 | unknown | Windows 10 Pro 19045 | Preset list, add, rename, update, recall and delete | verified through the capture session, camera readback and saved frames using a temporary slot | 2026-11-08 |
 
 The hardware probe exercises the same capture commands as the app.

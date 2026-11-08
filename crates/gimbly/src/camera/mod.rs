@@ -176,6 +176,8 @@ pub struct SessionStatus {
     /// An OBSBOT camera whose vendor commands are not verified yet.
     pub vendor_control_untested: bool,
     pub sleeping: bool,
+    /// Changes on every sleep or wake so the preview can reject old video.
+    pub video_epoch: u64,
     /// Zoom ratio the camera reports through vendor control.
     pub zoom_ratio: Option<f32>,
     /// Field of view the camera reports; `None` after a manual zoom.
@@ -301,6 +303,8 @@ pub struct PresetPosition {
 /// State shared between the capture thread and the UI.
 #[derive(Default)]
 pub struct Shared {
+    // When taking both locks, take status before frame so the slot and its
+    // video epoch always change together.
     frame: Mutex<Option<PreviewFrame>>,
     snapshot: Mutex<Option<PreviewFrame>>,
     status: Mutex<SessionStatus>,
@@ -313,6 +317,26 @@ impl Shared {
 
     fn frame(&self) -> MutexGuard<'_, Option<PreviewFrame>> {
         self.frame.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn set_sleeping(&self, sleeping: bool) -> bool {
+        let mut status = self.status();
+        if status.sleeping == sleeping {
+            return false;
+        }
+        status.sleeping = sleeping;
+        status.video_epoch = status.video_epoch.wrapping_add(1);
+        self.frame().take();
+        true
+    }
+
+    fn publish_preview(&self, epoch: u64, frame: PreviewFrame) -> bool {
+        let status = self.status();
+        if status.video_epoch != epoch || status.sleeping {
+            return false;
+        }
+        *self.frame() = Some(frame);
+        true
     }
 
     fn snapshot(&self) -> MutexGuard<'_, Option<PreviewFrame>> {
@@ -399,6 +423,13 @@ impl Session {
         self.shared.status().clone()
     }
 
+    /// Reads the status and takes a frame from the same video epoch.
+    pub fn status_and_preview(&self, take_frame: bool) -> (SessionStatus, Option<PreviewFrame>) {
+        let status = self.shared.status();
+        let frame = take_frame.then(|| self.shared.frame().take()).flatten();
+        (status.clone(), frame)
+    }
+
     /// Takes the newest preview frame, if one arrived since the last call.
     pub fn take_frame(&self) -> Option<PreviewFrame> {
         self.shared.frame().take()
@@ -452,6 +483,30 @@ pub fn parse_usb_ids(path: &str) -> (Option<u16>, Option<u16>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sleep_and_resume_discard_queued_and_in_flight_preview_frames() {
+        let shared = Shared::default();
+        let frame = || PreviewFrame {
+            size: [1, 1],
+            pixels: vec![eframe::egui::Color32::RED],
+        };
+        let before_sleep = shared.status().video_epoch;
+        assert!(shared.publish_preview(before_sleep, frame()));
+        assert!(shared.set_sleeping(true));
+        let asleep = shared.status().video_epoch;
+        assert!(shared.frame().is_none());
+        assert!(!shared.publish_preview(asleep, frame()));
+
+        assert!(shared.set_sleeping(false));
+        let awake = shared.status().video_epoch;
+        assert!(!shared.publish_preview(before_sleep, frame()));
+        assert!(!shared.publish_preview(asleep, frame()));
+        assert!(shared.frame().is_none());
+        assert!(shared.publish_preview(awake, frame()));
+        assert!(!shared.set_sleeping(false));
+        assert!(shared.frame().is_some());
+    }
 
     #[test]
     fn coalesce_keeps_newest_values_in_order() {

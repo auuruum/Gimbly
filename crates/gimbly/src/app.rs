@@ -43,7 +43,7 @@ pub struct GimblyApp {
     selected: Option<usize>,
     session: Option<Session>,
     status: SessionStatus,
-    preview: Option<egui::TextureHandle>,
+    preview: Option<(u64, egui::TextureHandle)>,
     preview_window: PreviewWindow,
     /// A full-size frame was requested from the capture thread.
     snapshot_requested: bool,
@@ -295,6 +295,7 @@ impl GimblyApp {
         // Dropping the old session releases the camera before reopening.
         self.session = None;
         self.status = SessionStatus::default();
+        self.preview = None;
         self.zoom_target = None;
         self.gimbal_ui.reset_camera();
         self.snapshot_requested = false;
@@ -318,15 +319,11 @@ impl GimblyApp {
             });
         }
         let Some(session) = &self.session else { return };
-        self.status = session.status();
+        let (status, frame) = session.status_and_preview(self.preview_window.open);
+        self.status = status;
         let snapshot = self
             .snapshot_requested
             .then(|| session.take_snapshot())
-            .flatten();
-        let frame = self
-            .preview_window
-            .open
-            .then(|| session.take_frame())
             .flatten();
         if let Some(snapshot) = snapshot {
             self.snapshot_requested = false;
@@ -335,13 +332,15 @@ impl GimblyApp {
         if let Some(frame) = frame {
             let image = egui::ColorImage::new(frame.size, frame.pixels);
             match &mut self.preview {
-                Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
+                Some((epoch, texture)) => {
+                    texture.set(image, egui::TextureOptions::LINEAR);
+                    *epoch = self.status.video_epoch;
+                }
                 None => {
-                    self.preview = Some(ctx.load_texture(
-                        "camera-preview",
-                        image,
-                        egui::TextureOptions::LINEAR,
-                    ))
+                    self.preview = Some((
+                        self.status.video_epoch,
+                        ctx.load_texture("camera-preview", image, egui::TextureOptions::LINEAR),
+                    ));
                 }
             }
         }
@@ -926,7 +925,10 @@ impl GimblyApp {
             .filter(|(_, since)| since.elapsed() <= TOAST_FOR)
             .map(|(message, _)| message.clone());
         let input = PreviewInput {
-            texture: self.preview.as_ref(),
+            texture: self
+                .preview
+                .as_ref()
+                .map(|(epoch, texture)| (*epoch, texture)),
             status: &self.status,
             device: self.selected.map(|i| self.devices[i].name.as_str()),
             resolution: self.settings.resolution,

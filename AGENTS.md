@@ -17,6 +17,7 @@ The product name is written `Gimbly` in user-facing text; crates, binaries, and 
 - All first-party code is Rust. UI: egui on eframe with the wgpu renderer. No webview, Electron, or other languages in the app.
 - Prefer pure-Rust dependencies and keep the tree small. Use OS libraries or FFI only for camera access, the virtual camera, and desktop integration; isolate that code in small platform modules and explain why it is needed.
 - Windows, Linux, and macOS are first-class. A platform that lacks a feature returns a clear "unsupported" error; do not silently make a feature single-platform.
+- Build every new feature for all three platforms in the same task: shared logic in platform-neutral code, OS calls behind the same interface in each platform module. If a platform cannot be built or tested on the current machine, say so in the report and leave a clear "unsupported" path, never a silent gap.
 - Keep the MIT license. Do not change it without the owner's approval.
 - Icons: SVG or egui-phosphor. Never use Unicode characters or emoji as UI icons.
 
@@ -37,6 +38,11 @@ Gimbly is a clean-room reimplementation: study features and behavior, document f
 
 - **Never crash.** No `unwrap`, `expect`, unchecked indexing, or `panic!` on data from the camera, a file, or the user. A camera that disconnects, sleeps, or answers garbage is a normal event. Treat every camera response as hostile: bound lengths and sizes.
 - No `unsafe` outside small, documented platform modules; each `unsafe` block states its safety requirements.
+- **Never block the video.** The UI thread and the frame loop must never wait on the camera. Camera control writes are slow (tens of milliseconds each), so:
+  - Do not send one camera write per UI frame or per input event. Coalesce high-rate commands (joystick speed, sliders) so only the newest value is sent; keep order relative to other commands.
+  - Never let a command queue grow faster than the camera drains it, and never drain it in a loop that can starve frame reads.
+  - Every sleep or retry in the capture loop delays frames; keep them short and bounded, or move the work off the frame path.
+  - Check any change to camera control by dragging the joystick with the preview and virtual camera running: frames must keep flowing.
 - **Stay light.** Low startup time, idle CPU, and memory. No busy polling. Send a command to the camera only when the value changed. Measure before optimizing and never claim numbers you did not measure.
 - Settings and camera state stay in plain serializable data; the UI is a view over it.
 - Every crash fix comes with a regression test.

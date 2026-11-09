@@ -1,6 +1,5 @@
 //! Small desktop-integration helpers: choosing and opening a folder, starting
-//! with the session, opening a link and reading the local time. Each has a Windows implementation; elsewhere
-//! they report that the feature is not available yet.
+//! with the session, opening a link and reading the local time.
 
 #[cfg(windows)]
 mod imp {
@@ -164,7 +163,11 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "os/unix.rs"]
+mod imp;
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 mod imp {
     pub fn attach_parent_console() {}
 
@@ -197,7 +200,7 @@ mod imp {
 
 /// Converts seconds since 1970 (UTC) to year, month, day, hour, minute,
 /// second (proleptic Gregorian calendar).
-#[cfg_attr(windows, allow(dead_code))]
+#[cfg(any(test, not(any(windows, target_os = "linux", target_os = "macos"))))]
 fn civil_time(secs: u64) -> [u16; 6] {
     let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;
@@ -223,8 +226,22 @@ fn civil_time(secs: u64) -> [u16; 6] {
 
 pub use imp::*;
 
+/// Inspect the actual window backend. A Wayland desktop may also provide
+/// DISPLAY for X11 clients.
+pub fn is_wayland_window(_window: &eframe::CreationContext<'_>) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        _window
+            .window_handle()
+            .is_ok_and(|handle| matches!(handle.as_raw(), RawWindowHandle::Wayland(_)))
+    }
+    #[cfg(not(target_os = "linux"))]
+    false
+}
+
 /// Whether the helpers above do anything on this platform.
-pub const SUPPORTED: bool = cfg!(windows);
+pub const SUPPORTED: bool = cfg!(any(windows, target_os = "linux", target_os = "macos"));
 
 #[cfg(test)]
 mod tests {

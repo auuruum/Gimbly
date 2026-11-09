@@ -4,7 +4,8 @@
 //!
 //! Options: `--formats` lists the camera's native formats and exits;
 //! `--mode WxH@FPS` (e.g. `3840x2160@30`) captures that mode instead of
-//! stepping the zoom; `--portrait` adds the 9:16 crop.
+//! stepping the zoom; `--portrait` adds the 9:16 crop. Use
+//! `--virtual-camera` before `--gimbal` to exercise virtual output too.
 
 use crate::camera::{self, CaptureConfig, Command, Fov, GimbalCommand, SessionState};
 use std::path::Path;
@@ -56,7 +57,7 @@ fn control_step(step: &str) -> Option<Command> {
 
 /// `--gimbal DIR STEP ...` sends the same commands as the panel and saves
 /// a frame before and after each step. `PITCH:YAW:MS` moves the joystick.
-fn gimbal(session: &camera::Session, args: &[String]) -> i32 {
+fn gimbal(session: &camera::Session, args: &[String], virtual_camera: bool) -> i32 {
     let Some((dir, turns)) = args.split_first() else {
         eprintln!("usage: --gimbal DIR STEP ...");
         return 2;
@@ -88,9 +89,29 @@ fn gimbal(session: &camera::Session, args: &[String]) -> i32 {
             status.presets,
             status.error
         );
-        saved.is_ok() && status.error.is_none() && status.vendor_control
+        saved.is_ok()
+            && status.error.is_none()
+            && status.vendor_control
+            && (!virtual_camera || status.virtual_camera)
     };
-    std::thread::sleep(Duration::from_secs(2));
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let status = session.status();
+        if status.state == SessionState::Streaming
+            && status.vendor_control
+            && (!virtual_camera || status.virtual_camera)
+        {
+            break;
+        }
+        if status.state == SessionState::Failed || Instant::now() >= deadline {
+            eprintln!(
+                "Camera did not become ready for gimbal testing: {:?}",
+                status.error
+            );
+            return 1;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
     if !save(0) {
         return 1;
     }
@@ -218,9 +239,18 @@ pub fn run() -> i32 {
         };
     }
     println!("requested: {config:?}");
-    let session = camera::Session::start(device, config, false, || {});
+    let virtual_camera = args.iter().any(|a| a == "--virtual-camera");
+    if virtual_camera && let Err(error) = crate::vcam::register() {
+        eprintln!("virtual camera unavailable: {error}");
+        return 1;
+    }
+    let session = camera::Session::start(device, config, virtual_camera, || {});
     if let Some(i) = args.iter().position(|a| a == "--gimbal") {
-        return gimbal(&session, args.get(i + 1..).unwrap_or_default());
+        return gimbal(
+            &session,
+            args.get(i + 1..).unwrap_or_default(),
+            virtual_camera,
+        );
     }
     let deadline = Instant::now() + Duration::from_secs(if mode.is_some() { 8 } else { 15 });
     let mut frames = 0u32;
@@ -283,5 +313,9 @@ pub fn run() -> i32 {
         "format: {:?}, output: {:?}, preview frames taken: {frames}, measured capture fps: {:.1}",
         status.format, status.output, status.measured_fps
     );
+    if frames == 0 || (virtual_camera && !status.virtual_camera) {
+        eprintln!("no usable output: {:?}", status.error);
+        return 1;
+    }
     0
 }

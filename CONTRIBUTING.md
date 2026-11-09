@@ -5,16 +5,96 @@ has the full rules and applies to everyone, human or AI.
 
 ## Build and run
 
-You need stable Rust 1.95 or newer.
+You need stable Rust 1.95 or newer. Close other applications using the
+physical camera before running Gimbly.
 
-```bash
-cargo build --workspace
-cargo run -p gimbly
+### Windows
+
+```powershell
+cargo build --workspace --release
+.\target\release\gimbly.exe
 ```
 
-Build the whole workspace, not only `gimbly`: the virtual camera DLL is a
-separate crate and must sit next to `gimbly.exe`. Close any other app that
-uses the camera first.
+Build the workspace so the DirectShow DLL is next to `gimbly.exe`. The
+app registers it for the current user when you enable Virtual Camera.
+The DirectShow device is available to 64-bit clients.
+
+### Linux Wayland and X11
+
+Install your distribution's Wayland client development libraries
+(`libwayland-dev` on Debian and Ubuntu) for building. Run Gimbly in either
+a native Wayland session or an X11 session. V4L2 camera capture requires
+read/write access to the camera's `/dev/video*` device.
+
+```bash
+cargo build --release -p gimbly
+./target/release/gimbly
+```
+
+Use a release build for high-resolution MJPEG. Gimbly uses the XDG
+FileChooser portal on Linux and native X11 registration for X11 hotkeys.
+Wayland global hotkeys use the desktop's GlobalShortcuts portal. Install
+the desktop entry and icon so the portal can identify Gimbly. The executable
+must be on the desktop session's PATH, or you can set `Exec=` in the desktop
+file to the executable's absolute path.
+
+```bash
+install -Dm755 target/release/gimbly "$HOME/.local/bin/gimbly"
+data_dir=${XDG_DATA_HOME:-"$HOME/.local/share"}
+install -Dm644 packaging/linux/io.github.auuruum.gimbly.desktop \
+  "$data_dir/applications/io.github.auuruum.gimbly.desktop"
+install -Dm644 assets/logo/gimbly-icon.svg \
+  "$data_dir/icons/hicolor/scalable/apps/io.github.auuruum.gimbly.svg"
+```
+
+Use the compositor's shortcut settings if it manages the actual keys.
+Hyprland users can list registered actions with `hyprctl globalshortcuts`
+and bind them with Hyprland's `global` dispatcher. Wayland also leaves
+window stacking and placement to the compositor. The pin button is
+disabled in native Wayland windows.
+[GlobalShortcuts portal](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.GlobalShortcuts.html) ·
+[Hyprland global hotkeys](https://wiki.hypr.land/configuring/core/binds/globals/)
+
+For Virtual Camera, install `v4l2loopback` for the running kernel and
+create a writable loopback node with this name:
+
+```bash
+sudo modprobe v4l2loopback devices=1 exclusive_caps=1 'card_label=Gimbly Virtual Camera'
+```
+
+If the module is already in use, add a separate loopback node with
+`v4l2loopback-ctl` using the same label and exclusive capabilities. Enable
+Virtual Camera in Gimbly before looking for the device in the receiving
+app. Some clients list devices only when they open the camera selector.
+[v4l2loopback setup](https://github.com/v4l2loopback/v4l2loopback#options)
+
+### macOS
+
+Build on macOS 13 or later with the Xcode Command Line Tools installed.
+Allow Gimbly to use the camera when prompted. Login item management uses
+System Settings. For an ad hoc app bundle with capture and controls, run:
+
+```bash
+./packaging/macos/bundle.sh
+open target/Gimbly.app
+```
+
+The virtual camera needs the signed Core Media I/O system extension.
+Build with a Developer ID Application identity and its Team ID. Provide
+provisioning profiles with `GIMBLY_APP_PROFILE` and
+`GIMBLY_EXTENSION_PROFILE` when the signing configuration requires them.
+Increase `GIMBLY_BUILD_NUMBER` when updating an installed extension.
+
+```bash
+GIMBLY_SIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)' \
+GIMBLY_TEAM_ID='YOURTEAMID' \
+./packaging/macos/bundle.sh target/signed/Gimbly.app
+```
+
+Copy the signed bundle to `/Applications`. Turn on Virtual Camera in
+Gimbly and approve its camera extension in System Settings, then turn on
+Virtual Camera again. Use Apple's signing and notarization workflow for
+distribution. [Apple camera extension setup](https://developer.apple.com/documentation/coremediaio/creating-a-camera-extension-with-core-media-i-o)
 
 ## Make a change
 
@@ -48,8 +128,8 @@ uses the camera first.
   camera, a file, or the user.
 - **Never block the video.** The UI and frame loop must not wait on camera
   writes.
-- **All three platforms.** Windows, Linux, and macOS. If a feature is missing
-  on one, return a clear "unsupported" error.
+- **All four targets.** Windows, macOS, Linux Wayland, and Linux X11.
+  Report missing OS or compositor capabilities clearly in the app.
 - **Icons** are SVG or egui-phosphor, never emoji.
 
 ## Tested a camera?

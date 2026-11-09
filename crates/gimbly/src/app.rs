@@ -50,6 +50,7 @@ pub struct GimblyApp {
     /// Snapshots are encoded on a helper thread, which reports back here.
     snapshot_results: (Sender<SnapshotResult>, Receiver<SnapshotResult>),
     always_on_top: bool,
+    wayland: bool,
     tab: Tab,
     ai_open: bool,
     /// UVC zoom value the user asked for (cameras without vendor control);
@@ -76,7 +77,9 @@ impl GimblyApp {
         let branding = Branding::new(&cc.egui_ctx);
         let settings = Settings::load();
         let settings_window = SettingsWindow::new(&settings, branding.icon.clone());
-        let preview_window = PreviewWindow::new(branding.icon.clone());
+        let wayland = os::is_wayland_window(cc);
+        let mut preview_window = PreviewWindow::new(branding.icon.clone());
+        preview_window.wayland = wayland;
         let mut app = Self {
             branding,
             devices: Vec::new(),
@@ -88,6 +91,7 @@ impl GimblyApp {
             snapshot_requested: false,
             snapshot_results: channel(),
             always_on_top: false,
+            wayland,
             tab: Tab::Console,
             ai_open: true,
             zoom_target: None,
@@ -129,11 +133,7 @@ impl GimblyApp {
         #[cfg(windows)]
         {
             let (w, h, fps) = self.settings.resolution.mode();
-            let (w, h) = if self.settings.capture_config().portrait {
-                if h >= 1080 { (1080, 1920) } else { (720, 1280) }
-            } else {
-                (w, h)
-            };
+            let (w, h) = self.settings.capture_config().virtual_size((w, h));
             if let Some(format) = gimbly_vcam_shm::PreferredFormat::validated(w, h, fps)
                 && let Err(e) = gimbly_vcam_shm::write_preferred_format(format)
             {
@@ -156,7 +156,8 @@ impl GimblyApp {
             .filter_map(|(action, combo)| combo.map(|c| (*action, c)))
             .collect();
         let ctx = ctx.clone();
-        let (hotkeys, failures) = GlobalHotkeys::start(bindings, move || ctx.request_repaint());
+        let (hotkeys, failures) =
+            GlobalHotkeys::start(bindings, self.wayland, move || ctx.request_repaint());
         self.hotkeys = Some(hotkeys);
         if !failures.is_empty() {
             self.notify(failures.join("\n"));
@@ -470,9 +471,13 @@ impl GimblyApp {
                 {
                     ui.ctx().send_viewport_cmd(ViewportCommand::Minimized(true));
                 }
-                let pin = icon_button(ui, icon::PUSH_PIN, 26.0, 15.0, self.always_on_top)
-                    .on_hover_text("Always on top");
-                if pin.clicked() {
+                let pinned = ui.add_enabled_ui(!self.wayland, |ui| {
+                    icon_button(ui, icon::PUSH_PIN, 26.0, 15.0, self.always_on_top)
+                        .on_hover_text("Always on top")
+                        .on_disabled_hover_text("Wayland leaves window stacking to the compositor")
+                        .clicked()
+                });
+                if pinned.inner {
                     self.always_on_top = !self.always_on_top;
                     let level = if self.always_on_top {
                         egui::WindowLevel::AlwaysOnTop
@@ -1039,6 +1044,10 @@ impl eframe::App for GimblyApp {
     /// Runs every frame and also while the window is minimised, so global
     /// shortcuts keep working in the background.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(error) = self.hotkeys.as_ref().and_then(GlobalHotkeys::take_error) {
+            self.notify(error);
+        }
         let actions = self
             .hotkeys
             .as_ref()

@@ -18,19 +18,19 @@ Tech.
 
 | Camera | 🪟 Windows | 🐧 Linux | 🍎 macOS |
 | :--- | :---: | :---: | :---: |
-| 📷 **OBSBOT Tiny 3 Lite** | ✅ | 🚧 | 🚧 |
+| 📷 **OBSBOT Tiny 3 Lite** | ✅ | ✅ | 🚧 |
 | 📷 Other OBSBOT models | ❔ | ❔ | ❔ |
 
 ### 📷 OBSBOT Tiny 3 Lite
 
 | Feature | 🪟 Windows | 🐧 Linux | 🍎 macOS |
 | :--- | :---: | :---: | :---: |
-| 🕹️ Gimbal joystick and drag-to-turn | ✅ | 🚧 | 🚧 |
-| 🎯 Gimbal reset | ✅ | 🚧 | 🚧 |
-| 🔍 Zoom 1×–4× | ✅ | 🚧 | 🚧 |
-| 🖼️ Field of view (Wide / Medium / Narrow) | ✅ | 🚧 | 🚧 |
-| 📌 Presets | ✅ | 🚧 | 🚧 |
-| 💤 Sleep / wake | ✅ | 🚧 | 🚧 |
+| 🕹️ Gimbal joystick and drag-to-turn | ✅ | ✅ | 🚧 |
+| 🎯 Gimbal reset | ✅ | ✅ | 🚧 |
+| 🔍 Zoom 1×–4× | ✅ | ✅ | 🚧 |
+| 🖼️ Field of view (Wide / Medium / Narrow) | ✅ | ✅ | 🚧 |
+| 📌 Presets | ✅ | ✅ | 🚧 |
+| 💤 Sleep / wake | ✅ | ✅ | 🚧 |
 | 🎥 Virtual camera | ✅ | 🚧 | 🚧 |
 | 🤖 AI tracking | 🗓️ | 🗓️ | 🗓️ |
 | 🎨 Image settings | 🗓️ | 🗓️ | 🗓️ |
@@ -43,12 +43,15 @@ camera? See [CONTRIBUTING.md](CONTRIBUTING.md#tested-a-camera).
 
 ## Status
 
-Early development. Windows has a camera backend; Linux and macOS builds
-currently lack camera capture.
+Early development. Capture backends use Media Foundation on Windows,
+V4L2 on Linux and AVFoundation on macOS. Linux supports native Wayland
+and X11. Virtual camera setup uses DirectShow on Windows, v4l2loopback on
+Linux and a signed Core Media I/O system extension on macOS.
 
-The Windows app has the control panel, live preview with rotate and mirror,
-snapshots, UVC zoom, a virtual camera (DirectShow, 64-bit apps), and
-Software Settings. AI tracking, image settings, and recording are planned.
+Live preview, rotate and mirror, snapshots, camera controls and Software
+Settings share the same app interface. AI tracking, image settings and
+recording are planned. See [CONTRIBUTING.md](CONTRIBUTING.md#build-and-run)
+for setup and [docs/devices.md](docs/devices.md) for hardware verification.
 
 ## How it is built
 

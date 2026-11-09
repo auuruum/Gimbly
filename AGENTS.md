@@ -16,8 +16,9 @@ The product name is written `Gimbly` in user-facing text; crates, binaries, and 
 
 - All first-party code is Rust. UI: egui on eframe with the wgpu renderer. No webview, Electron, or other languages in the app.
 - Prefer pure-Rust dependencies and keep the tree small. Use OS libraries or FFI only for camera access, the virtual camera, and desktop integration; isolate that code in small platform modules and explain why it is needed.
-- Windows, Linux, and macOS are first-class. A platform that lacks a feature returns a clear "unsupported" error; do not silently make a feature single-platform.
-- Build every new feature for all three platforms in the same task: shared logic in platform-neutral code, OS calls behind the same interface in each platform module. If a platform cannot be built or tested on the current machine, say so in the report and leave a clear "unsupported" path, never a silent gap.
+- Windows, macOS, Linux Wayland, and Linux X11 are first-class targets. Gimbly runs as a native Wayland client in a Wayland session and as an X11 client in an X11 session. XWayland is a compatibility path and does not substitute for native Wayland support.
+- Implement each feature for all four targets in the same task. Keep shared behavior in platform-neutral code and put native camera, windowing, shortcut, and desktop APIs behind shared interfaces. Use the Wayland compositor or desktop portal for operations that require its permission. Register global hotkeys through the XDG Desktop Portal `org.freedesktop.portal.GlobalShortcuts` on Wayland and native key grabs on X11. Let the portal handle consent and compositor bindings. Use the FileChooser portal for native Linux folder selection when the desktop provides it.
+- Report features that the OS, compositor, or desktop portal cannot provide with a clear in-app message. Identify any setup or permission the feature needs. If a target could not be built or tested, record the gap and the verification that still needs to run.
 - Keep the MIT license. Do not change it without the owner's approval.
 - Icons: SVG or egui-phosphor. Never use Unicode characters or emoji as UI icons.
 
@@ -63,6 +64,6 @@ Gimbly is a clean-room reimplementation: study features and behavior, document f
 
 - Read the relevant code and clean-room notes before changing files. Keep changes small; no speculative architecture.
 - Add tests for logic that works without hardware (message encoding and decoding, checksums, settings round-trips).
-- Check visual UI changes by running the app and looking at it.
+- Check visual UI changes in the running app. Validate Linux windowing and desktop integration separately with native Wayland and X11 sessions. An X11 test under XWayland exercises the X11 code path and must be reported as such.
 - Before finishing: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
-- Report compile checks separately from runtime and hardware tests. Never claim a camera model, firmware, or OS works until it was tested and recorded in `docs/devices.md`.
+- Report compile checks separately from runtime and hardware tests for Windows, macOS, Linux Wayland, and Linux X11. Never claim a camera model, firmware, or OS works until it was tested and recorded in `docs/devices.md`.

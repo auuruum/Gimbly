@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Gimbly
+Comment=Control your camera and preview video
+Exec=gimbly
+Icon=io.github.auuruum.gimbly
+Terminal=false
+Categories=AudioVideo;Video;
+StartupWMClass=io.github.auuruum.gimbly

@@ -31,8 +31,9 @@ cargo build --release -p gimbly
 ./target/release/gimbly
 ```
 
-Use a release build for high-resolution MJPEG. Gimbly uses the XDG
-FileChooser portal on Linux and native X11 registration for X11 hotkeys.
+For development, `cargo run -p gimbly` also optimizes MJPEG decoding and
+frame conversion. Gimbly uses the XDG FileChooser portal on Linux and
+native X11 registration for X11 hotkeys.
 Wayland global hotkeys use the desktop's GlobalShortcuts portal. Install
 the desktop entry and icon so the portal can identify Gimbly. The executable
 must be on the desktop session's PATH, or you can set `Exec=` in the desktop

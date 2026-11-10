@@ -292,15 +292,15 @@ impl Output {
         })
     }
 
-    pub fn publish(&mut self, view: &Nv12View<'_>, range: YuvRange) -> Result<(), String> {
+    pub fn publish(&mut self, view: &Nv12View<'_>, range: YuvRange) -> Result<bool, String> {
         let now = Instant::now();
         if now + Duration::from_millis(1) < self.next {
-            return Ok(());
+            return Ok(false);
         }
         self.next = (self.next + self.period).max(now);
         // SAFETY: the live queue supports one producer and one consumer.
         if unsafe { self.queue.count() } >= 2 {
-            return Ok(());
+            return Ok(false);
         }
         if let Some((sample, _)) = self.pool.sample(Some(view), range == YuvRange::Full) {
             let ptr = CFRetained::into_raw(sample);
@@ -310,8 +310,9 @@ impl Output {
                 // SAFETY: failed enqueue leaves ownership with this producer.
                 drop(unsafe { CFRetained::from_raw(ptr) });
             }
+            return Ok(status == 0);
         }
-        Ok(())
+        Ok(false)
     }
 }
 

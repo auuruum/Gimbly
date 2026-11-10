@@ -55,17 +55,30 @@ disabled in native Wayland windows.
 [GlobalShortcuts portal](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.GlobalShortcuts.html) ·
 [Hyprland global hotkeys](https://wiki.hypr.land/configuring/core/binds/globals/)
 
-For Virtual Camera, install `v4l2loopback` for the running kernel and
-create a writable loopback node with this name:
+For Virtual Camera, install `v4l2loopback` for the running kernel if your
+distribution does not include it. Click **Virtual Camera** in Gimbly, then
+**Create virtual camera…** if the setup dialog opens. Approve the system
+prompt. Gimbly starts sending video once its input camera has frames.
+When the icon lights up, select **Gimbly Virtual Camera** in the receiving app.
+
+If your desktop has no polkit authentication agent, use **Copy terminal
+command** in the dialog, run the command, and click **Check again**. To set up
+the device manually with an unloaded driver, run:
 
 ```bash
 sudo modprobe v4l2loopback devices=1 exclusive_caps=1 'card_label=Gimbly Virtual Camera'
 ```
 
-If the module is already in use, add a separate loopback node with
-`v4l2loopback-ctl` using the same label and exclusive capabilities. Enable
-Virtual Camera in Gimbly before looking for the device in the receiving
-app. Some clients list devices only when they open the camera selector.
+If the module is already loaded without a Gimbly device, install your
+distribution's `v4l2loopback` utilities and add a dedicated node:
+
+```bash
+sudo v4l2loopback-ctl add -x 1 -n 'Gimbly Virtual Camera'
+```
+
+The setup dialog adds the device for the running session. The driver docs
+describe how to load the module with these options at boot. Some receiving
+apps refresh the camera list only after reopening the camera selector.
 [v4l2loopback setup](https://github.com/v4l2loopback/v4l2loopback#options)
 
 ### macOS

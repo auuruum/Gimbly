@@ -110,9 +110,9 @@ impl Output {
         &mut self,
         view: &gimbly_vcam_shm::Nv12View<'_>,
         _range: crate::camera::YuvRange,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         self.0.region().publish(view, gimbly_vcam_shm::now_ms());
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -126,7 +126,12 @@ impl Drop for Output {
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
+pub(crate) use linux::is_loopback_driver;
+#[cfg(target_os = "linux")]
 pub use linux::{Output, register};
+
+#[cfg(target_os = "linux")]
+pub mod setup;
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub struct Output;
@@ -144,8 +149,8 @@ impl Output {
         &mut self,
         _view: &gimbly_vcam_shm::Nv12View<'_>,
         _range: crate::camera::YuvRange,
-    ) -> Result<(), String> {
-        Ok(())
+    ) -> Result<bool, String> {
+        Ok(false)
     }
 }
 

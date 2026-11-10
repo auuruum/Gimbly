@@ -31,7 +31,7 @@ Tech.
 | 🖼️ Field of view (Wide / Medium / Narrow) | ✅ | ✅ | 🚧 |
 | 📌 Presets | ✅ | ✅ | 🚧 |
 | 💤 Sleep / wake | ✅ | ✅ | 🚧 |
-| 🎥 Virtual camera | ✅ | 🚧 | 🚧 |
+| 🎥 Virtual camera | ✅ | ❔ | 🚧 |
 | 🤖 AI tracking | 🗓️ | 🗓️ | 🗓️ |
 | 🎨 Image settings | 🗓️ | 🗓️ | 🗓️ |
 | ⏺️ Recording | 🗓️ | 🗓️ | 🗓️ |
@@ -47,6 +47,11 @@ Early development. Capture backends use Media Foundation on Windows,
 V4L2 on Linux and AVFoundation on macOS. Linux supports native Wayland
 and X11. Virtual camera setup uses DirectShow on Windows, v4l2loopback on
 Linux and a signed Core Media I/O system extension on macOS.
+
+On Linux, click **Virtual Camera** and approve the first-time driver setup
+when prompted. Once the icon lights up, choose **Gimbly Virtual Camera** in
+your video app. See [Linux setup](CONTRIBUTING.md#linux) for the driver and
+terminal instructions.
 
 Live preview, rotate and mirror, snapshots, camera controls and Software
 Settings share the same app interface. AI tracking, image settings and

@@ -1,5 +1,4 @@
-//! Linux virtual camera producer using a user-configured v4l2loopback node.
-//! Never open a physical video output or try to load kernel modules.
+//! Linux virtual camera producer for a dedicated v4l2loopback node.
 
 use super::FRIENDLY_NAME;
 use crate::camera::{CaptureConfig, YuvRange, set_nonblocking};
@@ -9,33 +8,87 @@ use gimbly_vcam_shm::{
 };
 use linuxvideo::format::{PixFormat, PixelFormat};
 use linuxvideo::{CapabilityFlags, Device, VideoOutputDevice};
-use std::io;
+use std::io::{self, Write};
 use std::os::fd::{AsFd, AsRawFd};
+use std::path::{Path, PathBuf};
 
-fn loopback() -> Result<Device, String> {
-    for device in linuxvideo::list().map_err(|e| e.to_string())?.flatten() {
-        if let Ok(caps) = device.capabilities()
-            && caps.driver() == "v4l2 loopback"
-            && caps.card() == FRIENDLY_NAME
-        {
-            if !caps
-                .device_capabilities()
-                .contains(CapabilityFlags::VIDEO_OUTPUT)
-            {
-                return Err(format!(
-                    "{FRIENDLY_NAME} already has a producer. Close it and try again."
-                ));
-            }
-            return Ok(device);
+pub(crate) fn is_loopback_driver(driver: &str) -> bool {
+    matches!(driver, "v4l2 loopback" | "v4l2loopback")
+}
+
+pub(super) enum NodeError {
+    Missing,
+    Unavailable(String),
+}
+
+impl std::fmt::Display for NodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing => write!(
+                f,
+                "Create {FRIENDLY_NAME} from the Virtual Camera button or follow the Linux setup in CONTRIBUTING.md."
+            ),
+            Self::Unavailable(error) => f.write_str(error),
         }
     }
-    Err(format!(
-        "No writable v4l2loopback device named {FRIENDLY_NAME:?}. See the Linux setup in CONTRIBUTING.md."
-    ))
+}
+
+fn candidates(sysfs: &Path) -> io::Result<Vec<PathBuf>> {
+    let entries = match std::fs::read_dir(sysfs) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    Ok(entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            name.to_str()?.strip_prefix("video")?.parse::<u32>().ok()?;
+            let label = std::fs::read_to_string(entry.path().join("name")).ok()?;
+            (label.trim_end() == FRIENDLY_NAME).then(|| Path::new("/dev").join(name))
+        })
+        .collect())
+}
+
+pub(super) fn loopback() -> Result<Device, NodeError> {
+    let candidates = candidates(Path::new("/sys/class/video4linux")).map_err(|e| {
+        NodeError::Unavailable(format!("Could not look for the virtual camera: {e}"))
+    })?;
+    let mut error = NodeError::Missing;
+    for path in candidates {
+        let device = Device::open(&path).and_then(|device| Ok((device.capabilities()?, device)));
+        match device {
+            Ok((caps, device))
+                if is_loopback_driver(caps.driver()) && caps.card() == FRIENDLY_NAME =>
+            {
+                if caps
+                    .device_capabilities()
+                    .contains(CapabilityFlags::VIDEO_OUTPUT)
+                {
+                    return Ok(device);
+                }
+                error = NodeError::Unavailable(format!(
+                    "{FRIENDLY_NAME} is busy. Close apps using it and try again."
+                ));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                error = NodeError::Unavailable(format!(
+                    "Gimbly cannot write to {}. Check your video-device permissions and try again.",
+                    path.display()
+                ));
+            }
+            Err(e) => {
+                error = NodeError::Unavailable(format!("Could not open {}: {e}", path.display()))
+            }
+        }
+    }
+    Err(error)
 }
 
 pub fn register() -> Result<Option<String>, String> {
-    loopback()?;
+    loopback().map_err(|e| e.to_string())?;
     Ok(None)
 }
 
@@ -64,9 +117,10 @@ fn set_rate(device: &VideoOutputDevice, fps: u32) -> Result<(), String> {
     };
     // SAFETY: the initialized struct matches v4l2_streamparm's ABI, and
     // the pointer is valid for this ioctl on the open loopback descriptor.
-    unsafe { set_parameters(device.as_raw_fd(), &mut params) }
-        .map_err(|e| format!("Could not set the virtual camera frame rate: {e}"))?;
-    Ok(())
+    match unsafe { set_parameters(device.as_raw_fd(), &mut params) } {
+        Ok(_) | Err(nix::errno::Errno::ENOTTY | nix::errno::Errno::EINVAL) => Ok(()),
+        Err(e) => Err(format!("Could not set the virtual camera frame rate: {e}")),
+    }
 }
 
 pub struct Output {
@@ -81,7 +135,8 @@ impl Output {
         let (w, h) = config.virtual_size(size.ok_or("Camera output size is not available")?);
         let format = PreferredFormat::validated(w, h, config.fps)
             .ok_or("Unsupported virtual camera dimensions")?;
-        let device = loopback()?
+        let device = loopback()
+            .map_err(|e| e.to_string())?
             .video_output(PixFormat::new(w, h, PixelFormat::YUYV))
             .map_err(|e| format!("Could not configure {FRIENDLY_NAME}: {e}"))?;
         let actual = device.format();
@@ -89,6 +144,7 @@ impl Output {
             || actual.height() != h
             || actual.pixel_format() != PixelFormat::YUYV
             || actual.bytes_per_line() != w * 2
+            || actual.size_image() != w * h * 2
         {
             return Err(format!(
                 "{FRIENDLY_NAME} rejected {w}x{h} YUYV. Close any apps using the virtual camera and try again."
@@ -105,7 +161,7 @@ impl Output {
         })
     }
 
-    pub fn publish(&mut self, view: &Nv12View<'_>, range: YuvRange) -> Result<(), String> {
+    pub fn publish(&mut self, view: &Nv12View<'_>, range: YuvRange) -> Result<bool, String> {
         let (w, h) = (self.format.width as usize, self.format.height as usize);
         convert_scaled(view, OutputFormat::Yuy2, &mut self.buffer, w, h);
         if range == YuvRange::Full601 {
@@ -120,31 +176,23 @@ impl Output {
         self.write_frame()
     }
 
-    fn write_frame(&mut self) -> Result<(), String> {
-        // SAFETY: this is a nonblocking write of a complete frame with a
-        // valid buffer for the duration of the syscall.
-        let written = unsafe {
-            libc::write(
-                self.device.as_raw_fd(),
-                self.buffer.as_ptr().cast(),
-                self.buffer.len(),
-            )
-        };
-        if written == self.buffer.len() as isize {
-            self.published = true;
-            return Ok(());
-        }
-        if written < 0 {
-            let e = io::Error::last_os_error();
-            if matches!(
-                e.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-            ) {
-                return Ok(());
+    fn write_frame(&mut self) -> Result<bool, String> {
+        match self.device.write(&self.buffer) {
+            Ok(n) if n == self.buffer.len() => {
+                self.published = true;
+                Ok(true)
             }
-            return Err(format!("Virtual camera output stopped: {e}"));
+            Ok(_) => Err("Virtual camera accepted only part of a frame".into()),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(e) => Err(format!("Virtual camera output stopped: {e}")),
         }
-        Err("Virtual camera accepted only part of a frame".into())
     }
 }
 
@@ -161,5 +209,31 @@ impl Drop for Output {
             );
             let _ = self.write_frame();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_only_numeric_video_nodes_with_the_gimbly_label() {
+        let dir = std::env::temp_dir().join(format!("gimbly-loopback-test-{}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        for (node, label) in [
+            ("video3", "Gimbly Virtual Camera\n"),
+            ("video4", "OBS Virtual Camera\n"),
+            ("video-other", "Gimbly Virtual Camera\n"),
+            ("video5", "Gimbly Virtual Camera (old)\n"),
+        ] {
+            std::fs::create_dir(dir.join(node)).unwrap();
+            std::fs::write(dir.join(node).join("name"), label).unwrap();
+        }
+        let found = candidates(&dir).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(found, [PathBuf::from("/dev/video3")]);
+        assert!(is_loopback_driver("v4l2 loopback"));
+        assert!(is_loopback_driver("v4l2loopback"));
+        assert!(!is_loopback_driver("uvcvideo"));
     }
 }

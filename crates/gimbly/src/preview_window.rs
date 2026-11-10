@@ -34,6 +34,7 @@ pub struct PreviewInput<'a> {
     pub resolution: Resolution,
     pub preview_mode: PreviewMode,
     pub virtual_camera: bool,
+    pub virtual_camera_tip: &'static str,
     pub transform: Transform,
     pub toast: Option<&'a str>,
     /// Dragging the picture turns the gimbal.
@@ -400,13 +401,8 @@ impl PreviewWindow {
                         actions.push(PreviewAction::Snapshot);
                     }
                 });
-                let tip = if input.virtual_camera {
-                    "Stop Virtual Camera"
-                } else {
-                    "Start Virtual Camera"
-                };
                 if icon_button(ui, icon::WEBCAM, BUTTON, GLYPH, input.virtual_camera)
-                    .on_hover_text(tip)
+                    .on_hover_text(input.virtual_camera_tip)
                     .clicked()
                 {
                     actions.push(PreviewAction::ToggleVirtualCamera);
@@ -709,6 +705,7 @@ mod tests {
                     resolution: Resolution::Fhd30,
                     preview_mode: PreviewMode::Landscape,
                     virtual_camera: true,
+                    virtual_camera_tip: "Stop Virtual Camera",
                     transform: Default::default(),
                     toast: None,
                     gimbal: false,

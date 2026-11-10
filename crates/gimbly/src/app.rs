@@ -57,7 +57,12 @@ pub struct GimblyApp {
     /// the camera's own reading lags behind while it zooms smoothly.
     zoom_target: Option<i32>,
     gimbal_ui: view_gimbal::GimbalUi,
+    /// Requested by the user. SessionStatus reports whether frames are flowing.
     virtual_camera: bool,
+    virtual_camera_announced: bool,
+    virtual_camera_hint: Option<String>,
+    #[cfg(target_os = "linux")]
+    virtual_camera_setup: vcam::setup::Setup,
     /// Where the toolbar's sleep button sits, so the sleep overlay can keep
     /// it reachable.
     sleep_button: Rect,
@@ -97,6 +102,10 @@ impl GimblyApp {
             zoom_target: None,
             gimbal_ui: view_gimbal::GimbalUi::default(),
             virtual_camera: false,
+            virtual_camera_announced: false,
+            virtual_camera_hint: None,
+            #[cfg(target_os = "linux")]
+            virtual_camera_setup: Default::default(),
             sleep_button: Rect::NOTHING,
             toast: None,
             settings,
@@ -109,7 +118,7 @@ impl GimblyApp {
         app.refresh_devices(&cc.egui_ctx);
         app.refresh_hotkeys(&cc.egui_ctx);
         if std::env::args().any(|a| a == "--virtual-camera") {
-            app.set_virtual_camera(true);
+            app.toggle_virtual_camera(&cc.egui_ctx);
         }
         // `--settings` opens Software Settings, `--settings=hotkeys` a page.
         if let Some(arg) = std::env::args().find(|a| a.starts_with("--settings")) {
@@ -179,7 +188,7 @@ impl GimblyApp {
         }
         let ratio = self.shown_zoom_ratio().unwrap_or(1.0);
         match action {
-            HotkeyAction::ToggleVirtualCamera => self.set_virtual_camera(!self.virtual_camera),
+            HotkeyAction::ToggleVirtualCamera => self.toggle_virtual_camera(ctx),
             HotkeyAction::Device1
             | HotkeyAction::Device2
             | HotkeyAction::Device3
@@ -296,6 +305,7 @@ impl GimblyApp {
         // Dropping the old session releases the camera before reopening.
         self.session = None;
         self.status = SessionStatus::default();
+        self.virtual_camera_announced = false;
         self.preview = None;
         self.zoom_target = None;
         self.gimbal_ui.reset_camera();
@@ -357,6 +367,25 @@ impl GimblyApp {
             // Non-fatal errors (zoom, virtual camera) are shown once.
             self.notify(error);
         }
+        if let Some(error) = self.status.virtual_camera_error.take() {
+            self.virtual_camera = false;
+            self.virtual_camera_hint = None;
+            self.notify(error);
+        } else if self.virtual_camera
+            && self.status.virtual_camera
+            && !self.virtual_camera_announced
+        {
+            self.virtual_camera_announced = true;
+            let mut message = format!(
+                "Virtual camera on. Choose \"{}\" in your video app.",
+                vcam::FRIENDLY_NAME
+            );
+            if let Some(hint) = self.virtual_camera_hint.take() {
+                message.push('\n');
+                message.push_str(&hint);
+            }
+            self.notify(message);
+        }
         // Frames drive repaints while the preview is open; otherwise refresh
         // the status slowly.
         let wait = if self.status.state == SessionState::Opening {
@@ -367,30 +396,48 @@ impl GimblyApp {
         ctx.request_repaint_after(Duration::from_millis(wait));
     }
 
-    fn set_virtual_camera(&mut self, on: bool) {
-        let mut warning = None;
-        if on {
+    fn toggle_virtual_camera(&mut self, ctx: &egui::Context) {
+        if self.virtual_camera {
+            self.set_virtual_camera(false);
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        self.virtual_camera_setup.check(ctx);
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = ctx;
             match vcam::register() {
-                Ok(w) => warning = w,
-                Err(e) => {
-                    self.notify(format!("Virtual camera unavailable: {e}"));
-                    return;
+                Ok(hint) => {
+                    self.virtual_camera_hint = hint;
+                    self.set_virtual_camera(true);
                 }
+                Err(error) => self.notify(format!("Virtual camera unavailable: {error}")),
             }
         }
+    }
+
+    fn set_virtual_camera(&mut self, on: bool) {
         self.virtual_camera = on;
+        self.virtual_camera_announced = false;
         if let Some(session) = &self.session {
             session.send(Command::SetVirtualCamera(on));
+        } else if on {
+            self.notify("Virtual camera ready. Connect a camera to start sending video.");
         }
-        if on {
-            let hint = format!(
-                "Virtual camera on. Choose \"{}\" in your video app.",
-                vcam::FRIENDLY_NAME
-            );
-            self.notify(match warning {
-                Some(w) => format!("{hint}\n{w}"),
-                None => hint,
-            });
+        if !on {
+            self.virtual_camera_hint = None;
+        }
+    }
+
+    fn virtual_camera_tip(&self) -> &'static str {
+        #[cfg(target_os = "linux")]
+        if self.virtual_camera_setup.pending() {
+            return "Checking Linux virtual camera setup";
+        }
+        match (self.virtual_camera, self.status.virtual_camera) {
+            (true, true) => "Stop Virtual Camera",
+            (true, false) => "Waiting for video. Click to turn off Virtual Camera",
+            (false, _) => "Start Virtual Camera",
         }
     }
 
@@ -677,18 +724,19 @@ impl GimblyApp {
                     .on_disabled_hover_text(format!("{name}: {NOT_YET}"));
             });
         }
-        let tip = if self.virtual_camera {
-            "Stop Virtual Camera"
-        } else {
-            "Start Virtual Camera"
-        };
         let clicked = place(ui, slot(3), Layout::default(), ("toolbar", 3), |ui| {
-            icon_button(ui, icon::WEBCAM, 36.0, 20.0, self.virtual_camera)
-                .on_hover_text(tip)
-                .clicked()
+            icon_button(
+                ui,
+                icon::WEBCAM,
+                36.0,
+                20.0,
+                self.virtual_camera && self.status.virtual_camera,
+            )
+            .on_hover_text(self.virtual_camera_tip())
+            .clicked()
         });
         if clicked {
-            self.set_virtual_camera(!self.virtual_camera);
+            self.toggle_virtual_camera(ui.ctx());
         }
     }
 
@@ -938,7 +986,8 @@ impl GimblyApp {
             device: self.selected.map(|i| self.devices[i].name.as_str()),
             resolution: self.settings.resolution,
             preview_mode: self.settings.preview_mode,
-            virtual_camera: self.virtual_camera,
+            virtual_camera: self.virtual_camera && self.status.virtual_camera,
+            virtual_camera_tip: self.virtual_camera_tip(),
             transform: self.settings.transform,
             toast: toast.as_deref(),
             gimbal: self.status.vendor_control,
@@ -947,7 +996,7 @@ impl GimblyApp {
         for action in actions {
             match action {
                 PreviewAction::Retry => self.refresh_devices(ctx),
-                PreviewAction::ToggleVirtualCamera => self.set_virtual_camera(!self.virtual_camera),
+                PreviewAction::ToggleVirtualCamera => self.toggle_virtual_camera(ctx),
                 PreviewAction::Snapshot => self.take_snapshot(),
                 PreviewAction::OpenFolder => self.open_media_folder(),
                 PreviewAction::SetResolution(resolution) => {
@@ -1044,6 +1093,17 @@ impl eframe::App for GimblyApp {
     /// Runs every frame and also while the window is minimised, so global
     /// shortcuts keep working in the background.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(target_os = "linux")]
+        match self.virtual_camera_setup.poll() {
+            Some(vcam::setup::Outcome::Ready) => self.set_virtual_camera(true),
+            Some(vcam::setup::Outcome::NeedsSetup) => {
+                // A preview or global shortcut can ask for setup while the
+                // main panel (which owns the dialog) is minimized.
+                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, ViewportCommand::Focus);
+            }
+            None => {}
+        }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if let Some(error) = self.hotkeys.as_ref().and_then(GlobalHotkeys::take_error) {
             self.notify(error);
@@ -1090,6 +1150,8 @@ impl eframe::App for GimblyApp {
         self.rename_dialog(&ctx);
         self.preview_window(&ctx);
         self.settings_window(&ctx);
+        #[cfg(target_os = "linux")]
+        self.virtual_camera_setup.show(&ctx);
         self.toast(&ctx);
     }
 }

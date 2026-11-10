@@ -1,6 +1,7 @@
 //! `gimbly --probe`: a hardware smoke test without the UI. It opens the
-//! first OBSBOT camera, reports its format and zoom range, steps the zoom and
-//! measures the capture frame rate. Used to record hardware observations.
+//! first OBSBOT camera, or the first supported input if none is attached.
+//! It reports its format and zoom range, steps the zoom and measures the
+//! capture frame rate. Used to record hardware observations.
 //!
 //! Options: `--formats` lists the camera's native formats and exits;
 //! `--mode WxH@FPS` (e.g. `3840x2160@30`) captures that mode instead of
@@ -193,8 +194,13 @@ pub fn run() -> i32 {
             d.is_obsbot()
         );
     }
-    let Some(device) = devices.into_iter().find(|d| d.is_obsbot()) else {
-        eprintln!("no OBSBOT camera found");
+    let Some(device) = devices
+        .iter()
+        .find(|d| d.is_obsbot())
+        .or_else(|| devices.first())
+        .cloned()
+    else {
+        eprintln!("no supported capture device found");
         return 1;
     };
     if args.iter().any(|a| a == "--controls") {
@@ -314,7 +320,10 @@ pub fn run() -> i32 {
         status.format, status.output, status.measured_fps
     );
     if frames == 0 || (virtual_camera && !status.virtual_camera) {
-        eprintln!("no usable output: {:?}", status.error);
+        eprintln!(
+            "no usable output: {:?}",
+            status.virtual_camera_error.or(status.error)
+        );
         return 1;
     }
     0

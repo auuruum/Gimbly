@@ -210,7 +210,9 @@ pub struct SessionStatus {
     pub fov: Option<Fov>,
     /// Stored preset positions, in the camera's order. `None` until read.
     pub presets: Option<Vec<Preset>>,
+    /// The virtual camera has received at least one frame in this session.
     pub virtual_camera: bool,
+    pub virtual_camera_error: Option<String>,
     pub error: Option<String>,
 }
 
@@ -342,6 +344,7 @@ impl Shared {
     fn fail(&self, message: String) {
         let mut status = self.status();
         status.state = SessionState::Failed;
+        status.virtual_camera = false;
         status.error = Some(message);
     }
 }
@@ -451,7 +454,9 @@ impl Session {
                 if let Err(message) = backend::run_capture(&device, config, &worker) {
                     shared.fail(message);
                 } else {
-                    shared.status().state = SessionState::Stopped;
+                    let mut status = shared.status();
+                    status.state = SessionState::Stopped;
+                    status.virtual_camera = false;
                 }
                 (worker.repaint)();
             });
@@ -486,6 +491,7 @@ impl Session {
         if status.state != SessionState::Failed {
             status.error = None;
         }
+        status.virtual_camera_error = None;
         (current, frame)
     }
 

@@ -19,10 +19,13 @@ code builds for that system but was not run there.
 | OBSBOT Tiny 3 Lite | `3564:ff04` | 0x0510 | unknown | CachyOS Linux 7.3.3, X11 client under XWayland | Panel joystick, preview drag, Reset shortcut | position changed in camera readback with preview open | 2026-11-09 |
 | OBSBOT Tiny 3 Lite | `3564:ff04` | 0x0510 | unknown | CachyOS Linux 7.3.3, X11 on Xvfb | Live preview, rotation, mirror, snapshots and X11 global Snapshot | verified in running app, PNGs saved at 1920×1080 | 2026-11-09 |
 | OBSBOT Tiny 3 Lite | `3564:ff04` | 0x0510 | unknown | CachyOS Linux 7.3.3, native Wayland on Hyprland | Live preview, rotation, snapshots and portal Snapshot | verified in running app with `DISPLAY` unset, compositor activation saved a PNG | 2026-11-09 |
+| OBSBOT Tiny 3 Lite | `3564:ff04` | 0x0510 | unknown | CachyOS Linux 7.3.3 x86_64 | MJPEG 1080p30 preview on the virtual camera branch | release capture probe received live frames at 30 fps | 2026-11-10 |
 
 The 2026-11-08 Windows rows describe the earlier Windows build. The
 cross-platform change was checked by the compiler and Clippy for
 `x86_64-pc-windows-msvc` and `aarch64-apple-darwin`, including the camera
 extension for macOS. Native runtime checks of those builds are pending.
-Linux v4l2loopback output needs a run with a configured node.
-See the [Linux evidence log](clean-room/2026-11-09-linux-capture.md).
+The Linux virtual camera delivered frames to a second process in a guest
+with a synthetic input. A physical webcam and virtual output running
+together still need a host check. See the [virtual camera evidence log](clean-room/2026-11-10-linux-virtual-camera.md)
+and the [Linux capture evidence log](clean-room/2026-11-09-linux-capture.md).

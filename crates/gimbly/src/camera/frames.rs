@@ -40,19 +40,21 @@ impl<'a> Frames<'a> {
                         continue;
                     }
                     let format = self.worker.shared.status().output;
-                    self.virtual_camera = if enabled {
-                        match crate::vcam::Output::open(self.config, format) {
-                            Ok(output) => Some(output),
-                            Err(error) => {
-                                self.worker.shared.status().error =
-                                    Some(format!("Virtual camera output failed: {error}"));
-                                None
-                            }
+                    let output = enabled
+                        .then(|| crate::vcam::Output::open(self.config, format))
+                        .transpose();
+                    let error = match output {
+                        Ok(output) => {
+                            self.virtual_camera = output;
+                            None
                         }
-                    } else {
-                        None
+                        Err(error) => Some(format!("Virtual camera output failed: {error}")),
                     };
-                    self.worker.shared.status().virtual_camera = self.virtual_camera.is_some();
+                    {
+                        let mut status = self.worker.shared.status();
+                        status.virtual_camera = false;
+                        status.virtual_camera_error = error;
+                    }
                     (self.worker.repaint)();
                 }
                 Command::Snapshot => self.snapshot = true,
@@ -162,13 +164,23 @@ impl<'a> Frames<'a> {
         self.check_output(result);
     }
 
-    fn check_output(&mut self, result: Option<Result<(), String>>) {
-        if let Some(Err(error)) = result {
-            self.virtual_camera = None;
-            let mut status = self.worker.shared.status();
-            status.virtual_camera = false;
-            status.error = Some(error);
-            (self.worker.repaint)();
+    fn check_output(&mut self, result: Option<Result<bool, String>>) {
+        match result {
+            Some(Ok(true)) => {
+                let mut status = self.worker.shared.status();
+                if !status.virtual_camera {
+                    status.virtual_camera = true;
+                    (self.worker.repaint)();
+                }
+            }
+            Some(Err(error)) => {
+                self.virtual_camera = None;
+                let mut status = self.worker.shared.status();
+                status.virtual_camera = false;
+                status.virtual_camera_error = Some(error);
+                (self.worker.repaint)();
+            }
+            _ => {}
         }
     }
 }
@@ -186,4 +198,34 @@ fn placeholder(
         *cache = Some((size, frame));
     }
     Nv12View::packed(&cache.as_ref()?.1, w, h)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn virtual_camera_status_requires_a_published_frame_and_clears_on_error() {
+        let (_tx, commands) = super::super::queue::channel();
+        let worker = Worker {
+            shared: Arc::default(),
+            commands,
+            stop: Arc::new(AtomicBool::new(false)),
+            repaint: Arc::new(|| {}),
+        };
+        let mut frames = Frames::new(&worker, CaptureConfig::default(), false);
+        frames.check_output(Some(Ok(false)));
+        assert!(!worker.shared.status().virtual_camera);
+        frames.check_output(Some(Ok(true)));
+        assert!(worker.shared.status().virtual_camera);
+        frames.check_output(Some(Err("device closed".into())));
+        let status = worker.shared.status();
+        assert!(!status.virtual_camera);
+        assert_eq!(
+            status.virtual_camera_error.as_deref(),
+            Some("device closed")
+        );
+    }
 }

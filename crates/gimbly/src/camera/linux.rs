@@ -37,7 +37,7 @@ pub fn list_devices() -> Result<Vec<DeviceInfo>, String> {
         if !caps
             .device_capabilities()
             .contains(CapabilityFlags::VIDEO_CAPTURE | CapabilityFlags::STREAMING)
-            || caps.driver() == "v4l2 loopback"
+            || crate::vcam::is_loopback_driver(caps.driver())
             || caps.card() == crate::vcam::FRIENDLY_NAME
         {
             continue;

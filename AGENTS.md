@@ -16,11 +16,16 @@ The product name is written `Gimbly` in user-facing text; crates, binaries, and 
 
 - All first-party code is Rust. UI: egui on eframe with the wgpu renderer. No webview, Electron, or other languages in the app.
 - Prefer pure-Rust dependencies and keep the tree small. Use OS libraries or FFI only for camera access, the virtual camera, and desktop integration; isolate that code in small platform modules and explain why it is needed.
-- Windows, macOS, Linux Wayland, and Linux X11 are first-class targets. Gimbly runs as a native Wayland client in a Wayland session and as an X11 client in an X11 session. XWayland is a compatibility path and does not substitute for native Wayland support.
-- Implement each feature for all four targets in the same task. Keep shared behavior in platform-neutral code and put native camera, windowing, shortcut, and desktop APIs behind shared interfaces. Use the Wayland compositor or desktop portal for operations that require its permission. Register global hotkeys through the XDG Desktop Portal `org.freedesktop.portal.GlobalShortcuts` on Wayland and native key grabs on X11. Let the portal handle consent and compositor bindings. Use the FileChooser portal for native Linux folder selection when the desktop provides it.
-- Report features that the OS, compositor, or desktop portal cannot provide with a clear in-app message. Identify any setup or permission the feature needs. If a target could not be built or tested, record the gap and the verification that still needs to run.
 - Keep the MIT license. Do not change it without the owner's approval.
 - Icons: SVG or egui-phosphor. Never use Unicode characters or emoji as UI icons.
+
+### Platform support
+
+- Design and implement each feature for Windows, Linux, and macOS in the same change. Include the tests for that feature in the same change.
+- Account for native Wayland and native X11 from the start of any Linux work. Gimbly runs as a native Wayland client in a Wayland session and as an X11 client in an X11 session. XWayland is a compatibility path.
+- Keep shared behavior in platform-neutral code. Put native camera, windowing, shortcut, and desktop APIs behind shared interfaces.
+- On Wayland, use the compositor or desktop portal for operations that require its permission. Register global hotkeys through the XDG Desktop Portal `org.freedesktop.portal.GlobalShortcuts` and let the portal handle consent and compositor bindings. On X11, use native key grabs for global hotkeys. Use the FileChooser portal for native Linux folder selection when the desktop provides it.
+- Report features that the OS, compositor, or desktop portal cannot provide with a clear in-app message. Identify any setup or permission the feature needs.
 
 ## 3. Clean-room implementation
 
@@ -63,7 +68,7 @@ Gimbly is a clean-room reimplementation: study features and behavior, document f
 ### Implementation and validation
 
 - Read the relevant code and clean-room notes before changing files. Keep changes small; no speculative architecture.
-- Add tests for logic that works without hardware (message encoding and decoding, checksums, settings round-trips).
-- Check visual UI changes in the running app. Validate Linux windowing and desktop integration separately with native Wayland and X11 sessions. An X11 test under XWayland exercises the X11 code path and must be reported as such.
-- Before finishing, run the local checks in [CONTRIBUTING.md](CONTRIBUTING.md#make-a-change). GitHub Actions runs formatting, Clippy, builds, and tests for changes to `main` with jobs on Linux, Windows, and macOS.
-- Report compile checks separately from runtime and hardware tests for Windows, macOS, Linux Wayland, and Linux X11. Never claim a camera model, firmware, or OS works until it was tested and recorded in `docs/devices.md`.
+- Add tests for logic that works without hardware (message encoding and decoding, checksums, settings round-trips). Run shared tests on all three OSes and platform-specific tests on the applicable OS.
+- Before finishing, run the local checks in [CONTRIBUTING.md](CONTRIBUTING.md#make-a-change). GitHub Actions checks formatting and, on each of Windows, Linux, and macOS, runs Clippy, builds the full workspace including Gimbly and its platform binaries, and runs the workspace tests.
+- Check visual UI changes in the running app. For Linux windowing and desktop integration changes, verify the affected behavior in separate native Wayland and native X11 sessions. Report any XWayland run as X11 under XWayland.
+- Report compile checks separately from runtime and hardware tests for Windows, macOS, native Wayland, and native X11. Record any target or session you could not verify and the check it still needs. Never claim a camera model, firmware, or OS works until it was tested and recorded in `docs/devices.md`.

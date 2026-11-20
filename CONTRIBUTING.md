@@ -112,25 +112,32 @@ distribution. [Apple camera extension setup](https://developer.apple.com/documen
 
 ## Make a change
 
-1. Branch from the latest `dev`:
+1. Branch from the latest `main`.
 
    ```bash
    git fetch
-   git switch --no-track -c feature/short-name origin/dev
+   git switch --no-track -c feature/short-name origin/main
    ```
 
    Prefixes: `feature/`, `fix/`, `docs/`, `refactor/`, `chore/`.
 
 2. Keep the change small. Add tests for logic that works without a camera.
-3. Before you open a pull request, run:
+3. Run the local checks before asking for review.
 
    ```bash
    cargo fmt --all
-   cargo clippy --workspace --all-targets -- -D warnings
-   cargo test --workspace
+   cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+   cargo build --workspace --all-features --locked
+   cargo test --workspace --all-features --locked --no-fail-fast
    ```
 
-4. Open the pull request against `dev`, never `main`.
+4. Share the task branch and validation results with the owner for approval
+   to merge into `main`. If the owner requests a pull request, target `main`.
+
+GitHub Actions checks formatting on Linux and runs Clippy, builds, and tests
+on Linux, Windows, and macOS. CI runs on pushes to `main`, pull requests
+targeting `main`, and manual dispatch. Test native Wayland, native X11, and
+camera behavior separately when your change affects them.
 
 ## Rules that matter most
 

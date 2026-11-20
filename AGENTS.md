@@ -48,22 +48,22 @@ Gimbly is a clean-room reimplementation: study features and behavior, document f
 - Settings and camera state stay in plain serializable data; the UI is a view over it.
 - Every crash fix comes with a regression test.
 
-## 5. Workflow
+## 5. Implementation workflow
 
 ### Branches and human approval
 
-- `main` is the stable branch; `dev` is the integration branch.
-- Start each task on its own branch from the latest `origin/dev` after fetching: `git switch --no-track -c <kind>/<short-task-name> origin/dev`. Kinds: `feature/`, `fix/`, `docs/`, `refactor/`, `chore/`. Never put the name of an agent, tool, or model in a branch name.
-- Within the task, agents may edit, test, commit, and push the task branch without asking at each step. Push explicitly to the task branch, never `dev` or `main`.
-- When the task is done, report the changes and validation results, then ask whether to merge the task branch into `dev`. Merge and push `dev` only after explicit human approval.
-- Merge `dev` into `main` only when the owner asks for it. Approval to merge into `dev` is not approval to update `main`.
-- Without explicit approval for the specific operation, never change local or remote `dev` or `main`: no commits, merges, cherry-picks, rebases, resets, pushes, force-pushes, or deletions. Fetching and reading them, branching from `origin/dev`, and merging `origin/dev` into a task branch are allowed.
-- Pull requests may be prepared for review; never enable auto-merge.
+- `main` is the only long-lived branch. Start each new task on a separate branch based on the latest `origin/main`. Continue related work on that task branch.
+- After fetching, run `git switch --no-track -c <kind>/<short-task-name> origin/main`. Use `feature/`, `fix/`, `docs/`, `refactor/`, or `chore/`. Name the branch after the work, without agent, tool, or model names.
+- Within the task, agents may edit, test, commit, and push the task branch. Push explicitly to the task branch.
+- Report the changes, validation results, and any checks still needed. Ask the owner whether to merge the task branch into `main`.
+- After the owner approves that merge, update local `main` from `origin/main` with a fast-forward, merge the task branch with `git merge --no-ff`, and push `main`. Rerun the checks before pushing if `main` advanced since the task branch was cut.
+- Any change to local or remote `main` requires explicit approval for that operation. Fetching `origin/main`, branching from it, or merging it into a task branch is allowed.
+- Open a pull request only if the owner asks, and target `main`. Keep auto-merge disabled.
 
 ### Implementation and validation
 
 - Read the relevant code and clean-room notes before changing files. Keep changes small; no speculative architecture.
 - Add tests for logic that works without hardware (message encoding and decoding, checksums, settings round-trips).
 - Check visual UI changes in the running app. Validate Linux windowing and desktop integration separately with native Wayland and X11 sessions. An X11 test under XWayland exercises the X11 code path and must be reported as such.
-- Before finishing: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
+- Before finishing, run the local checks in [CONTRIBUTING.md](CONTRIBUTING.md#make-a-change). GitHub Actions runs formatting, Clippy, builds, and tests for changes to `main` with jobs on Linux, Windows, and macOS.
 - Report compile checks separately from runtime and hardware tests for Windows, macOS, Linux Wayland, and Linux X11. Never claim a camera model, firmware, or OS works until it was tested and recorded in `docs/devices.md`.

@@ -65,6 +65,46 @@ Gimbly is a clean-room reimplementation: study features and behavior, document f
 - Any change to local or remote `main` requires explicit approval for that operation. Fetching `origin/main`, branching from it, or merging it into a task branch is allowed.
 - Open a pull request only if the owner asks, and target `main`. Keep auto-merge disabled.
 
+### GitHub access for this repository
+
+Use the fine-grained GitHub token in `.env` at the root of the original Gimbly clone for GitHub operations in this repository. The clone and its linked worktrees share that file. Keep branch approvals in effect.
+
+Create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new) with resource owner `auuruum`. Under **Only select repositories**, choose **Gimbly**. Grant **Contents: Read and write** for Git and **Workflows: Read and write** to push changes to `.github/workflows/`. **Metadata: Read-only** is included automatically. Add **Actions: Read-only** if the agent needs to inspect CI runs and logs. Add **Pull requests: Read and write** only if the owner wants the agent to open or update PRs. Leave other permissions unset.
+
+Verify that `git check-ignore .env` lists the file, then put the token on a single line in `.env` as `GH_TOKEN=github_pat_...`. Keep `.env` out of commits, chat, and tool output. On Unix, set its permissions to `0600`.
+
+For Git over HTTPS, configure the credential helper once per clone.
+
+```sh
+credential_url=https://github.com/auuruum/Gimbly.git
+git config --local "credential.$credential_url.useHttpPath" true
+git config --local --replace-all "credential.$credential_url.helper" ''
+git config --local --add "credential.$credential_url.helper" '!gimbly_credential() {
+    test "$1" = get || return 0
+    common=$(git rev-parse --path-format=absolute --git-common-dir) || return 1
+    token=$(sed -n "/^GH_TOKEN=/{s/^GH_TOKEN=//;s/[[:space:]]*$//;p;q;}" "$common/../.env" 2>/dev/null)
+    case "$token" in
+      github_pat_*) printf "username=auuruum\npassword=%s\n" "$token" ;;
+    esac
+  }; gimbly_credential'
+```
+
+For GitHub CLI commands, load the token for that command and target Gimbly explicitly. Run credential commands with shell tracing disabled.
+
+```sh
+(
+  set +x
+  common=$(git rev-parse --path-format=absolute --git-common-dir) || exit 1
+  token=$(sed -n '/^GH_TOKEN=/{s/^GH_TOKEN=//;s/[[:space:]]*$//;p;q;}' "$common/../.env") || exit 1
+  case "$token" in
+    github_pat_*) GH_TOKEN="$token" gh run list --repo github.com/auuruum/Gimbly ;;
+    *) exit 1 ;;
+  esac
+)
+```
+
+To retire the token, revoke it in GitHub and clear its value in `.env`.
+
 ### Implementation and validation
 
 - Read the relevant code and clean-room notes before changing files. Keep changes small; no speculative architecture.

@@ -649,12 +649,19 @@ mod tests {
             "Alt + X",
             "Ctrl + Alt + F12",
             "Alt + Up",
-            "Win + 4",
             "Alt + =",
         ] {
             let combo = KeyCombo::parse(text).unwrap();
             assert_eq!(combo.to_string(), text);
         }
+        let system_combo = KeyCombo::parse("Win + 4").unwrap();
+        assert_eq!(KeyCombo::parse("Cmd + 4"), Some(system_combo));
+        let system_label = if cfg!(target_os = "macos") {
+            "Cmd + 4"
+        } else {
+            "Win + 4"
+        };
+        assert_eq!(system_combo.to_string(), system_label);
         assert_eq!(KeyCombo::parse("Shift + A"), None, "needs Ctrl, Alt or Win");
         assert_eq!(KeyCombo::parse("Alt + Banana"), None);
     }

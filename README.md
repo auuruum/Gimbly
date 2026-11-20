@@ -31,7 +31,7 @@ Tech.
 | 🖼️ Field of view (Wide / Medium / Narrow) | ✅ | ✅ | 🚧 |
 | 📌 Presets | ✅ | ✅ | 🚧 |
 | 💤 Sleep / wake | ✅ | ✅ | 🚧 |
-| 🎥 Virtual camera | ✅ | ❔ | 🚧 |
+| 🎥 Virtual camera | ✅ | ✅ | 🚧 |
 | 🤖 AI tracking | 🗓️ | 🗓️ | 🗓️ |
 | 🎨 Image settings | 🗓️ | 🗓️ | 🗓️ |
 | ⏺️ Recording | 🗓️ | 🗓️ | 🗓️ |

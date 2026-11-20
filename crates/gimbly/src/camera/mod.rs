@@ -1,16 +1,12 @@
 //! Camera discovery, capture and control.
 //!
 //! The shared part of this module defines the session API used by the UI. The
-//! OS-specific backend lives in a submodule: Media Foundation on Windows.
-//! Linux (V4L2) and macOS (AVFoundation) backends are not written yet; on
-//! those systems the session reports that capture is unavailable instead of
-//! pretending to work.
+//! OS-specific backends provide Media Foundation, V4L2 and AVFoundation.
 
-// Until the Linux and macOS backends exist, parts of the shared API are only
-// used by the Windows backend.
-#![cfg_attr(not(windows), allow(dead_code))]
-
+mod control;
+mod frames;
 mod preview;
+mod queue;
 mod sleep;
 mod standby;
 mod vendor;
@@ -20,18 +16,29 @@ mod windows;
 #[cfg(windows)]
 use self::windows as backend;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use self::linux as backend;
+#[cfg(target_os = "linux")]
+pub(crate) use self::linux::set_nonblocking;
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use self::macos as backend;
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 mod unsupported;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 use self::unsupported as backend;
 
 pub use gimbly_vcam_shm::Transform;
-pub use preview::PreviewFrame;
+pub use preview::{PreviewFrame, YuvRange};
 
+use queue::{Receiver, Sender, channel};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::thread::JoinHandle;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 /// USB vendor ID used by OBSBOT (Remo Tech) cameras.
 pub const OBSBOT_USB_VENDOR_ID: u16 = 0x3564;
@@ -68,8 +75,13 @@ impl ZoomRange {
         if self.step <= 1 {
             return clamped;
         }
-        let steps = (clamped - self.min + self.step / 2) / self.step;
-        (self.min + steps * self.step).min(self.max)
+        let (min, max, step) = (
+            i64::from(self.min),
+            i64::from(self.max),
+            i64::from(self.step),
+        );
+        let steps = (i64::from(clamped) - min + step / 2) / step;
+        (min + steps * step).min(max) as i32
     }
 }
 
@@ -142,6 +154,20 @@ impl CaptureConfig {
             (width, height)
         }
     }
+
+    /// Standard video-app sizes for the portrait crop. The preview and
+    /// snapshots keep the actual cropped dimensions.
+    pub fn virtual_size(&self, (width, height): (u32, u32)) -> (u32, u32) {
+        if self.portrait {
+            if height >= 1080 {
+                (1080, 1920)
+            } else {
+                (720, 1280)
+            }
+        } else {
+            (width, height)
+        }
+    }
 }
 
 /// Even width of a 9:16 picture with the given height.
@@ -184,7 +210,9 @@ pub struct SessionStatus {
     pub fov: Option<Fov>,
     /// Stored preset positions, in the camera's order. `None` until read.
     pub presets: Option<Vec<Preset>>,
+    /// The virtual camera has received at least one frame in this session.
     pub virtual_camera: bool,
+    pub virtual_camera_error: Option<String>,
     pub error: Option<String>,
 }
 
@@ -201,36 +229,6 @@ pub enum Command {
     SetSleep(bool),
     /// An OBSBOT vendor command (gimbal, zoom ratio, presets).
     Gimbal(GimbalCommand),
-}
-
-/// Keeps only the newest gimbal speed and zoom ratio between other
-/// commands. The joystick and the zoom slider send a value every UI frame,
-/// faster than the camera takes writes; sending each one would leave the
-/// camera working through stale values long after the user stopped.
-/// Speed and zoom are independent, so a newer value takes the older one's
-/// place; nothing moves past any other command.
-pub(crate) fn coalesce(commands: impl IntoIterator<Item = Command>) -> Vec<Command> {
-    fn kind(command: &Command) -> Option<u8> {
-        match command {
-            Command::Gimbal(GimbalCommand::Speed { .. }) => Some(0),
-            Command::Gimbal(GimbalCommand::ZoomRatio(_)) => Some(1),
-            _ => None,
-        }
-    }
-    let mut out: Vec<Command> = Vec::new();
-    for command in commands {
-        let older = kind(&command).and_then(|k| {
-            out.iter_mut()
-                .rev()
-                .take_while(|c| kind(c).is_some())
-                .find(|c| kind(c) == Some(k))
-        });
-        match older {
-            Some(older) => *older = command,
-            None => out.push(command),
-        }
-    }
-    out
 }
 
 /// Commands for OBSBOT cameras with a gimbal, carried out off the UI thread.
@@ -346,6 +344,7 @@ impl Shared {
     fn fail(&self, message: String) {
         let mut status = self.status();
         status.state = SessionState::Failed;
+        status.virtual_camera = false;
         status.error = Some(message);
     }
 }
@@ -353,7 +352,7 @@ impl Shared {
 /// Context handed to the platform capture loop.
 pub struct Worker {
     pub shared: Arc<Shared>,
-    pub commands: Receiver<Command>,
+    commands: Receiver,
     pub stop: Arc<AtomicBool>,
     pub repaint: Arc<dyn Fn() + Send + Sync>,
 }
@@ -364,13 +363,66 @@ impl Worker {
     }
 }
 
+fn forward_control(worker: &Worker, control: Option<&Sender>, command: Command) {
+    let error = match control {
+        Some(control) if control.send(command) => return,
+        Some(_) => "Camera control queue is full",
+        None => "This camera does not support the requested control",
+    };
+    worker.shared.status().error = Some(error.into());
+    (worker.repaint)();
+}
+
+fn mode_score(m: &VideoMode, config: CaptureConfig) -> (bool, bool, i64, i64, u8) {
+    let target = config.fps as f32;
+    let exact_size = m.width == config.width && m.height == config.height;
+    let area = u64::from(m.width) * u64::from(m.height);
+    let target_area = u64::from(config.width) * u64::from(config.height);
+    let area_gap = -(area.abs_diff(target_area).min(i64::MAX as u64) as i64);
+    let fps_ok = (m.fps - target).abs() < 0.5 || (m.min_fps <= target && target <= m.max_fps);
+    let fps_gap = -((m.fps - target).abs() * 1000.0) as i64;
+    let rank = if config.fps > 30 && m.codec == "MJPG" {
+        u8::MAX
+    } else {
+        m.codec_rank()
+    };
+    (exact_size, fps_ok, area_gap, fps_gap, rank)
+}
+
+// The UI can replace a session immediately. The next capture worker waits
+// off-thread for the old camera handle (and virtual output) to be released.
+static CAPTURE_BUSY: Mutex<bool> = Mutex::new(false);
+static CAPTURE_CHANGED: Condvar = Condvar::new();
+
+struct CapturePermit;
+
+impl CapturePermit {
+    fn wait(worker: &Worker) -> Option<Self> {
+        let busy = CAPTURE_BUSY.lock().unwrap_or_else(|e| e.into_inner());
+        let mut busy = CAPTURE_CHANGED
+            .wait_while(busy, |busy| *busy && !worker.should_stop())
+            .unwrap_or_else(|e| e.into_inner());
+        if worker.should_stop() {
+            return None;
+        }
+        *busy = true;
+        Some(Self)
+    }
+}
+
+impl Drop for CapturePermit {
+    fn drop(&mut self) {
+        *CAPTURE_BUSY.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        CAPTURE_CHANGED.notify_all();
+    }
+}
+
 /// A running capture session on one device. Dropping it stops the capture
 /// thread and releases the camera.
 pub struct Session {
     shared: Arc<Shared>,
-    commands: Sender<Command>,
+    commands: Sender,
     stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
 }
 
 impl Session {
@@ -395,28 +447,36 @@ impl Session {
         let thread = std::thread::Builder::new()
             .name("camera-capture".into())
             .spawn(move || {
+                let Some(_permit) = CapturePermit::wait(&worker) else {
+                    return;
+                };
                 let shared = worker.shared.clone();
                 if let Err(message) = backend::run_capture(&device, config, &worker) {
                     shared.fail(message);
                 } else {
-                    shared.status().state = SessionState::Stopped;
+                    let mut status = shared.status();
+                    status.state = SessionState::Stopped;
+                    status.virtual_camera = false;
                 }
                 (worker.repaint)();
-            })
-            .ok();
-        if thread.is_none() {
+            });
+        if thread.is_err() {
             shared.fail("Could not start the capture thread".into());
         }
         Self {
             shared,
             commands: tx,
             stop,
-            thread,
         }
     }
 
     pub fn send(&self, command: Command) {
-        let _ = self.commands.send(command);
+        if !self.commands.send(command) {
+            let mut status = self.shared.status();
+            if status.state != SessionState::Failed {
+                status.error = Some("The camera could not accept another command".into());
+            }
+        }
     }
 
     pub fn status(&self) -> SessionStatus {
@@ -425,9 +485,14 @@ impl Session {
 
     /// Reads the status and takes a frame from the same video epoch.
     pub fn status_and_preview(&self, take_frame: bool) -> (SessionStatus, Option<PreviewFrame>) {
-        let status = self.shared.status();
+        let mut status = self.shared.status();
         let frame = take_frame.then(|| self.shared.frame().take()).flatten();
-        (status.clone(), frame)
+        let current = status.clone();
+        if status.state != SessionState::Failed {
+            status.error = None;
+        }
+        status.virtual_camera_error = None;
+        (current, frame)
     }
 
     /// Takes the newest preview frame, if one arrived since the last call.
@@ -443,10 +508,9 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        let _busy = CAPTURE_BUSY.lock().unwrap_or_else(|e| e.into_inner());
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        CAPTURE_CHANGED.notify_all();
     }
 }
 
@@ -470,6 +534,7 @@ pub fn probe_controls(device: &DeviceInfo, script: Vec<String>) -> Result<Vec<St
 
 /// Extracts the USB vendor and product IDs from an OS device path such as
 /// `\\?\usb#vid_3564&pid_ff04&mi_00#...`.
+#[cfg(any(windows, test))]
 pub fn parse_usb_ids(path: &str) -> (Option<u16>, Option<u16>) {
     let lower = path.to_ascii_lowercase();
     let hex_after = |key: &str| {
@@ -527,7 +592,13 @@ mod tests {
             zoom(4.0),
         ];
         assert_eq!(
-            coalesce(batch),
+            {
+                let (tx, rx) = channel();
+                for command in batch {
+                    assert!(tx.send(command));
+                }
+                Vec::from(rx.drain())
+            },
             vec![
                 Command::Gimbal(Drag(true)),
                 speed(2.0),
@@ -562,5 +633,12 @@ mod tests {
         assert_eq!(range.snap(125), 130);
         let unit = ZoomRange { step: 1, ..range };
         assert_eq!(unit.snap(123), 123);
+        let wide = ZoomRange {
+            min: i32::MIN,
+            max: i32::MAX,
+            step: 2,
+            default: 0,
+        };
+        assert_eq!(wide.snap(i32::MAX), i32::MAX);
     }
 }

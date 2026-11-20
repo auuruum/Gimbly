@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key><string>gimbly-camera-extension</string>
+    <key>CFBundleIdentifier</key><string>io.github.auuruum.gimbly.camera</string>
+    <key>CFBundleName</key><string>Gimbly Virtual Camera</string>
+    <key>CFBundlePackageType</key><string>SYSX</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>1</string>
+    <key>LSMinimumSystemVersion</key><string>13.0</string>
+    <key>NSSystemExtensionUsageDescription</key><string>Gimbly exposes its processed video as a camera for other apps.</string>
+    <key>CMIOExtension</key>
+    <dict>
+        <key>CMIOExtensionMachServiceName</key><string>TEAM_ID.io.github.auuruum.gimbly.camera</string>
+    </dict>
+</dict>
+</plist>

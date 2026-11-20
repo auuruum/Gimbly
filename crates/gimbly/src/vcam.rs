@@ -7,7 +7,7 @@
 //! loaded for as long as they run, so a fixed file name could never be
 //! replaced while, say, Discord is open; with one file per build the new
 //! version is registered immediately and old copies are removed once nothing
-//! uses them. Other platforms have no virtual camera yet.
+//! uses them. Linux uses v4l2loopback and macOS uses a Core Media I/O extension.
 
 #[cfg(windows)]
 pub use gimbly_vcam_shm::FRIENDLY_NAME;
@@ -87,11 +87,79 @@ pub fn register() -> Result<Option<String>, String> {
     }))
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn register() -> Result<Option<String>, String> {
     Err("the virtual camera is only implemented on Windows so far".into())
 }
 
+#[cfg(windows)]
+pub struct Output(gimbly_vcam_shm::SharedMemory);
+
+#[cfg(windows)]
+impl Output {
+    pub fn open(
+        _config: crate::camera::CaptureConfig,
+        _format: Option<(u32, u32)>,
+    ) -> Result<Self, String> {
+        gimbly_vcam_shm::SharedMemory::create()
+            .map(Self)
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn publish(
+        &mut self,
+        view: &gimbly_vcam_shm::Nv12View<'_>,
+        _range: crate::camera::YuvRange,
+    ) -> Result<bool, String> {
+        self.0.region().publish(view, gimbly_vcam_shm::now_ms());
+        Ok(true)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Output {
+    fn drop(&mut self) {
+        self.0.region().mark_stopped();
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+pub(crate) use linux::is_loopback_driver;
+#[cfg(target_os = "linux")]
+pub use linux::{Output, register};
+
+#[cfg(target_os = "linux")]
+pub mod setup;
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+pub struct Output;
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+impl Output {
+    pub fn open(
+        _config: crate::camera::CaptureConfig,
+        _format: Option<(u32, u32)>,
+    ) -> Result<Self, String> {
+        Err("Virtual camera output is unsupported on this system".into())
+    }
+
+    pub fn publish(
+        &mut self,
+        _view: &gimbly_vcam_shm::Nv12View<'_>,
+        _range: crate::camera::YuvRange,
+    ) -> Result<bool, String> {
+        Ok(false)
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+mod macos_media;
+#[cfg(target_os = "macos")]
+pub use macos::{Output, register};
 #[cfg(test)]
 mod tests {
     use super::content_hash;

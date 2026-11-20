@@ -27,6 +27,7 @@
 use super::{Fov, GimbalCommand, PRESET_NAME_MAX, PRESET_SLOTS, PresetPosition, ZOOM_RATIO_MAX};
 
 /// GUID of the extension unit, as the UVC descriptor stores it.
+#[cfg(windows)]
 pub const XU_GUID: u128 = 0x9a1e7291_6843_4683_6d92_39bc7906ee49;
 /// Extension unit control that takes messages and returns replies.
 pub const SELECTOR_COMMAND: u32 = 2;

@@ -19,14 +19,24 @@ pub enum YuvRange {
     /// Y in 16..=235, UV in 16..=240 (video range).
     Limited,
     /// Y and UV in 0..=255 (JPEG range).
+    #[cfg(any(not(target_os = "linux"), test))]
     Full,
+    #[cfg(target_os = "linux")]
+    Limited601,
+    #[cfg(target_os = "linux")]
+    Full601,
 }
 
 /// BT.709 coefficients in 8.8 fixed point: (luma gain, V->R, U->G, V->G, U->B).
 fn coefficients(range: YuvRange) -> (i32, i32, i32, i32, i32, i32) {
     match range {
         YuvRange::Limited => (16, 298, 459, 55, 136, 541),
+        #[cfg(any(not(target_os = "linux"), test))]
         YuvRange::Full => (0, 256, 403, 48, 120, 475),
+        #[cfg(target_os = "linux")]
+        YuvRange::Limited601 => (16, 298, 409, 100, 208, 516),
+        #[cfg(target_os = "linux")]
+        YuvRange::Full601 => (0, 256, 359, 88, 183, 454),
     }
 }
 
@@ -135,12 +145,21 @@ pub fn sleep_frame(
         }
         out
     };
-    // BT.709, matching what `convert` decodes.
     let (y_off, y_gain, c_gain) = match range {
         YuvRange::Limited => (16.0, 219.0 / 255.0, 224.0 / 255.0),
+        #[cfg(any(not(target_os = "linux"), test))]
         YuvRange::Full => (0.0, 1.0, 1.0),
+        #[cfg(target_os = "linux")]
+        YuvRange::Limited601 => (16.0, 219.0 / 255.0, 224.0 / 255.0),
+        #[cfg(target_os = "linux")]
+        YuvRange::Full601 => (0.0, 1.0, 1.0),
     };
-    let luma = |[r, g, b]: [f32; 3]| 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    let (kr, kb) = match range {
+        #[cfg(target_os = "linux")]
+        YuvRange::Limited601 | YuvRange::Full601 => (0.299, 0.114),
+        _ => (0.2126, 0.0722),
+    };
+    let luma = |[r, g, b]: [f32; 3]| kr * r + (1.0 - kr - kb) * g + kb * b;
 
     let mut frame = vec![0u8; width * height * 3 / 2];
     let (luma_plane, chroma_plane) = frame.split_at_mut(width * height);
@@ -156,8 +175,8 @@ pub fn sleep_frame(
                 }
             }
             let y = luma(sum);
-            let u = (sum[2] - y) / 1.8556;
-            let v = (sum[0] - y) / 1.5748;
+            let u = (sum[2] - y) / (2.0 * (1.0 - kb));
+            let v = (sum[0] - y) / (2.0 * (1.0 - kr));
             let at = by / 2 * width + bx;
             chroma_plane[at] = (128.0 + u * c_gain).round().clamp(0.0, 255.0) as u8;
             chroma_plane[at + 1] = (128.0 + v * c_gain).round().clamp(0.0, 255.0) as u8;

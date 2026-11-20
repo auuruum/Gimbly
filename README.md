@@ -14,33 +14,49 @@ Rust with egui.
 **Unofficial.** Gimbly is not made, approved, or supported by OBSBOT or Remo
 Tech.
 
+## Supported webcams
+
+| Camera | 🪟 Windows | 🐧 Linux | 🍎 macOS |
+| :--- | :---: | :---: | :---: |
+| 📷 **OBSBOT Tiny 3 Lite** | ✅ | ✅ | 🚧 |
+| 📷 Other OBSBOT models | ❔ | ❔ | ❔ |
+
+### 📷 OBSBOT Tiny 3 Lite
+
+| Feature | 🪟 Windows | 🐧 Linux | 🍎 macOS |
+| :--- | :---: | :---: | :---: |
+| 🕹️ Gimbal joystick and drag-to-turn | ✅ | ✅ | 🚧 |
+| 🎯 Gimbal reset | ✅ | ✅ | 🚧 |
+| 🔍 Zoom 1×–4× | ✅ | ✅ | 🚧 |
+| 🖼️ Field of view (Wide / Medium / Narrow) | ✅ | ✅ | 🚧 |
+| 📌 Presets | ✅ | ✅ | 🚧 |
+| 💤 Sleep / wake | ✅ | ✅ | 🚧 |
+| 🎥 Virtual camera | ✅ | ❔ | 🚧 |
+| 🤖 AI tracking | 🗓️ | 🗓️ | 🗓️ |
+| 🎨 Image settings | 🗓️ | 🗓️ | 🗓️ |
+| ⏺️ Recording | 🗓️ | 🗓️ | 🗓️ |
+
+✅ tested on real hardware · 🚧 in progress · 🗓️ planned · ❔ not tested yet
+
+Full test results are in [docs/devices.md](docs/devices.md). Tried another
+camera? See [CONTRIBUTING.md](CONTRIBUTING.md#tested-a-camera).
+
 ## Status
 
-Early development. Windows has a camera backend. Linux and macOS builds
-currently lack camera capture.
+Early development. Capture backends use Media Foundation on Windows,
+V4L2 on Linux and AVFoundation on macOS. Linux supports native Wayland
+and X11. Virtual camera setup uses DirectShow on Windows, v4l2loopback on
+Linux and a signed Core Media I/O system extension on macOS.
 
-The Windows app includes the control panel, live video preview with rotate
-and mirror, snapshots, standard UVC zoom, the virtual camera (DirectShow,
-64-bit apps), and Software Settings.
+On Linux, click **Virtual Camera** and approve the first-time driver setup
+when prompted. Once the icon lights up, choose **Gimbly Virtual Camera** in
+your video app. See [Linux setup](CONTRIBUTING.md#linux) for the driver and
+terminal instructions.
 
-On the OBSBOT Tiny 3 Lite, Gimbly also supports the gimbal joystick,
-drag-to-turn in Video Preview, reset, Wide/Medium/Narrow field of view,
-1×–4× zoom, sleep/wake, and camera presets. See the
-[tested device matrix](docs/devices.md) for hardware results.
-AI tracking, image settings and recording are planned.
-
-## Build and run
-
-You need a stable Rust toolchain (1.95 or newer).
-
-```bash
-cargo build --workspace
-cargo run -p gimbly
-```
-
-Build the whole workspace: the virtual camera DLL is a separate crate and
-must sit next to `gimbly.exe`. Close any other app that streams the camera
-first.
+Live preview, rotate and mirror, snapshots, camera controls and Software
+Settings share the same app interface. AI tracking, image settings and
+recording are planned. See [CONTRIBUTING.md](CONTRIBUTING.md#build-and-run)
+for setup and [docs/devices.md](docs/devices.md) for hardware verification.
 
 ## How it is built
 
@@ -49,7 +65,11 @@ camera behave, write that down in our own words in
 [docs/clean-room](docs/clean-room/README.md), and implement it from scratch.
 No OBSBOT code, SDK, assets, or documentation are used, and no OBSBOT software
 is decompiled. This lowers the risk of copying; it is not a legal guarantee.
-See [AGENTS.md](AGENTS.md) for the full rules.
+
+## Contributing
+
+Build instructions and the contributor guide are in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

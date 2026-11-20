@@ -174,7 +174,14 @@ impl fmt::Display for KeyCombo {
             (self.ctrl, "Ctrl"),
             (self.alt, "Alt"),
             (self.shift, "Shift"),
-            (self.win, "Win"),
+            (
+                self.win,
+                if cfg!(target_os = "macos") {
+                    "Cmd"
+                } else {
+                    "Win"
+                },
+            ),
         ] {
             if on {
                 write!(f, "{name} + ")?;
@@ -204,7 +211,7 @@ impl KeyCombo {
                 "Ctrl" => combo.ctrl = true,
                 "Alt" => combo.alt = true,
                 "Shift" => combo.shift = true,
-                "Win" => combo.win = true,
+                "Win" | "Cmd" => combo.win = true,
                 "" if text.trim_end().ends_with('+') => key = Some(Key::Plus),
                 other => key = Some(Key::parse(other)?),
             }
@@ -446,7 +453,12 @@ impl Default for Settings {
 
 fn default_media_dir() -> String {
     let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
-    home.map(|h| PathBuf::from(h).join("Videos").display().to_string())
+    let folder = if cfg!(target_os = "macos") {
+        "Movies"
+    } else {
+        "Videos"
+    };
+    home.map(|h| PathBuf::from(h).join(folder).display().to_string())
         .unwrap_or_default()
 }
 

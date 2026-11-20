@@ -46,6 +46,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         fs::write(&path, windows_resource::icon_object(&arch, &icons)?)?;
         println!("cargo:rustc-link-arg-bins={}", path.display());
     }
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        // The standalone development executable also needs a TCC usage
+        // description when it asks AVFoundation for camera access.
+        let plist =
+            PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").ok_or("missing manifest directory")?)
+                .join("../../packaging/macos/Info.plist");
+        println!("cargo:rerun-if-changed={}", plist.display());
+        println!(
+            "cargo:rustc-link-arg-bin=gimbly=-Wl,-sectcreate,__TEXT,__info_plist,{}",
+            plist.display()
+        );
+    }
     Ok(())
 }
 

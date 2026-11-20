@@ -28,7 +28,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("Gimbly")
-            .with_app_id("gimbly")
+            .with_app_id(crate::branding::APP_ID)
             .with_icon(branding::window_icon())
             .with_inner_size([theme::PANEL_WIDTH, 840.0])
             .with_min_inner_size([theme::PANEL_WIDTH, 480.0])

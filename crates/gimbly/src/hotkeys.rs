@@ -2,14 +2,17 @@
 //!
 //! On Windows a dedicated thread registers the shortcuts with
 //! `RegisterHotKey` and waits for `WM_HOTKEY` messages, so they work while
-//! Gimbly is minimised or unfocused. Other platforms report that global
-//! shortcuts are not available yet.
+//! Gimbly is minimised or unfocused. Linux and macOS use native services.
 
 use crate::settings::{HotkeyAction, KeyCombo};
 use std::sync::mpsc::{Receiver, channel};
 
 pub struct GlobalHotkeys {
     events: Receiver<HotkeyAction>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    errors: Receiver<String>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    _platform: Option<imp::Platform>,
     #[cfg(windows)]
     thread: Option<(u32, std::thread::JoinHandle<()>)>,
 }
@@ -20,9 +23,18 @@ impl GlobalHotkeys {
     /// already owns it).
     pub fn start(
         bindings: Vec<(HotkeyAction, KeyCombo)>,
+        _wayland: bool,
         notify: impl Fn() + Send + 'static,
     ) -> (Self, Vec<String>) {
+        #[cfg(target_os = "linux")]
+        return imp::start(bindings, _wayland, notify);
+        #[cfg(not(target_os = "linux"))]
         imp::start(bindings, notify)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub fn take_error(&self) -> Option<String> {
+        self.errors.try_recv().ok()
     }
 
     /// Actions triggered since the last call.
@@ -147,7 +159,11 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "hotkeys/unix.rs"]
+mod imp;
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 mod imp {
     use super::*;
 

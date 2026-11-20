@@ -5,16 +5,12 @@
 //! Standard zoom uses `IAMCameraControl`. The Tiny 3 Lite uses vendor
 //! controls through the camera's UVC extension unit.
 
-use super::preview::{self, YuvRange};
-use super::sleep::SleepReadback;
-use super::{
-    CaptureConfig, Command, DeviceInfo, GimbalCommand, PRESET_SLOTS, Preset, SessionState, Shared,
-    VideoMode, Worker, ZoomRange, parse_usb_ids,
-};
-use super::{standby, vendor};
-use gimbly_vcam_shm::{Nv12View, SharedMemory, now_ms};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::time::{Duration, Instant};
+use super::control::{AbsoluteZoom, Channel, TINY_3_LITE, Transport, control_loop, zoom_loop};
+use super::preview::YuvRange;
+use super::{CaptureConfig, DeviceInfo, Shared, VideoMode, Worker, ZoomRange, parse_usb_ids};
+use super::{frames::Frames, queue, vendor};
+use gimbly_vcam_shm::Nv12View;
+use std::time::Instant;
 use windows::Win32::Media::DirectShow::{
     CameraControl_Flags_Manual, CameraControl_Zoom, IAMCameraControl,
 };
@@ -27,9 +23,6 @@ use windows::Win32::System::Com::{
     COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize,
 };
 use windows::core::{GUID, Interface, PWSTR};
-
-/// USB product ID of the OBSBOT Tiny 3 Lite.
-const TINY_3_LITE: u16 = 0xff04;
 
 const STREAM: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
 
@@ -196,7 +189,7 @@ fn subtype_rank(guid: &GUID) -> u8 {
 /// Every native format the camera reports.
 fn native_types(reader: &IMFSourceReader) -> Result<Vec<(VideoMode, IMFMediaType)>, String> {
     let mut modes = Vec::new();
-    for index in 0.. {
+    for index in 0..1024 {
         // SAFETY: plain query; MF_E_NO_MORE_TYPES ends the list.
         let media_type = match unsafe { reader.GetNativeMediaType(STREAM, index) } {
             Ok(t) => t,
@@ -219,7 +212,9 @@ fn native_types(reader: &IMFSourceReader) -> Result<Vec<(VideoMode, IMFMediaType
             fps,
             min_fps,
             max_fps,
-            supported: subtype_rank(&sub) > 0,
+            supported: subtype_rank(&sub) > 0
+                && gimbly_vcam_shm::PreferredFormat::validated(width & !1, height & !1, 1)
+                    .is_some(),
         };
         modes.push((mode, media_type));
     }
@@ -237,25 +232,10 @@ fn choose_native_type(
     modes: Vec<(VideoMode, IMFMediaType)>,
     config: CaptureConfig,
 ) -> Result<(VideoMode, IMFMediaType), String> {
-    let target = config.fps as f32;
-    let score = |m: &VideoMode| {
-        let exact_size = m.width == config.width && m.height == config.height;
-        let area_gap = -((m.width as i64 * m.height as i64)
-            - (config.width as i64 * config.height as i64))
-            .abs();
-        let fps_ok = (m.fps - target).abs() < 0.5 || (m.min_fps <= target && target <= m.max_fps);
-        let fps_gap = -((m.fps - target).abs() * 1000.0) as i64;
-        let rank = if config.fps > 30 && m.codec == "MJPG" {
-            u8::MAX
-        } else {
-            m.codec_rank()
-        };
-        (exact_size, fps_ok, area_gap, fps_gap, rank)
-    };
     modes
         .into_iter()
         .filter(|(m, _)| m.supported)
-        .max_by_key(|(m, _)| score(m))
+        .max_by_key(|(m, _)| super::mode_score(m, config))
         .ok_or_else(|| "The camera offers no supported video format".into())
 }
 
@@ -328,10 +308,7 @@ pub fn probe_controls(device: &DeviceInfo, script: Vec<String>) -> Result<Vec<St
                     });
                 }
                 let mut xu = Xu::open(&source);
-                lines.push(format!(
-                    "vendor extension unit: {:?}",
-                    xu.as_ref().map(|x| x.node)
-                ));
+                lines.push(format!("vendor extension unit: {:?}", xu.is_some()));
                 let start = Instant::now();
                 for step in &script {
                     // Vendor steps: `move` starts manual movement, `stop`
@@ -445,6 +422,11 @@ fn output_geometry(reader: &IMFSourceReader) -> Result<OutputGeometry, String> {
                 height = area.Area.cy as usize;
             }
         }
+        if gimbly_vcam_shm::PreferredFormat::validated(w & !1, height as u32 & !1, 1).is_none() {
+            return Err(format!(
+                "Unsupported Media Foundation output size {w}x{height}"
+            ));
+        }
         let range = match current.GetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE) {
             Ok(r) if r as i32 == MFNominalRange_0_255.0 => YuvRange::Full,
             _ => YuvRange::Limited,
@@ -521,7 +503,13 @@ impl Zoom {
             },
         })
     }
+}
 
+// SAFETY: the control comes from the Media Foundation source in the
+// multithreaded apartment. The worker joins the same apartment before use.
+unsafe impl Send for Zoom {}
+
+impl AbsoluteZoom for Zoom {
     fn get(&self) -> Option<i32> {
         let (mut value, mut flags) = (0, 0);
         // SAFETY: out-pointers are valid locals.
@@ -533,8 +521,11 @@ impl Zoom {
         Some(value)
     }
 
-    fn set(&self, value: i32) -> Result<i32, String> {
+    fn set(&mut self, value: i32) -> Result<i32, String> {
         let value = self.range.snap(value);
+        if self.get() == Some(value) {
+            return Ok(value);
+        }
         // SAFETY: value is inside the range the device reported.
         unsafe {
             self.control
@@ -550,8 +541,6 @@ impl Zoom {
 struct Xu {
     control: IKsControl,
     node: u32,
-    sender: vendor::Sender,
-    last_write: Option<Instant>,
 }
 
 // SAFETY: the control comes from a media source opened on a thread in the
@@ -561,7 +550,7 @@ unsafe impl Send for Xu {}
 
 impl Xu {
     /// Finds the extension unit node that answers the vendor GUID.
-    fn open(source: &IMFMediaSource) -> Option<Self> {
+    fn open(source: &IMFMediaSource) -> Option<Channel<Self>> {
         let control: IKsControl = source.cast().ok()?;
         let topology: IKsTopologyInfo = source.cast().ok()?;
         // SAFETY: plain topology queries.
@@ -571,10 +560,8 @@ impl Xu {
             .map(|node| Self {
                 control: control.clone(),
                 node,
-                sender: vendor::Sender::default(),
-                last_write: None,
             })
-            .find(|xu| xu.get(vendor::SELECTOR_COMMAND).is_ok())
+            .find_map(|xu| Channel::open(xu).ok())
     }
 
     fn property(&self, selector: u32, flags: u32, data: &mut [u8]) -> Result<u32, String> {
@@ -602,308 +589,17 @@ impl Xu {
         .map_err(|e| format!("Camera control failed: {e}"))?;
         Ok(returned)
     }
-
-    fn send(&mut self, mut message: vendor::Message) -> Result<(), String> {
-        self.sender.number(&mut message);
-        self.set(vendor::SELECTOR_COMMAND, &mut message.encode())
-    }
-
-    fn set(&mut self, selector: u32, block: &mut [u8; vendor::MESSAGE_LEN]) -> Result<(), String> {
-        // Separate successive writes, as in the capture. The device needs
-        // time to consume a SET before another message replaces it.
-        if let Some(delay) = self
-            .last_write
-            .and_then(|last| Duration::from_millis(20).checked_sub(last.elapsed()))
-        {
-            std::thread::sleep(delay);
-        }
-        let result = self
-            .property(selector, KSPROPERTY_TYPE_SET, block)
-            .map(|_| ());
-        self.last_write = Some(Instant::now());
-        result
-    }
-
-    fn get(&self, selector: u32) -> Result<([u8; vendor::MESSAGE_LEN], usize), String> {
-        let mut block = [0u8; vendor::MESSAGE_LEN];
-        let len = self.property(selector, KSPROPERTY_TYPE_GET, &mut block)? as usize;
-        if len > block.len() {
-            return Err("Camera returned an oversized extension unit block".into());
-        }
-        Ok((block, len))
-    }
-
-    fn request(&mut self, command: [u8; 2], data: Vec<u8>) -> Result<Vec<u8>, String> {
-        let mut request = vendor::Message::new(vendor::GIMBAL, command, data).requesting_reply();
-        self.sender.number(&mut request);
-        self.set(vendor::SELECTOR_COMMAND, &mut request.encode())?;
-        // The XU may still return an older reply before this one is ready.
-        std::thread::sleep(Duration::from_millis(40));
-        for _ in 0..5 {
-            if let Ok((block, len)) = self.get(vendor::SELECTOR_COMMAND)
-                && let Some(reply) = vendor::Message::decode(&block[..len])
-                && reply.matches_reply(&request)
-            {
-                return Ok(reply.data);
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        Err(format!(
-            "No matching camera reply for {:02x} {:02x}",
-            command[0], command[1]
-        ))
-    }
-
-    fn read_sleep(&self) -> Option<bool> {
-        let (block, len) = self.get(vendor::SELECTOR_VIEW).ok()?;
-        vendor::sleeping(&block[..len])
-    }
-
-    fn read_zoom(&mut self) -> Result<f32, String> {
-        vendor::read_zoom(&self.request(vendor::READ_ZOOM, Vec::new())?)
-            .ok_or_else(|| "Camera returned an invalid zoom ratio".into())
-    }
-
-    fn preset_ids(&mut self) -> Result<Vec<u8>, String> {
-        let data = self.request(vendor::LIST_PRESETS, Vec::new())?;
-        vendor::preset_ids(&data).ok_or("Camera returned an invalid preset list")?;
-        Ok(data)
-    }
-
-    fn preset_name(&mut self, id: u8) -> Result<String, String> {
-        let name = self.request(vendor::READ_PRESET_NAME, vendor::preset_id(id))?;
-        vendor::read_preset_name(&name)
-            .ok_or_else(|| "Camera returned an invalid preset name".into())
-    }
-
-    fn presets(&mut self) -> Result<Vec<Preset>, String> {
-        self.preset_ids()?
-            .into_iter()
-            .map(|id| {
-                let mut name = self.preset_name(id)?;
-                if name.trim().is_empty() {
-                    name = format!("Preset{}", u16::from(id) + 1);
-                }
-                let mut data = vendor::preset_id(id);
-                data.push(0);
-                let data = self.request(vendor::READ_PRESET_POSITION, data)?;
-                let position = vendor::read_preset_position(&data, id)
-                    .ok_or("Camera returned an invalid stored preset position")?;
-                Ok(Preset {
-                    id,
-                    name,
-                    position: Some(position),
-                })
-            })
-            .collect()
-    }
-
-    fn store_preset(&mut self, id: u8) -> Result<(), String> {
-        let current = self.request(vendor::READ_POSITION, Vec::new())?;
-        let ratio = self.read_zoom()?;
-        let message = vendor::store_preset(id, &current, ratio)
-            .ok_or("Camera returned an invalid gimbal position")?;
-        self.send(message)
-    }
-
-    fn preset_change(&mut self, command: GimbalCommand) -> Result<(), String> {
-        match command {
-            GimbalCommand::AddPreset => {
-                let ids = self.preset_ids()?;
-                let id = (0..PRESET_SLOTS as u8)
-                    .find(|id| !ids.contains(id))
-                    .filter(|_| ids.len() < PRESET_SLOTS)
-                    .ok_or("All preset slots are occupied")?;
-                let name = vendor::preset_name(id, &format!("Preset{}", id + 1))?;
-                self.store_preset(id)?;
-                self.send(name)
-            }
-            GimbalCommand::UpdatePreset { id } => {
-                // Writing the position also overwrites the stored name.
-                let name = self.preset_name(id)?;
-                let name = vendor::preset_name(id, &name)?;
-                self.store_preset(id)?;
-                self.send(name)
-            }
-            GimbalCommand::RenamePreset { id, name } => self.send(vendor::preset_name(id, &name)?),
-            GimbalCommand::DeletePreset(_) => {
-                self.send(vendor::for_gimbal(&command).ok_or("Unsupported preset command")?)
-            }
-            _ => Err("Unsupported preset command".into()),
-        }
-    }
-
-    fn gimbal(
-        &mut self,
-        command: GimbalCommand,
-        shared: &Shared,
-        zoom_refresh: &mut ZoomRefresh,
-    ) -> Result<(), String> {
-        match command {
-            GimbalCommand::SetFov(fov) => {
-                if shared.status().fov == Some(fov) {
-                    return Ok(());
-                }
-                self.set(vendor::SELECTOR_VIEW, &mut vendor::field_of_view(fov))?;
-                shared.status().fov = Some(fov);
-                *zoom_refresh = follow_zoom();
-            }
-            GimbalCommand::ZoomRatio(ratio) => {
-                let (message, ratio) = vendor::zoom(ratio).ok_or("Zoom ratio is out of range")?;
-                if shared.status().zoom_ratio == Some(ratio) && shared.status().fov.is_none() {
-                    return Ok(());
-                }
-                self.send(message)?;
-                let mut status = shared.status();
-                status.zoom_ratio = Some(ratio);
-                status.fov = None;
-                *zoom_refresh = None;
-            }
-            GimbalCommand::AddPreset
-            | GimbalCommand::UpdatePreset { .. }
-            | GimbalCommand::RenamePreset { .. }
-            | GimbalCommand::DeletePreset(_) => {
-                let change = self.preset_change(command);
-                let presets = self.presets();
-                shared.status().presets = presets.as_ref().ok().cloned();
-                change?;
-                presets?;
-            }
-            _ => {
-                self.send(vendor::for_gimbal(&command).ok_or("Unsupported gimbal command")?)?;
-                if matches!(command, GimbalCommand::TriggerPreset(_)) {
-                    shared.status().fov = None;
-                    *zoom_refresh = follow_zoom();
-                }
-            }
-        }
-        Ok(())
-    }
 }
 
-/// Next zoom read, and until when reads repeat every [`ZOOM_FOLLOW_EVERY`].
-type ZoomRefresh = Option<(Instant, Instant)>;
+impl Transport for Xu {
+    fn read(&self, selector: u32, block: &mut [u8; vendor::MESSAGE_LEN]) -> Result<usize, String> {
+        self.property(selector, KSPROPERTY_TYPE_GET, block)
+            .map(|n| n as usize)
+    }
 
-/// The camera zooms smoothly after a field of view or preset change; reading
-/// the ratio this often lets the slider move along with it.
-const ZOOM_FOLLOW_EVERY: Duration = Duration::from_millis(200);
-/// Long enough for the camera to settle after a field of view change.
-const ZOOM_FOLLOW_FOR: Duration = Duration::from_millis(2500);
-
-fn read_zoom_in(delay: Duration) -> ZoomRefresh {
-    let at = Instant::now() + delay;
-    Some((at, at))
-}
-
-fn follow_zoom() -> ZoomRefresh {
-    let now = Instant::now();
-    Some((now + ZOOM_FOLLOW_EVERY, now + ZOOM_FOLLOW_FOR))
-}
-
-/// Carries out vendor commands and polls the camera's state. Every vendor
-/// write and read waits for the camera, so this runs on its own thread and
-/// the frame loop never waits on it. Returns when `commands` disconnects.
-fn control_loop(
-    mut xu: Xu,
-    commands: &Receiver<Command>,
-    shared: &Shared,
-    repaint: &(dyn Fn() + Send + Sync),
-    mut zoom_refresh: ZoomRefresh,
-) {
-    // The control must be used from the multithreaded apartment.
-    let _com = MfThread::init();
-    let mut sleep_polled = Instant::now();
-    let mut sleep_readback = SleepReadback::default();
-    let mut preset_retries = 0;
-    loop {
-        let mut wake = sleep_polled + Duration::from_secs(1);
-        if let Some((next, _)) = zoom_refresh {
-            wake = wake.min(next);
-        }
-        let first = match commands.recv_timeout(wake.saturating_duration_since(Instant::now())) {
-            Ok(command) => Some(command),
-            Err(RecvTimeoutError::Timeout) => None,
-            Err(RecvTimeoutError::Disconnected) => return,
-        };
-        // Everything that queued up during the last write goes out as one
-        // batch, with stale joystick speeds and zoom ratios dropped.
-        let batch = first
-            .into_iter()
-            .chain(std::iter::from_fn(|| commands.try_recv().ok()));
-        for command in super::coalesce(batch) {
-            match command {
-                Command::SetSleep(sleep) => {
-                    let result = xu.send(vendor::sleep(sleep));
-                    match result {
-                        Ok(()) => {
-                            shared.set_sleeping(sleep);
-                            sleep_polled = Instant::now();
-                            sleep_readback.sent(sleep, sleep_polled);
-                            preset_retries = 0;
-                            zoom_refresh = if sleep {
-                                None
-                            } else {
-                                read_zoom_in(Duration::from_secs(3))
-                            };
-                        }
-                        Err(error) => shared.status().error = Some(error),
-                    }
-                    repaint();
-                }
-                Command::Gimbal(command) => {
-                    if let Err(e) = xu.gimbal(command, shared, &mut zoom_refresh) {
-                        shared.status().error = Some(e);
-                    }
-                    repaint();
-                }
-                _ => {}
-            }
-        }
-        if sleep_polled.elapsed() >= Duration::from_secs(1) {
-            if let Some(sleeping) = xu
-                .read_sleep()
-                .and_then(|sleeping| sleep_readback.observe(sleeping, Instant::now()))
-                && shared.set_sleeping(sleeping)
-            {
-                preset_retries = 0;
-                zoom_refresh = if sleeping {
-                    None
-                } else {
-                    read_zoom_in(Duration::from_secs(2))
-                };
-                repaint();
-            }
-            sleep_polled = Instant::now();
-            // Opening or waking the stream can briefly interrupt replies.
-            let retry_presets = {
-                let status = shared.status();
-                if status.presets.is_some() {
-                    preset_retries = 0;
-                }
-                !status.sleeping && status.presets.is_none() && preset_retries < 3
-            };
-            if retry_presets {
-                preset_retries += 1;
-                if let Ok(presets) = xu.presets() {
-                    shared.status().presets = Some(presets);
-                    repaint();
-                }
-            }
-        }
-        if let Some((next, until)) = zoom_refresh.filter(|(next, _)| Instant::now() >= *next) {
-            zoom_refresh = (next < until).then(|| {
-                let again = Instant::now() + ZOOM_FOLLOW_EVERY;
-                (again.min(until), until)
-            });
-            if let Ok(ratio) = xu.read_zoom() {
-                let mut status = shared.status();
-                if status.zoom_ratio != Some(ratio) {
-                    status.zoom_ratio = Some(ratio);
-                    drop(status);
-                    repaint();
-                }
-            }
-        }
+    fn write(&self, selector: u32, block: &mut [u8; vendor::MESSAGE_LEN]) -> Result<(), String> {
+        self.property(selector, KSPROPERTY_TYPE_SET, block)
+            .map(|_| ())
     }
 }
 
@@ -1007,19 +703,7 @@ fn capture_loop<'scope, 'env>(
     // Only the Tiny 3 Lite has been checked against the official app so far.
     let tiny_3_lite = device.is_obsbot() && device.usb_product_id == Some(TINY_3_LITE);
     let mut xu = tiny_3_lite.then(|| Xu::open(source)).flatten();
-    let mut zoom_refresh: ZoomRefresh = None;
-    if let Some(xu) = xu.as_mut() {
-        let sleeping = xu.read_sleep();
-        let ratio = xu.read_zoom().ok();
-        let presets = xu.presets().ok();
-        if ratio.is_none() {
-            zoom_refresh = read_zoom_in(Duration::from_secs(1));
-        }
-        worker.shared.set_sleeping(sleeping.unwrap_or(false));
-        let mut status = worker.shared.status();
-        status.zoom_ratio = ratio;
-        status.presets = presets;
-    }
+    let zoom_refresh = xu.as_mut().and_then(|xu| xu.initialize(&worker.shared));
 
     // SAFETY: plain Media Foundation setup calls with valid arguments.
     let reader = unsafe {
@@ -1067,85 +751,38 @@ fn capture_loop<'scope, 'env>(
         status.format = Some(format!("{} {width}x{height} @ {fps:.0} fps", mode.codec));
         status.output = Some(config.output_size(width, height));
         status.zoom_range = zoom.as_ref().map(|z| z.range);
-        status.zoom = zoom.as_ref().and_then(Zoom::get);
         status.vendor_control = xu.is_some();
         status.vendor_control_untested = device.is_obsbot() && !status.vendor_control;
     }
 
-    let control: Option<Sender<Command>> = xu.map(|xu| {
-        let (sender, receiver) = std::sync::mpsc::channel();
+    let control = if xu.is_some() || zoom.is_some() {
+        let (sender, receiver) = queue::channel();
         let shared: &'env Shared = &worker.shared;
         let repaint: &'env (dyn Fn() + Send + Sync) = &*worker.repaint;
-        scope.spawn(move || control_loop(xu, &receiver, shared, repaint, zoom_refresh));
-        sender
-    });
-
-    let mut virtual_camera: Option<SharedMemory> = None;
-    let mut fps_window = (Instant::now(), 0u32);
-    let mut first_frame = true;
-    let mut zoom_polled = Instant::now();
-    let mut snapshot_pending = false;
-    let mut transform = config.transform;
-    let mut turned_buf = Vec::new();
-    let mut sleep_buf: Option<((usize, usize, YuvRange), Vec<u8>)> = None;
-
-    while !worker.should_stop() {
-        // Only the newest zoom request matters, e.g. while a slider is dragged.
-        let mut zoom_request = None;
-        while let Ok(command) = worker.commands.try_recv() {
-            match command {
-                Command::SetZoom(value) => zoom_request = Some(value),
-                Command::SetVirtualCamera(enabled) => {
-                    if let Some(shm) = virtual_camera.take() {
-                        shm.region().mark_stopped();
-                    }
-                    let mut status = worker.shared.status();
-                    if enabled {
-                        match SharedMemory::create() {
-                            Ok(shm) => virtual_camera = Some(shm),
-                            Err(e) => {
-                                status.error = Some(format!("Virtual camera output failed: {e}"))
-                            }
-                        }
-                    }
-                    status.virtual_camera = virtual_camera.is_some();
+        scope.spawn(move || match MfThread::init() {
+            Ok(_com) => {
+                if let Some(xu) = xu {
+                    control_loop(xu, &receiver, shared, repaint, zoom_refresh);
+                } else if let Some(zoom) = zoom {
+                    let value = zoom.get();
+                    shared.status().zoom = value;
+                    repaint();
+                    zoom_loop(zoom, &receiver, shared, repaint);
                 }
-                Command::Snapshot => snapshot_pending = true,
-                Command::SetTransform(t) => transform = t,
-                // Vendor commands wait on the camera; they run on the control thread.
-                Command::SetSleep(_) | Command::Gimbal(_) => match &control {
-                    Some(control) => {
-                        let _ = control.send(command);
-                    }
-                    None => {
-                        worker.shared.status().error = Some(match command {
-                            Command::SetSleep(_) => "Sleep is unsupported for this camera".into(),
-                            _ => "This camera does not accept gimbal commands".into(),
-                        })
-                    }
-                },
             }
-        }
-        if let Some(value) = zoom_request {
-            let result = match zoom.as_ref() {
-                Some(z) => z.set(value),
-                None => Err("This camera does not report a zoom control".into()),
-            };
-            let mut status = worker.shared.status();
-            match result {
-                Ok(v) => status.zoom = Some(v),
-                Err(e) => status.error = Some(e),
+            Err(error) => {
+                shared.status().error = Some(error);
+                repaint();
             }
-            zoom_polled = Instant::now();
-        } else if let Some(z) = zoom
-            .as_ref()
-            .filter(|_| zoom_polled.elapsed().as_millis() >= 250)
-        {
-            // The camera zooms smoothly; keep its reported position current.
-            worker.shared.status().zoom = z.get();
-            zoom_polled = Instant::now();
-        }
+        });
+        Some(sender)
+    } else {
+        None
+    };
 
+    let mut frames = Frames::new(worker, config, tiny_3_lite);
+    while !worker.should_stop() {
+        frames.commands(|command| super::forward_control(worker, control.as_ref(), command));
         let epoch = worker.shared.status().video_epoch;
         let mut flags = 0u32;
         let mut sample: Option<IMFSample> = None;
@@ -1161,89 +798,15 @@ fn capture_loop<'scope, 'env>(
         if flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0 as u32 != 0 {
             geometry = output_geometry(&reader)?;
         }
-        let Some(sample) = sample else { continue };
-
-        let asleep = {
-            let status = worker.shared.status();
-            // A read started before Sleep or Resume may finish afterward.
-            if status.video_epoch != epoch {
-                continue;
-            }
-            status.sleeping && status.vendor_control
+        let Some(sample) = sample else {
+            frames.idle();
+            continue;
         };
-        // The preview window draws its own placeholder while the camera sleeps.
-        let want_preview = !asleep && worker.shared.frame().is_none();
-        let shm = virtual_camera.as_ref();
-        let want_snapshot = std::mem::take(&mut snapshot_pending);
-        let needed = shm.is_some() || want_preview || want_snapshot;
-        let frames = with_nv12(&sample, geometry, |full| {
-            let use_placeholder = needed && standby::use_placeholder(asleep, tiny_3_lite, full);
-            let cropped = config.portrait.then(|| full.crop_to_portrait()).flatten();
-            let view = cropped.as_ref().unwrap_or(full);
-            // Rotate/mirror once so the preview, snapshots and the virtual
-            // camera all get the same picture.
-            let turned = (needed && !transform.is_identity())
-                .then(|| gimbly_vcam_shm::pixel::transform_into(view, transform, &mut turned_buf));
-            let view = turned.as_ref().unwrap_or(view);
-            // Replace the standby picture during sleep and wake, using the
-            // same output size and range as the live frame.
-            let placeholder = if use_placeholder {
-                let size = (view.width, view.height, geometry.range);
-                if sleep_buf.as_ref().is_none_or(|(built, _)| *built != size) {
-                    let icon = crate::branding::window_icon();
-                    let frame = preview::sleep_frame(
-                        size.0,
-                        size.1,
-                        &icon.rgba,
-                        icon.width as usize,
-                        geometry.range,
-                    );
-                    sleep_buf = Some((size, frame));
-                }
-                sleep_buf
-                    .as_ref()
-                    .and_then(|(_, frame)| Nv12View::packed(frame, size.0, size.1))
-            } else {
-                None
-            };
-            let view = placeholder.as_ref().unwrap_or(view);
-            if let Some(shm) = shm {
-                shm.region().publish(view, now_ms());
-            }
-            (
-                want_preview.then(|| preview::convert(view, geometry.range)),
-                want_snapshot.then(|| preview::convert_full(view, geometry.range)),
-            )
+
+        with_nv12(&sample, geometry, |view| {
+            frames.publish(epoch, view, geometry.range)
         })?;
-        let (preview, snapshot) = frames.unwrap_or_default();
-        // A frame that could not be read keeps the request for the next one.
-        snapshot_pending = want_snapshot && snapshot.is_none();
-
-        if let Some(frame) = snapshot {
-            *worker.shared.snapshot() = Some(frame);
-            (worker.repaint)();
-        }
-        if let Some(frame) = preview
-            && worker.shared.publish_preview(epoch, frame)
-        {
-            (worker.repaint)();
-        }
-
-        fps_window.1 += 1;
-        let elapsed = fps_window.0.elapsed().as_secs_f32();
-        if first_frame || elapsed >= 1.0 {
-            let mut status = worker.shared.status();
-            status.state = SessionState::Streaming;
-            if !first_frame {
-                status.measured_fps = fps_window.1 as f32 / elapsed;
-                fps_window = (Instant::now(), 0);
-            }
-            first_frame = false;
-        }
-    }
-
-    if let Some(shm) = virtual_camera.take() {
-        shm.region().mark_stopped();
+        frames.received();
     }
     Ok(())
 }

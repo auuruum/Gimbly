@@ -34,6 +34,7 @@ pub struct PreviewInput<'a> {
     pub resolution: Resolution,
     pub preview_mode: PreviewMode,
     pub virtual_camera: bool,
+    pub virtual_camera_tip: &'static str,
     pub transform: Transform,
     pub toast: Option<&'a str>,
     /// Dragging the picture turns the gimbal.
@@ -57,6 +58,7 @@ pub enum PreviewAction {
 
 pub struct PreviewWindow {
     pub open: bool,
+    pub wayland: bool,
     icon: TextureHandle,
     /// Where the window first opens: beside the control panel.
     position: Option<Pos2>,
@@ -69,6 +71,7 @@ impl PreviewWindow {
     pub fn new(icon: TextureHandle) -> Self {
         Self {
             open: false,
+            wayland: false,
             icon,
             position: None,
             composition_lines: false,
@@ -106,13 +109,17 @@ impl PreviewWindow {
         };
         let builder = egui::ViewportBuilder::default()
             .with_title("Video Preview")
+            .with_app_id(crate::branding::APP_ID)
             .with_icon(branding::window_icon())
-            .with_position(position)
             .with_inner_size([WIDTH, HEIGHT])
             .with_min_inner_size([480.0, 270.0 + TITLE_HEIGHT + BAR_HEIGHT])
             .with_decorations(false)
-            .with_resizable(true)
-            .with_window_level(level);
+            .with_resizable(true);
+        let builder = if self.wayland {
+            builder
+        } else {
+            builder.with_position(position).with_window_level(level)
+        };
         let mut actions = Vec::new();
         let mut close = false;
         ctx.show_viewport_immediate(
@@ -283,10 +290,13 @@ impl PreviewWindow {
                     ui.ctx()
                         .send_viewport_cmd(ViewportCommand::Fullscreen(true));
                 }
-                if icon_button(ui, icon::PUSH_PIN, BUTTON, 15.0, self.on_top)
-                    .on_hover_text("Sticky on top")
-                    .clicked()
-                {
+                let pinned = ui.add_enabled_ui(!self.wayland, |ui| {
+                    icon_button(ui, icon::PUSH_PIN, BUTTON, 15.0, self.on_top)
+                        .on_hover_text("Sticky on top")
+                        .on_disabled_hover_text("Wayland leaves window stacking to the compositor")
+                        .clicked()
+                });
+                if pinned.inner {
                     self.on_top = !self.on_top;
                 }
             },
@@ -391,13 +401,8 @@ impl PreviewWindow {
                         actions.push(PreviewAction::Snapshot);
                     }
                 });
-                let tip = if input.virtual_camera {
-                    "Stop Virtual Camera"
-                } else {
-                    "Start Virtual Camera"
-                };
                 if icon_button(ui, icon::WEBCAM, BUTTON, GLYPH, input.virtual_camera)
-                    .on_hover_text(tip)
+                    .on_hover_text(input.virtual_camera_tip)
                     .clicked()
                 {
                     actions.push(PreviewAction::ToggleVirtualCamera);
@@ -700,6 +705,7 @@ mod tests {
                     resolution: Resolution::Fhd30,
                     preview_mode: PreviewMode::Landscape,
                     virtual_camera: true,
+                    virtual_camera_tip: "Stop Virtual Camera",
                     transform: Default::default(),
                     toast: None,
                     gimbal: false,

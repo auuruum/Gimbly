@@ -1,5 +1,7 @@
 //! Shared branding, generated from assets/logo by the Rust build script.
 
+pub const APP_ID: &str = "io.github.auuruum.gimbly";
+
 use eframe::egui::{self, ColorImage, IconData, TextureHandle, TextureOptions};
 use std::sync::{Arc, OnceLock};
 

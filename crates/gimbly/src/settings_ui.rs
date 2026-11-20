@@ -132,6 +132,7 @@ impl SettingsWindow {
         let mut close = false;
         let builder = egui::ViewportBuilder::default()
             .with_title("Software Settings")
+            .with_app_id(crate::branding::APP_ID)
             .with_icon(branding::window_icon())
             .with_inner_size(WINDOW_SIZE)
             .with_resizable(false)
@@ -589,11 +590,16 @@ impl SettingsWindow {
             ctrl: modifiers.ctrl,
             alt: modifiers.alt,
             shift: modifiers.shift,
-            win: false,
+            win: modifiers.mac_cmd,
             key,
         };
-        if !combo.ctrl && !combo.alt {
-            self.notice = Some("Global shortcuts need Ctrl or Alt.".into());
+        if !combo.ctrl && !combo.alt && !combo.win {
+            let notice = if cfg!(target_os = "macos") {
+                "Global shortcuts need Control, Option or Command."
+            } else {
+                "Global shortcuts need Ctrl or Alt."
+            };
+            self.notice = Some(notice.into());
             return;
         }
         // One shortcut, one action: take it away from any other action.

@@ -114,7 +114,8 @@ camera's status agreed with each write.
 
 ## Unknown
 
-- Where, if anywhere, the camera reports Single vs Group Mode.
+- ~~Where, if anywhere, the camera reports Single vs Group Mode.~~ Setting
+  key 2; see [AI tracking options](2026-11-21-ai-tracking-options.md).
 - What value `4` and the transient tracking status `6` mean.
 - Whether Close-up, Headless and Lower Body have any effect in Group Mode.
 - Behavior on other models and firmware versions.

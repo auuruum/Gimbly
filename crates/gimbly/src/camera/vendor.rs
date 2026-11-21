@@ -69,6 +69,9 @@ const WRITE_SETTING: [u8; 2] = [0x44, 0x54];
 /// unknown).
 const SETTING_BEFORE_SPEED: u32 = 4;
 const SETTING_TRACKING_SPEED: u32 = 5;
+/// `1` while tracking runs in Group Mode, `0` in Single Mode; see
+/// `docs/clean-room/2026-11-21-ai-tracking-options.md`.
+const SETTING_GROUP_MODE: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Message {
@@ -350,12 +353,36 @@ pub fn tracking_speed(speed: TrackingSpeed) -> [Message; 2] {
     ]
 }
 
-/// Request data for [`READ_SETTING`] that asks for the tracking speed.
-pub fn read_tracking_speed_request() -> Vec<u8> {
-    [0, SETTING_TRACKING_SPEED]
+fn read_setting_request(setting: u32) -> Vec<u8> {
+    [0, setting]
         .into_iter()
         .flat_map(u32::to_le_bytes)
         .collect()
+}
+
+/// Request data for [`READ_SETTING`] that asks for the tracking speed.
+pub fn read_tracking_speed_request() -> Vec<u8> {
+    read_setting_request(SETTING_TRACKING_SPEED)
+}
+
+/// Request data for [`READ_SETTING`] that asks for the Human Tracking mode.
+pub fn read_tracking_mode_request() -> Vec<u8> {
+    read_setting_request(SETTING_GROUP_MODE)
+}
+
+/// The mode in a [`READ_SETTING`] reply for [`read_tracking_mode_request`].
+/// The camera answered with one byte; a four-byte form is accepted too, as
+/// other settings use it.
+pub fn read_tracking_mode(data: &[u8]) -> Option<TrackingMode> {
+    let value = match data {
+        [value] | [value, 0, 0, 0] => *value,
+        _ => return None,
+    };
+    match value {
+        0 => Some(TrackingMode::Single),
+        1 => Some(TrackingMode::Group),
+        _ => None,
+    }
 }
 
 /// The speed in a [`READ_SETTING`] reply; `None` for values never observed
@@ -766,6 +793,21 @@ mod tests {
         );
         assert_eq!(read_tracking_speed(&[1, 0, 0, 0]), None);
         assert_eq!(read_tracking_speed(&[2, 0, 0]), None);
+    }
+
+    #[test]
+    fn tracking_mode_matches_capture() {
+        // Request and replies from the 2026-11-21 Group Mode capture (key 2).
+        assert_eq!(
+            read_tracking_mode_request(),
+            hex("0000000002000000").as_slice()
+        );
+        assert_eq!(read_tracking_mode(&[0]), Some(TrackingMode::Single));
+        assert_eq!(read_tracking_mode(&[1]), Some(TrackingMode::Group));
+        assert_eq!(read_tracking_mode(&[1, 0, 0, 0]), Some(TrackingMode::Group));
+        assert_eq!(read_tracking_mode(&[2]), None);
+        assert_eq!(read_tracking_mode(&[]), None);
+        assert_eq!(read_tracking_mode(&[1, 0]), None);
     }
 
     #[test]

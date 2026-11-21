@@ -859,7 +859,7 @@ impl GimblyApp {
             };
             let tracking = self.status.human_tracking;
             let ready = self.gimbal_ready() && tracking.is_some();
-            // The camera reports on/off only; highlight the mode Gimbly set.
+            // The mode is read from the camera; `None` until known.
             let mode = self.status.tracking_mode.filter(|_| tracking == Some(true));
             let zoom = self.status.auto_zoom;
             let zoom_ready = self.gimbal_ready() && zoom.is_some();

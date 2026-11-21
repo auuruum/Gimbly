@@ -4,7 +4,8 @@
 use super::queue::Receiver;
 use super::sleep::SleepReadback;
 use super::{
-    AutoZoom, Command, GimbalCommand, PRESET_SLOTS, Preset, Shared, TrackingSpeed, vendor,
+    AutoZoom, Command, GimbalCommand, PRESET_SLOTS, Preset, Shared, TrackingMode, TrackingSpeed,
+    vendor,
 };
 use std::time::{Duration, Instant};
 
@@ -38,8 +39,13 @@ impl<T: Transport> Channel<T> {
         let ratio = self.read_zoom().ok();
         let presets = self.presets().ok();
         let tracking_speed = self.read_tracking_speed().ok();
+        let tracking = view.and_then(|(_, tracking, _)| tracking);
+        let tracking_mode = (tracking == Some(true))
+            .then(|| self.read_tracking_mode())
+            .flatten();
         let mut status = shared.status();
-        status.human_tracking = view.and_then(|(_, tracking, _)| tracking);
+        status.human_tracking = tracking;
+        status.tracking_mode = tracking_mode;
         status.auto_zoom = view.and_then(|(.., zoom)| zoom);
         status.tracking_speed = tracking_speed;
         status.zoom_ratio = ratio;
@@ -121,6 +127,14 @@ impl<T: Transport> Channel<T> {
         let data = self.request(vendor::READ_SETTING, vendor::read_tracking_speed_request())?;
         vendor::read_tracking_speed(&data)
             .ok_or_else(|| "Camera returned an unknown tracking speed".into())
+    }
+
+    /// The camera keeps this setting only while tracking runs.
+    fn read_tracking_mode(&mut self) -> Option<TrackingMode> {
+        let data = self
+            .request(vendor::READ_SETTING, vendor::read_tracking_mode_request())
+            .ok()?;
+        vendor::read_tracking_mode(&data)
     }
 
     fn preset_ids(&mut self) -> Result<Vec<u8>, String> {
@@ -377,15 +391,19 @@ pub(super) fn control_loop(
                 && tracking_sent.is_none_or(|sent| sent.elapsed() >= TRACKING_SETTLE)
             {
                 let mut status = shared.status();
+                let started = tracking == Some(true) && status.human_tracking != tracking;
                 let changed = (tracking.is_some() && status.human_tracking != tracking)
                     || (zoom.is_some() && status.auto_zoom != zoom);
                 status.human_tracking = tracking.or(status.human_tracking);
                 status.auto_zoom = zoom.or(status.auto_zoom);
-                // Another app may turn tracking on later in a mode we cannot read.
                 if tracking == Some(false) {
                     status.tracking_mode = None;
                 }
                 drop(status);
+                // Tracking started outside Gimbly, for example in another app.
+                if started && let Some(mode) = xu.read_tracking_mode() {
+                    shared.status().tracking_mode = Some(mode);
+                }
                 if changed {
                     repaint();
                 }

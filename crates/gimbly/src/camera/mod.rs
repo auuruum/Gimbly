@@ -210,8 +210,8 @@ pub struct SessionStatus {
     pub fov: Option<Fov>,
     /// Human Tracking state the camera reports; `None` until read.
     pub human_tracking: Option<bool>,
-    /// Mode Gimbly last turned tracking on in. The camera reports the same
-    /// state for both modes, so this is `None` when Gimbly did not set it.
+    /// Mode tracking runs in: set by Gimbly, or read from the camera when
+    /// tracking was already on. `None` while off or unknown.
     pub tracking_mode: Option<TrackingMode>,
     /// Auto Zoom framing the camera reports; `None` until read.
     pub auto_zoom: Option<AutoZoom>,

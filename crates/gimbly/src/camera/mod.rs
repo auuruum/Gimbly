@@ -208,15 +208,22 @@ pub struct SessionStatus {
     pub zoom_ratio: Option<f32>,
     /// Field of view the camera reports; `None` after a manual zoom.
     pub fov: Option<Fov>,
-    /// Human Tracking state the camera reports; `None` until read.
-    pub human_tracking: Option<bool>,
-    /// Mode Gimbly last turned tracking on in. The camera reports the same
-    /// state for both modes, so this is `None` when Gimbly did not set it.
+    /// AI mode the camera reports running; `None` until read.
+    pub ai_mode: Option<AiMode>,
+    /// Mode Gimbly last turned Human Tracking on in. The camera reports the
+    /// same state for both modes, so this is `None` when Gimbly did not set it.
     pub tracking_mode: Option<TrackingMode>,
     /// Auto Zoom framing the camera reports; `None` until read.
     pub auto_zoom: Option<AutoZoom>,
     /// Tracking speed the camera reports; `None` until read.
     pub tracking_speed: Option<TrackingSpeed>,
+    /// Voice Tracking Range the camera reports; `None` until read.
+    pub voice_range: Option<VoiceRange>,
+    /// The hand Hand Tracking follows; `None` until read.
+    pub hand: Option<Hand>,
+    /// The Hand Tracking range being edited. `Some` exactly while the camera
+    /// is in its range-edit state.
+    pub hand_range: Option<HandRange>,
     /// Stored preset positions, in the camera's order. `None` until read.
     pub presets: Option<Vec<Preset>>,
     /// The virtual camera has received at least one frame in this session.
@@ -259,6 +266,18 @@ pub enum GimbalCommand {
     SetHumanTracking(Option<TrackingMode>),
     SetAutoZoom(AutoZoom),
     SetTrackingSpeed(TrackingSpeed),
+    /// Start Voice or Hand Tracking, or stop the running AI mode with `Off`.
+    SetAiMode(AiMode),
+    SetVoiceRange(VoiceRange),
+    SetHand(Hand),
+    /// Read the Hand Tracking range and put the camera in its edit state.
+    OpenHandRange,
+    /// Take one range value from the current gimbal position (and zoom).
+    UpdateHandRange(HandRangeField),
+    /// Leave the edit state, writing the edited range when `save` is set.
+    CloseHandRange {
+        save: bool,
+    },
     TriggerPreset(u8),
     /// Store the current position as a new preset in the first free slot.
     AddPreset,
@@ -329,6 +348,53 @@ pub enum TrackingSpeed {
 
 impl TrackingSpeed {
     pub const ALL: [TrackingSpeed; 3] = [Self::Slow, Self::Standard, Self::Fast];
+}
+
+/// The AI mode the camera runs; only one runs at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AiMode {
+    Off,
+    Human,
+    Hand,
+    Voice,
+}
+
+/// Which directions Voice Tracking listens to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VoiceRange {
+    Omni,
+    Forward,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hand {
+    Left,
+    Right,
+}
+
+/// The Hand Tracking range as the camera stores it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HandRange {
+    /// Degrees in the camera's sign: yaw min, yaw max, pitch min, pitch max.
+    pub limits: [f32; 4],
+    /// Where the gimbal returns when the target leaves the range, in the
+    /// 24-byte preset record layout.
+    pub record: [u8; 24],
+}
+
+impl HandRange {
+    /// Yaw and pitch in degrees and the zoom ratio of the return position.
+    pub fn return_position(&self) -> (f32, f32, f32) {
+        vendor::return_position(&self.record)
+    }
+}
+
+/// A value of the Hand Tracking range that Update can set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum HandRangeField {
+    /// Index into [`HandRange::limits`].
+    Limit(usize),
+    Return,
 }
 
 /// Largest zoom ratio of the Tiny 3 Lite.

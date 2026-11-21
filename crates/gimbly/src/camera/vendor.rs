@@ -25,8 +25,8 @@
 //! | 16.. | data, then padding |
 
 use super::{
-    AutoZoom, Fov, GimbalCommand, PRESET_NAME_MAX, PRESET_SLOTS, PresetPosition, TrackingMode,
-    TrackingSpeed, ZOOM_RATIO_MAX,
+    AiMode, AutoZoom, Fov, GimbalCommand, Hand, HandRange, PRESET_NAME_MAX, PRESET_SLOTS,
+    PresetPosition, TrackingMode, TrackingSpeed, VoiceRange, ZOOM_RATIO_MAX,
 };
 
 /// GUID of the extension unit, as the UVC descriptor stores it.
@@ -69,6 +69,14 @@ const WRITE_SETTING: [u8; 2] = [0x44, 0x54];
 /// unknown).
 const SETTING_BEFORE_SPEED: u32 = 4;
 const SETTING_TRACKING_SPEED: u32 = 5;
+/// Reads (`84 20`) and writes (`44 20`) a Hand Tracking setting: keys 0–3
+/// the range, key 4 the hand; see `docs/clean-room/2026-11-22-ai-mode.md`.
+pub const READ_HAND_SETTING: [u8; 2] = [0x84, 0x20];
+const WRITE_HAND_SETTING: [u8; 2] = [0x44, 0x20];
+pub const HAND_SIDE: u32 = 4;
+/// Reads (`04 25`) and writes (`c4 24`) the Hand Tracking return position.
+pub const READ_RETURN_POSITION: [u8; 2] = [0x04, 0x25];
+const WRITE_RETURN_POSITION: [u8; 2] = [0xc4, 0x24];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Message {
@@ -374,11 +382,147 @@ pub fn sleeping(data: &[u8]) -> Option<bool> {
     }
 }
 
-/// Whether the status block reports AI tracking active (`2` was Single Mode;
-/// other non-zero values are untested modes and also count as on).
-pub fn tracking(data: &[u8]) -> Option<bool> {
+fn ai_mode_value(mode: AiMode) -> u8 {
+    match mode {
+        AiMode::Off => 0,
+        AiMode::Human => 2,
+        AiMode::Hand => 3,
+        AiMode::Voice => 7,
+    }
+}
+
+/// Starts an AI mode, or stops the running one with [`AiMode::Off`]. Human
+/// Tracking also needs its framing; see [`human_tracking`].
+pub fn ai_mode(mode: AiMode) -> [u8; MESSAGE_LEN] {
+    ai_block(ai_mode_value(mode), 0)
+}
+
+/// The running AI mode in the status block; `None` for unknown values and
+/// for `6`, which shows for under 2 s while the camera switches modes.
+pub fn read_ai_mode(data: &[u8]) -> Option<AiMode> {
     sleeping(data)?;
-    data.get(24).map(|&mode| mode != 0)
+    let value = *data.get(24)?;
+    [AiMode::Off, AiMode::Human, AiMode::Hand, AiMode::Voice]
+        .into_iter()
+        .find(|&mode| ai_mode_value(mode) == value)
+}
+
+fn view_block(bytes: &[u8]) -> [u8; MESSAGE_LEN] {
+    let mut data = [0; MESSAGE_LEN];
+    data[..bytes.len()].copy_from_slice(bytes);
+    data
+}
+
+pub fn voice_range(range: VoiceRange) -> [u8; MESSAGE_LEN] {
+    view_block(&[0x24, 1, (range == VoiceRange::Forward).into()])
+}
+
+/// The Voice Tracking Range in status offset 46: bit 1 is Forward, bit 0
+/// Sound Source Assisted Tracking. Other bits were never seen.
+pub fn read_voice_range(data: &[u8]) -> Option<VoiceRange> {
+    sleeping(data)?;
+    match *data.get(46)? {
+        0 | 1 => Some(VoiceRange::Omni),
+        2 | 3 => Some(VoiceRange::Forward),
+        _ => None,
+    }
+}
+
+fn hand_setting(key: u32, value: &[u8]) -> Message {
+    let mut data = key.to_le_bytes().to_vec();
+    data.extend_from_slice(value);
+    Message::new(GIMBAL, WRITE_HAND_SETTING, data)
+}
+
+/// Request data for [`READ_HAND_SETTING`].
+pub fn hand_setting_key(key: u32) -> Vec<u8> {
+    key.to_le_bytes().to_vec()
+}
+
+pub fn hand(hand: Hand) -> Message {
+    hand_setting(HAND_SIDE, &[(hand == Hand::Left).into()])
+}
+
+pub fn read_hand(data: &[u8]) -> Option<Hand> {
+    match data {
+        [1] => Some(Hand::Left),
+        [0] => Some(Hand::Right),
+        _ => None,
+    }
+}
+
+/// One range limit in degrees; `None` unless it is a plausible angle.
+pub fn read_hand_limit(data: &[u8]) -> Option<f32> {
+    let value = f32::from_le_bytes(data.try_into().ok()?);
+    (value.is_finite() && value.abs() <= 360.0).then_some(value)
+}
+
+pub fn read_return_record(data: &[u8]) -> Option<[u8; 24]> {
+    data.try_into().ok()
+}
+
+/// Yaw and pitch in degrees and the zoom ratio of a return record; id
+/// `ffffffff` means none is stored, shown as the home position.
+pub fn return_position(record: &[u8; 24]) -> (f32, f32, f32) {
+    if record[..4] == [0xff; 4] {
+        return (0.0, 0.0, 1.0);
+    }
+    let value = |at: usize| f32::from(i16::from_le_bytes([record[at], record[at + 1]])) / 100.0;
+    (value(4), value(6), value(10))
+}
+
+/// `record` with a new position, from [`current_angles`] and a zoom ratio.
+pub fn set_return_position(
+    record: &[u8; 24],
+    (yaw, pitch): (i16, i16),
+    ratio: f32,
+) -> Option<[u8; 24]> {
+    let mut record = *record;
+    // shortcut: the id a newly set position needs is unknown (Update was
+    // not captured); 0 replaces "none stored". Check with a capture.
+    if record[..4] == [0xff; 4] {
+        record[..4].fill(0);
+    }
+    record[4..6].copy_from_slice(&yaw.to_le_bytes());
+    record[6..8].copy_from_slice(&pitch.to_le_bytes());
+    record[10..12].copy_from_slice(&zoom_units(ratio)?.to_le_bytes());
+    Some(record)
+}
+
+/// The official app keeps opposite limits at least 10° apart.
+pub fn hand_limits_valid(limits: &[f32; 4]) -> bool {
+    limits[1] - limits[0] >= 10.0 && limits[3] - limits[2] >= 10.0
+}
+
+/// Selector 6 block that enters (`true`) or leaves the range-edit state.
+pub fn hand_range_edit(editing: bool) -> [u8; MESSAGE_LEN] {
+    view_block(&[0x18, 1, editing.into()])
+}
+
+/// The gimbal message sent after entering (`true`) or before leaving the
+/// range-edit state.
+pub fn hand_range_gimbal(editing: bool) -> Message {
+    Message::new(GIMBAL, [0xc4, 0x26], vec![u8::from(!editing)])
+}
+
+/// Messages that follow [`hand_range_edit`]`(false)`: Done writes `save`,
+/// Cancel passes `None`. Both end the edit state and zoom back to 1.0x.
+pub fn hand_range_close(save: Option<&HandRange>) -> Vec<Message> {
+    let mut messages = Vec::new();
+    if let Some(range) = save {
+        for (key, limit) in (0u32..).zip(range.limits) {
+            messages.push(hand_setting(key, &limit.to_le_bytes()));
+        }
+        let mut record = range.record;
+        // The official app wrote this field (read as 100) as 0; meaning unknown.
+        record[20..22].fill(0);
+        messages.push(Message::new(GIMBAL, WRITE_RETURN_POSITION, record.to_vec()));
+    }
+    messages.push(hand_range_gimbal(false));
+    let mut zoom = 0x1e_u32.to_le_bytes().to_vec();
+    zoom.extend_from_slice(&1.0f32.to_le_bytes());
+    messages.push(Message::new(GIMBAL, [0x84, 0x68], zoom));
+    messages
 }
 
 pub fn zoom(ratio: f32) -> Option<(Message, f32)> {
@@ -472,15 +616,22 @@ pub fn read_preset_position(data: &[u8], id: u8) -> Option<PresetPosition> {
     })
 }
 
-pub fn store_preset(id: u8, current: &[u8], ratio: f32) -> Option<Message> {
+/// Yaw and pitch in hundredths of a degree from a [`READ_POSITION`] reply.
+pub fn current_angles(current: &[u8]) -> Option<(i16, i16)> {
     let &[_, _, _, _, _, _, _, _, pitch0, pitch1, yaw0, yaw1, ..] = current else {
         return None;
     };
     if current.len() != 24 {
         return None;
     }
-    let yaw = i16::from_le_bytes([yaw0, yaw1]).checked_mul(10)?;
-    let pitch = i16::from_le_bytes([pitch0, pitch1]).checked_mul(10)?;
+    Some((
+        i16::from_le_bytes([yaw0, yaw1]).checked_mul(10)?,
+        i16::from_le_bytes([pitch0, pitch1]).checked_mul(10)?,
+    ))
+}
+
+pub fn store_preset(id: u8, current: &[u8], ratio: f32) -> Option<Message> {
+    let (yaw, pitch) = current_angles(current)?;
     let mut data = preset_id(id);
     data.extend(
         [
@@ -658,10 +809,10 @@ mod tests {
         let on = hex(
             "2e00000100000001000178000001010001000000017f000002004b030000001e0003100000000000080000000301",
         );
-        assert_eq!(tracking(&off), Some(false));
-        assert_eq!(tracking(&on), Some(true));
-        assert_eq!(tracking(&on[..45]), None);
-        assert_eq!(tracking(&padded("aa")), None);
+        assert_eq!(read_ai_mode(&off), Some(AiMode::Off));
+        assert_eq!(read_ai_mode(&on), Some(AiMode::Human));
+        assert_eq!(read_ai_mode(&on[..45]), None);
+        assert_eq!(read_ai_mode(&padded("aa")), None);
     }
 
     #[test]
@@ -819,5 +970,125 @@ mod tests {
             (-14.2, 33.2, 0.0, 1.0)
         );
         assert!(read_preset_position(&stored.data, 2).is_none());
+    }
+
+    /// Checks a gimbal write the way the 2026-11-22 capture showed it.
+    fn assert_gimbal_write(message: &Message, command: [u8; 2], data: &str) {
+        assert_eq!(message.flags, 0x25);
+        assert_eq!((message.source, message.destination), (HOST, GIMBAL));
+        assert_eq!(message.command, command);
+        assert_eq!(message.data, hex(data));
+    }
+
+    #[test]
+    fn ai_mode_matches_capture() {
+        // Selector 6 writes from the 2026-11-22 capture.
+        assert_eq!(ai_mode(AiMode::Voice).to_vec(), padded("16020700"));
+        assert_eq!(ai_mode(AiMode::Hand).to_vec(), padded("16020300"));
+        assert_eq!(ai_mode(AiMode::Off).to_vec(), padded("16020000"));
+        assert_eq!(voice_range(VoiceRange::Omni).to_vec(), padded("240100"));
+        assert_eq!(voice_range(VoiceRange::Forward).to_vec(), padded("240101"));
+
+        let status = |mode: u8, range: u8| {
+            let mut block = hex(
+                "2e00000100000001000178000001010001000000017f000000004b030000553c00031000000000000800000003010100000000000000000000000000",
+            );
+            (block[24], block[46]) = (mode, range);
+            block
+        };
+        for (value, mode) in [
+            (0, Some(AiMode::Off)),
+            (2, Some(AiMode::Human)),
+            (3, Some(AiMode::Hand)),
+            (7, Some(AiMode::Voice)),
+            (6, None), // switching between modes
+            (1, None),
+            (0xff, None),
+        ] {
+            assert_eq!(read_ai_mode(&status(value, 1)), mode, "offset 24 = {value}");
+        }
+        for (value, range) in [
+            (1, Some(VoiceRange::Omni)),
+            (3, Some(VoiceRange::Forward)),
+            (0, Some(VoiceRange::Omni)),
+            (2, Some(VoiceRange::Forward)),
+            (4, None),
+            (0x81, None),
+        ] {
+            assert_eq!(
+                read_voice_range(&status(0, value)),
+                range,
+                "offset 46 = {value}"
+            );
+        }
+        assert_eq!(read_voice_range(&status(0, 3)[..46]), None);
+
+        assert_gimbal_write(&hand(Hand::Left), [0x44, 0x20], "0400000001");
+        assert_gimbal_write(&hand(Hand::Right), [0x44, 0x20], "0400000000");
+        let read =
+            Message::new(GIMBAL, READ_HAND_SETTING, hand_setting_key(HAND_SIDE)).requesting_reply();
+        assert_eq!((read.flags, read.data.clone()), (0x21, hex("04000000")));
+        assert_eq!(read_hand(&[1]), Some(Hand::Left));
+        assert_eq!(read_hand(&[0]), Some(Hand::Right));
+        assert_eq!(read_hand(&[2]), None);
+        assert_eq!(read_hand(&[]), None);
+        assert_eq!(read_hand(&[1, 0]), None);
+    }
+
+    #[test]
+    fn hand_range_matches_capture() {
+        // Replies and writes from the 2026-11-22 capture.
+        let none =
+            read_return_record(&hex("ffffffff0000000000006400000000006400640064000000")).unwrap();
+        assert_eq!(return_position(&none), (0.0, 0.0, 1.0));
+        assert_eq!(read_return_record(&none[..23]), None);
+        let limits = ["000034c2", "00003442", "0000f0c1", "0000f041"]
+            .map(|reply| read_hand_limit(&hex(reply)).unwrap());
+        assert_eq!(limits, [-45.0, 45.0, -30.0, 30.0]);
+        assert_eq!(read_hand_limit(&f32::NAN.to_le_bytes()), None);
+        assert_eq!(read_hand_limit(&400.0f32.to_le_bytes()), None);
+        assert_eq!(read_hand_limit(&hex("000034")), None);
+
+        assert_eq!(hand_range_edit(true).to_vec(), padded("180101"));
+        assert_eq!(hand_range_edit(false).to_vec(), padded("180100"));
+        assert_gimbal_write(&hand_range_gimbal(true), [0xc4, 0x26], "00");
+
+        let range = HandRange {
+            limits,
+            record: none,
+        };
+        let done = hand_range_close(Some(&range));
+        let expected = [
+            ([0x44, 0x20], "00000000000034c2"),
+            ([0x44, 0x20], "0100000000003442"),
+            ([0x44, 0x20], "020000000000f0c1"),
+            ([0x44, 0x20], "030000000000f041"),
+            (
+                [0xc4, 0x24],
+                "ffffffff0000000000006400000000006400640000000000",
+            ),
+            ([0xc4, 0x26], "01"),
+            ([0x84, 0x68], "1e0000000000803f"),
+        ];
+        assert_eq!(done.len(), expected.len());
+        for (message, (command, data)) in done.iter().zip(expected) {
+            assert_gimbal_write(message, command, data);
+        }
+        let cancel = hand_range_close(None);
+        assert_eq!(cancel, done[5..]);
+
+        // Displayed: left 45 ≥ right -45 + 10 and top 30 ≥ bottom -30 + 10.
+        assert!(hand_limits_valid(&limits));
+        assert!(hand_limits_valid(&[-5.0, 5.0, -30.0, 30.0]));
+        assert!(!hand_limits_valid(&[-5.0, 4.9, -30.0, 30.0]));
+        assert!(!hand_limits_valid(&[-45.0, 45.0, 10.0, 15.0]));
+
+        // A stored position: pan -22.70°, tilt -5.40°, zoom 1.00x.
+        let stored =
+            read_return_record(&hex("0000000022f7e4fd00006400000000006400640064000000")).unwrap();
+        assert_eq!(return_position(&stored), (-22.7, -5.4, 1.0));
+        let set = set_return_position(&none, (-2270, -540), 1.0).unwrap();
+        assert_eq!(set, stored);
+        assert!(set_return_position(&none, (0, 0), f32::NAN).is_none());
     }
 }

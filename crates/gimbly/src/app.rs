@@ -4,8 +4,8 @@ mod view_gimbal;
 
 use crate::branding::Branding;
 use crate::camera::{
-    self, AutoZoom, Command, DeviceInfo, GimbalCommand, PreviewFrame, Session, SessionState,
-    SessionStatus, TrackingMode, TrackingSpeed,
+    self, AiMode, AutoZoom, Command, DeviceInfo, GimbalCommand, PreviewFrame, Session,
+    SessionState, SessionStatus, TrackingMode, TrackingSpeed,
 };
 use crate::hotkeys::GlobalHotkeys;
 use crate::os;
@@ -778,7 +778,15 @@ impl GimblyApp {
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                 match self.tab {
-                    Tab::Console => self.console(ui),
+                    // Set replaces the console with the Hand Tracking range
+                    // panel; a camera that goes away closes it.
+                    Tab::Console if self.gimbal_ui.hand_range_open && self.gimbal_ready() => {
+                        self.hand_range_panel(ui)
+                    }
+                    Tab::Console => {
+                        self.gimbal_ui.hand_range_open = false;
+                        self.console(ui)
+                    }
                     Tab::Image | Tab::More => {
                         ui.add_space(40.0);
                         ui.vertical_centered(|ui| {
@@ -857,10 +865,14 @@ impl GimblyApp {
                 top: 18,
                 bottom: 26,
             };
-            let tracking = self.status.human_tracking;
-            let ready = self.gimbal_ready() && tracking.is_some();
+            let ai_mode = self.status.ai_mode;
+            let ready = self.gimbal_ready() && ai_mode.is_some();
             // The camera reports on/off only; highlight the mode Gimbly set.
-            let mode = self.status.tracking_mode.filter(|_| tracking == Some(true));
+            let mode = self
+                .status
+                .tracking_mode
+                .filter(|_| ai_mode == Some(AiMode::Human));
+            let hand_running = ai_mode == Some(AiMode::Hand);
             let zoom = self.status.auto_zoom;
             let zoom_ready = self.gimbal_ready() && zoom.is_some();
             let speed = self.status.tracking_speed;
@@ -942,7 +954,7 @@ impl GimblyApp {
                     ui.add_space(12.0);
                 }
                 ui.add_space(10.0);
-                ui.add_enabled_ui(false, ai_tracking);
+                ui.add_enabled_ui(false, |ui| ai_tracking(ui, hand_running));
                 ui.add_space(22.0);
                 group_label(ui, Some(icon::GAUGE), "Tracking Speed");
                 ui.add_space(12.0);
@@ -1153,9 +1165,11 @@ fn auto_zoom_label(zoom: AutoZoom) -> &'static str {
     }
 }
 
-fn ai_tracking(ui: &mut Ui) {
+/// `hand_running`: the official app shows Zone Tracking off during Hand
+/// Tracking.
+fn ai_tracking(ui: &mut Ui, hand_running: bool) {
     ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
-    switch_row(ui, "Zone Tracking", true, true);
+    switch_row(ui, "Zone Tracking", true, !hand_running);
     ui.add_space(18.0);
     switch_row(ui, "Sound Source Assisted Tracking", false, true);
     ui.add_space(22.0);
@@ -1221,6 +1235,22 @@ impl eframe::App for GimblyApp {
                 self.status = session.status();
             }
             self.handle_hotkey(action, ctx);
+        }
+    }
+
+    /// The process ends right after this, before the camera thread could
+    /// clean up, so leave the Hand Tracking range-edit state here.
+    fn on_exit(&mut self) {
+        let Some(session) = &self.session else { return };
+        if session.status().hand_range.is_none() {
+            return;
+        }
+        session.send(Command::Gimbal(GimbalCommand::CloseHandRange {
+            save: false,
+        }));
+        let until = Instant::now() + Duration::from_secs(1);
+        while session.status().hand_range.is_some() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 

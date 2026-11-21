@@ -278,15 +278,18 @@ fn ai_block(sub: u8, value: u8) -> [u8; MESSAGE_LEN] {
     data
 }
 
-/// Turns Human Tracking on in `mode`, or off with `None`.
-pub fn human_tracking(mode: Option<TrackingMode>) -> Vec<[u8; MESSAGE_LEN]> {
+/// Turns Human Tracking on in `mode` with the `zoom` framing, or off with
+/// `None`. The start command carries the framing; without it the camera
+/// tracks without zooming.
+pub fn human_tracking(mode: Option<TrackingMode>, zoom: AutoZoom) -> Vec<[u8; MESSAGE_LEN]> {
     match mode {
         None => vec![ai_block(0, 0)],
-        Some(mode) => vec![
-            ai_block(2, 0),
-            ai_block(0x0e, (mode == TrackingMode::Group).into()),
-        ],
+        Some(mode) => vec![ai_block(2, auto_zoom_value(zoom)), mode_block(mode)],
     }
+}
+
+fn mode_block(mode: TrackingMode) -> [u8; MESSAGE_LEN] {
+    ai_block(0x0e, (mode == TrackingMode::Group).into())
 }
 
 fn auto_zoom_value(zoom: AutoZoom) -> u8 {
@@ -300,8 +303,18 @@ fn auto_zoom_value(zoom: AutoZoom) -> u8 {
     }
 }
 
-pub fn auto_zoom(zoom: AutoZoom) -> [u8; MESSAGE_LEN] {
-    ai_block(0x0f, auto_zoom_value(zoom))
+/// Selects the Auto Zoom framing. While tracking runs (`tracking` is
+/// `Some`), the official app also restarts tracking with the new framing
+/// and repeats the mode; the framing only takes effect then. `Some(None)`
+/// means tracking runs in a mode Gimbly did not set, so the mode is left out.
+pub fn auto_zoom(zoom: AutoZoom, tracking: Option<Option<TrackingMode>>) -> Vec<[u8; MESSAGE_LEN]> {
+    let value = auto_zoom_value(zoom);
+    let mut blocks = vec![ai_block(0x0f, value)];
+    if let Some(mode) = tracking {
+        blocks.push(ai_block(2, value));
+        blocks.extend(mode.map(mode_block));
+    }
+    blocks
 }
 
 /// The Auto Zoom framing in the status block; `None` for values never
@@ -620,21 +633,25 @@ mod tests {
     #[test]
     fn human_tracking_matches_capture() {
         // Selector 6 blocks from the 2026-11-21 captures.
-        let blocks = |mode| {
-            human_tracking(mode)
+        let blocks = |mode, zoom| {
+            human_tracking(mode, zoom)
                 .iter()
                 .map(|b| b.to_vec())
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            blocks(Some(TrackingMode::Single)),
+            blocks(Some(TrackingMode::Single), AutoZoom::Off),
             [padded("160202"), padded("16020e")]
         );
         assert_eq!(
-            blocks(Some(TrackingMode::Group)),
+            blocks(Some(TrackingMode::Group), AutoZoom::Off),
             [padded("160202"), padded("16020e01")]
         );
-        assert_eq!(blocks(None), [padded("1602")]);
+        assert_eq!(
+            blocks(Some(TrackingMode::Single), AutoZoom::CloseUp),
+            [padded("16020203"), padded("16020e")]
+        );
+        assert_eq!(blocks(None, AutoZoom::CloseUp), [padded("1602")]);
         let off = hex(
             "2e00000100000001000178000001010001000000017f000000004b030000001e0003100000000000080000000301",
         );
@@ -665,10 +682,29 @@ mod tests {
             block[42] = value;
             block
         };
+        let blocks = |zoom, tracking| {
+            auto_zoom(zoom, tracking)
+                .iter()
+                .map(|b| b.to_vec())
+                .collect::<Vec<_>>()
+        };
         for (zoom, block) in expected {
-            assert_eq!(auto_zoom(zoom).to_vec(), padded(block));
+            assert_eq!(blocks(zoom, None), [padded(block)]);
             assert_eq!(read_auto_zoom(&status(auto_zoom_value(zoom))), Some(zoom));
         }
+        // While tracking ran in Single Mode (second capture).
+        assert_eq!(
+            blocks(AutoZoom::CloseUp, Some(Some(TrackingMode::Single))),
+            [padded("16020f03"), padded("16020203"), padded("16020e")]
+        );
+        assert_eq!(
+            blocks(AutoZoom::FullBody, Some(Some(TrackingMode::Group))),
+            [padded("16020f01"), padded("16020201"), padded("16020e01")]
+        );
+        assert_eq!(
+            blocks(AutoZoom::FullBody, Some(None)),
+            [padded("16020f01"), padded("16020201")]
+        );
         assert_eq!(read_auto_zoom(&status(4)), None);
         assert_eq!(read_auto_zoom(&status(1)[..42]), None);
         assert_eq!(read_auto_zoom(&padded("aa")), None);

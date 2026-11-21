@@ -208,19 +208,29 @@ impl<T: Transport> Channel<T> {
                 *zoom_refresh = follow_zoom();
             }
             GimbalCommand::SetHumanTracking(mode) => {
-                for mut block in vendor::human_tracking(mode) {
+                let zoom = shared.status().auto_zoom.unwrap_or(AutoZoom::Off);
+                for mut block in vendor::human_tracking(mode, zoom) {
                     self.set(vendor::SELECTOR_VIEW, &mut block)?;
                 }
                 let mut status = shared.status();
                 status.human_tracking = Some(mode.is_some());
                 status.tracking_mode = mode;
+                // Auto Zoom moves the zoom once tracking starts.
+                *zoom_refresh = follow_zoom();
             }
             GimbalCommand::SetAutoZoom(zoom) => {
-                if shared.status().auto_zoom == Some(zoom) {
-                    return Ok(());
+                let tracking = {
+                    let status = shared.status();
+                    if status.auto_zoom == Some(zoom) {
+                        return Ok(());
+                    }
+                    (status.human_tracking == Some(true)).then_some(status.tracking_mode)
+                };
+                for mut block in vendor::auto_zoom(zoom, tracking) {
+                    self.set(vendor::SELECTOR_VIEW, &mut block)?;
                 }
-                self.set(vendor::SELECTOR_VIEW, &mut vendor::auto_zoom(zoom))?;
                 shared.status().auto_zoom = Some(zoom);
+                *zoom_refresh = follow_zoom();
             }
             GimbalCommand::SetTrackingSpeed(speed) => {
                 if shared.status().tracking_speed == Some(speed) {

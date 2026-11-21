@@ -54,7 +54,7 @@ repository.
   | Lower Body | `06` |
 
   Offset 42 of the status block read the same value 0.7–2 s after each
-  write. Auto Zoom changed with tracking off.
+  write. The stored value changed with tracking off.
 - In Group Mode the app greys out Close-up, Headless and Lower Body.
 - After each tracking change the app exchanged the `82 ad` / `c2 ad`
   records already described in the
@@ -63,10 +63,33 @@ repository.
 - During sleep transitions offset 43 read `1` for one read and offset 9
   changed `1` → `3`; these did not follow any click.
 
+## Third capture: Auto Zoom while tracking (same day)
+
+The owner reported that Auto Zoom in Gimbly highlighted but did not zoom.
+A third capture (same setup, owner in view, Single Mode on) first recorded
+Gimbly, then OBSBOT Center, each switching Auto Zoom between Close-up and
+Full Body.
+
+- **Observed (Gimbly):** one write `16 02 0f NN` per click; the preview did
+  not zoom.
+- **Observed (OBSBOT Center):** three writes within 5 ms per click:
+  `16 02 0f NN`, then `16 02 02 NN` with the **same framing value**, then
+  `16 02 0e 00` (the mode). The camera's zoom ratio (`04 68` reply) read
+  3.26× after Close-up, 1.0× after Full Body and 3.32× after Close-up again.
+- So byte 3 of the start command `16 02 02` is the Auto Zoom framing. The
+  earlier captures sent `02 00` only because Auto Zoom was Off.
+- **Black-box check:** Gimbly then started tracking with `02 03` and sent the
+  three writes for each change (`gimbly --probe --gimbal DIR track
+  autozoom:1 autozoom:3 untrack`). The zoom read 3.32× after `track`, and
+  the saved frames showed a close shot, a full-body shot after `autozoom:1`
+  and a close shot again after `autozoom:3`. After `untrack` the camera kept
+  the last zoom.
+
 ## Inferred
 
 - Selector 6 command `0x16` carries an AI tracking sub-command in byte 2
-  and its value in byte 3: `02` starts tracking, `00` stops it, `0e` picks
+  and its value in byte 3: `02` starts tracking with the Auto Zoom framing
+  as its value, `00` stops it, `0e` picks
   the Human Tracking mode (`0` Single, `1` Group) and `0f` picks the Auto
   Zoom framing. This replaces the earlier guess that `0x0e` was a set of
   flags.
@@ -74,6 +97,8 @@ repository.
   the unreliable "on" in the earlier black-box tests in a dark room.
 - The status block reports whether tracking runs but not the mode, so a
   host can only know the mode it set itself.
+- The `0f` framing write alone only stores the choice; tracking applies it
+  when (re)started, which is why the app restarts tracking on each change.
 - Value `4` is skipped by the app; it may be a framing this model does not
   offer.
 
@@ -99,7 +124,8 @@ camera's status agreed with each write.
 `camera::vendor::tests::human_tracking_matches_capture` compares the Single,
 Group and off writes with the captured blocks.
 `camera::vendor::tests::auto_zoom_matches_capture` compares all six Auto
-Zoom writes with the captured blocks, decodes offset 42 for each value, and
+Zoom writes with the captured blocks, with tracking off, in Single Mode
+and in Group Mode, decodes offset 42 for each value, and
 rejects value `4`, short blocks and foreign blocks.
 
 Hardware: Windows 10 with the Tiny 3 Lite, in the running app as above.

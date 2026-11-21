@@ -856,9 +856,36 @@ impl GimblyApp {
                 top: 18,
                 bottom: 26,
             };
+            let tracking = self.status.human_tracking;
+            let ready = self.gimbal_ready() && tracking.is_some();
+            let tip = self.gimbal_tip();
+            let mut toggled = false;
             band(ui, SECTION, margin, |ui| {
+                ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+                group_label(ui, Some(icon::PERSON_SIMPLE), "Human Tracking");
+                ui.add_space(12.0);
+                let gap = 16.0;
+                let size = vec2((ui.available_width() - gap) / 2.0, BUTTON_HEIGHT);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    toggled = ui
+                        .add_enabled_ui(ready, |ui| {
+                            pill(ui, "Single Mode", tracking == Some(true), size)
+                                .on_hover_text("Follow one person; click again to stop")
+                                .on_disabled_hover_text(tip)
+                        })
+                        .inner
+                        .clicked();
+                    ui.add_enabled_ui(false, |ui| {
+                        pill(ui, "Group Mode", false, size).on_disabled_hover_text(NOT_YET)
+                    });
+                });
+                ui.add_space(22.0);
                 ui.add_enabled_ui(false, ai_tracking);
             });
+            if toggled {
+                self.gimbal(GimbalCommand::SetHumanTracking(tracking != Some(true)));
+            }
         }
 
         divider(ui);
@@ -1034,12 +1061,9 @@ impl GimblyApp {
     }
 }
 
+/// The AI Tracking controls below Human Tracking, not implemented yet.
 fn ai_tracking(ui: &mut Ui) {
     ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
-    group_label(ui, Some(icon::PERSON_SIMPLE), "Human Tracking");
-    ui.add_space(12.0);
-    pill_row(ui, &["Single Mode", "Group Mode"], None, 16.0);
-    ui.add_space(22.0);
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Auto Zoom").size(15.0));
         help(ui, NOT_YET);

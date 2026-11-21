@@ -40,6 +40,8 @@ fn control_step(step: &str) -> Option<Command> {
         ["wide"] => GimbalCommand::SetFov(Fov::Wide),
         ["medium"] => GimbalCommand::SetFov(Fov::Medium),
         ["narrow"] => GimbalCommand::SetFov(Fov::Narrow),
+        ["track"] => GimbalCommand::SetHumanTracking(true),
+        ["untrack"] => GimbalCommand::SetHumanTracking(false),
         ["zoom", ratio] => GimbalCommand::ZoomRatio(ratio.parse().ok()?),
         ["go", id] => GimbalCommand::TriggerPreset(id.parse().ok()?),
         ["add"] => GimbalCommand::AddPreset,
@@ -82,9 +84,10 @@ fn gimbal(session: &camera::Session, args: &[String], virtual_camera: bool) -> i
             .and_then(|f| crate::snapshot::save(&f, Path::new(dir), [0, 0, 0, 0, 0, step as u16]));
         let status = session.status();
         println!(
-            "step {step}: {saved:?}, vendor control {}, sleeping {}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
+            "step {step}: {saved:?}, vendor control {}, sleeping {}, tracking {:?}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
             status.vendor_control,
             status.sleeping,
+            status.human_tracking,
             status.zoom_ratio,
             status.fov,
             status.presets,

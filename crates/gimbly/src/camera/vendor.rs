@@ -259,11 +259,32 @@ pub fn field_of_view(fov: Fov) -> [u8; MESSAGE_LEN] {
     data
 }
 
+/// Turns Human Tracking (Single Mode) on or off; see
+/// `docs/clean-room/2026-11-21-human-tracking-capture.md`.
+pub fn human_tracking(on: bool) -> Vec<[u8; MESSAGE_LEN]> {
+    let values: &[u8] = if on { &[0x02, 0x0e] } else { &[0] };
+    values
+        .iter()
+        .map(|&value| {
+            let mut data = [0; MESSAGE_LEN];
+            data[..3].copy_from_slice(&[0x16, 2, value]);
+            data
+        })
+        .collect()
+}
+
 pub fn sleeping(data: &[u8]) -> Option<bool> {
     match data {
         [46, 0, state @ 0..=1, ..] if data.len() >= 46 => Some(*state == 1),
         _ => None,
     }
+}
+
+/// Whether the status block reports AI tracking active (`2` was Single Mode;
+/// other non-zero values are untested modes and also count as on).
+pub fn tracking(data: &[u8]) -> Option<bool> {
+    sleeping(data)?;
+    data.get(24).map(|&mode| mode != 0)
 }
 
 pub fn zoom(ratio: f32) -> Option<(Message, f32)> {
@@ -513,6 +534,29 @@ mod tests {
         assert_eq!(sleeping(&awake), Some(false));
         assert_eq!(sleeping(&asleep), Some(true));
         assert_eq!(sleeping(&asleep[..45]), None);
+    }
+
+    #[test]
+    fn human_tracking_matches_capture() {
+        // Selector 6 blocks from the 2026-11-21 capture.
+        let blocks = |on| {
+            human_tracking(on)
+                .iter()
+                .map(|b| b.to_vec())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(blocks(true), [padded("160202"), padded("16020e")]);
+        assert_eq!(blocks(false), [padded("1602")]);
+        let off = hex(
+            "2e00000100000001000178000001010001000000017f000000004b030000001e0003100000000000080000000301",
+        );
+        let on = hex(
+            "2e00000100000001000178000001010001000000017f000002004b030000001e0003100000000000080000000301",
+        );
+        assert_eq!(tracking(&off), Some(false));
+        assert_eq!(tracking(&on), Some(true));
+        assert_eq!(tracking(&on[..45]), None);
+        assert_eq!(tracking(&padded("aa")), None);
     }
 
     #[test]

@@ -208,6 +208,8 @@ pub struct SessionStatus {
     pub zoom_ratio: Option<f32>,
     /// Field of view the camera reports; `None` after a manual zoom.
     pub fov: Option<Fov>,
+    /// Human Tracking state the camera reports; `None` until read.
+    pub human_tracking: Option<bool>,
     /// Stored preset positions, in the camera's order. `None` until read.
     pub presets: Option<Vec<Preset>>,
     /// The virtual camera has received at least one frame in this session.
@@ -246,6 +248,8 @@ pub enum GimbalCommand {
     /// Zoom to a ratio between 1.0 and [`ZOOM_RATIO_MAX`].
     ZoomRatio(f32),
     SetFov(Fov),
+    /// Turn Human Tracking (Single Mode) on or off.
+    SetHumanTracking(bool),
     TriggerPreset(u8),
     /// Store the current position as a new preset in the first free slot.
     AddPreset,

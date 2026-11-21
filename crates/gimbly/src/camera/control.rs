@@ -3,7 +3,9 @@
 
 use super::queue::Receiver;
 use super::sleep::SleepReadback;
-use super::{Command, GimbalCommand, PRESET_SLOTS, Preset, Shared, TrackingSpeed, vendor};
+use super::{
+    AutoZoom, Command, GimbalCommand, PRESET_SLOTS, Preset, Shared, TrackingSpeed, vendor,
+};
 use std::time::{Duration, Instant};
 
 pub(super) const TINY_3_LITE: u16 = 0xff04;
@@ -32,12 +34,13 @@ impl<T: Transport> Channel<T> {
 
     pub(super) fn initialize(&mut self, shared: &Shared) -> ZoomRefresh {
         let view = self.read_view();
-        shared.set_sleeping(view.map(|(sleeping, _)| sleeping).unwrap_or(false));
+        shared.set_sleeping(view.map(|(sleeping, ..)| sleeping).unwrap_or(false));
         let ratio = self.read_zoom().ok();
         let presets = self.presets().ok();
         let tracking_speed = self.read_tracking_speed().ok();
         let mut status = shared.status();
-        status.human_tracking = view.and_then(|(_, tracking)| tracking);
+        status.human_tracking = view.and_then(|(_, tracking, _)| tracking);
+        status.auto_zoom = view.and_then(|(.., zoom)| zoom);
         status.tracking_speed = tracking_speed;
         status.zoom_ratio = ratio;
         status.presets = presets;
@@ -98,11 +101,15 @@ impl<T: Transport> Channel<T> {
         ))
     }
 
-    /// Sleep and tracking state from one read of the status block.
-    pub(super) fn read_view(&self) -> Option<(bool, Option<bool>)> {
+    /// Sleep, tracking and Auto Zoom state from one read of the status block.
+    pub(super) fn read_view(&self) -> Option<(bool, Option<bool>, Option<AutoZoom>)> {
         let (block, len) = self.get(vendor::SELECTOR_VIEW).ok()?;
         let block = &block[..len];
-        Some((vendor::sleeping(block)?, vendor::tracking(block)))
+        Some((
+            vendor::sleeping(block)?,
+            vendor::tracking(block),
+            vendor::read_auto_zoom(block),
+        ))
     }
 
     pub(super) fn read_zoom(&mut self) -> Result<f32, String> {
@@ -200,11 +207,20 @@ impl<T: Transport> Channel<T> {
                 shared.status().fov = Some(fov);
                 *zoom_refresh = follow_zoom();
             }
-            GimbalCommand::SetHumanTracking(on) => {
-                for mut block in vendor::human_tracking(on) {
+            GimbalCommand::SetHumanTracking(mode) => {
+                for mut block in vendor::human_tracking(mode) {
                     self.set(vendor::SELECTOR_VIEW, &mut block)?;
                 }
-                shared.status().human_tracking = Some(on);
+                let mut status = shared.status();
+                status.human_tracking = Some(mode.is_some());
+                status.tracking_mode = mode;
+            }
+            GimbalCommand::SetAutoZoom(zoom) => {
+                if shared.status().auto_zoom == Some(zoom) {
+                    return Ok(());
+                }
+                self.set(vendor::SELECTOR_VIEW, &mut vendor::auto_zoom(zoom))?;
+                shared.status().auto_zoom = Some(zoom);
             }
             GimbalCommand::SetTrackingSpeed(speed) => {
                 if shared.status().tracking_speed == Some(speed) {
@@ -326,7 +342,10 @@ pub(super) fn control_loop(
                     if matches!(command, GimbalCommand::Drag(false)) && !stopped {
                         let _ = xu.send(vendor::speed(0.0, 0.0));
                     }
-                    if matches!(command, GimbalCommand::SetHumanTracking(_)) {
+                    if matches!(
+                        command,
+                        GimbalCommand::SetHumanTracking(_) | GimbalCommand::SetAutoZoom(_)
+                    ) {
                         tracking_sent = Some(Instant::now());
                     }
                     match xu.gimbal(command, shared, &mut zoom_refresh) {
@@ -344,18 +363,25 @@ pub(super) fn control_loop(
         if sleep_polled.elapsed() >= Duration::from_secs(1) {
             let view = xu.read_view();
             // The status block can still show the old state just after a write.
-            if let Some(tracking) = view.and_then(|(_, tracking)| tracking)
+            if let Some((_, tracking, zoom)) = view
                 && tracking_sent.is_none_or(|sent| sent.elapsed() >= TRACKING_SETTLE)
             {
                 let mut status = shared.status();
-                if status.human_tracking != Some(tracking) {
-                    status.human_tracking = Some(tracking);
-                    drop(status);
+                let changed = (tracking.is_some() && status.human_tracking != tracking)
+                    || (zoom.is_some() && status.auto_zoom != zoom);
+                status.human_tracking = tracking.or(status.human_tracking);
+                status.auto_zoom = zoom.or(status.auto_zoom);
+                // Another app may turn tracking on later in a mode we cannot read.
+                if tracking == Some(false) {
+                    status.tracking_mode = None;
+                }
+                drop(status);
+                if changed {
                     repaint();
                 }
             }
             if let Some(sleeping) =
-                view.and_then(|(sleeping, _)| sleep_readback.observe(sleeping, Instant::now()))
+                view.and_then(|(sleeping, ..)| sleep_readback.observe(sleeping, Instant::now()))
                 && shared.set_sleeping(sleeping)
             {
                 preset_retries = 0;

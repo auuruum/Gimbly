@@ -25,8 +25,8 @@
 //! | 16.. | data, then padding |
 
 use super::{
-    Fov, GimbalCommand, PRESET_NAME_MAX, PRESET_SLOTS, PresetPosition, TrackingSpeed,
-    ZOOM_RATIO_MAX,
+    AutoZoom, Fov, GimbalCommand, PRESET_NAME_MAX, PRESET_SLOTS, PresetPosition, TrackingMode,
+    TrackingSpeed, ZOOM_RATIO_MAX,
 };
 
 /// GUID of the extension unit, as the UVC descriptor stores it.
@@ -270,18 +270,48 @@ pub fn field_of_view(fov: Fov) -> [u8; MESSAGE_LEN] {
     data
 }
 
-/// Turns Human Tracking (Single Mode) on or off; see
-/// `docs/clean-room/2026-11-21-human-tracking-capture.md`.
-pub fn human_tracking(on: bool) -> Vec<[u8; MESSAGE_LEN]> {
-    let values: &[u8] = if on { &[0x02, 0x0e] } else { &[0] };
-    values
-        .iter()
-        .map(|&value| {
-            let mut data = [0; MESSAGE_LEN];
-            data[..3].copy_from_slice(&[0x16, 2, value]);
-            data
-        })
-        .collect()
+/// Selector 6 block of AI tracking command `0x16`: a sub-command and its
+/// value; see `docs/clean-room/2026-11-21-group-mode-auto-zoom.md`.
+fn ai_block(sub: u8, value: u8) -> [u8; MESSAGE_LEN] {
+    let mut data = [0; MESSAGE_LEN];
+    data[..4].copy_from_slice(&[0x16, 2, sub, value]);
+    data
+}
+
+/// Turns Human Tracking on in `mode`, or off with `None`.
+pub fn human_tracking(mode: Option<TrackingMode>) -> Vec<[u8; MESSAGE_LEN]> {
+    match mode {
+        None => vec![ai_block(0, 0)],
+        Some(mode) => vec![
+            ai_block(2, 0),
+            ai_block(0x0e, (mode == TrackingMode::Group).into()),
+        ],
+    }
+}
+
+fn auto_zoom_value(zoom: AutoZoom) -> u8 {
+    match zoom {
+        AutoZoom::Off => 0,
+        AutoZoom::FullBody => 1,
+        AutoZoom::UpperBody => 2,
+        AutoZoom::CloseUp => 3,
+        AutoZoom::Headless => 5,
+        AutoZoom::LowerBody => 6,
+    }
+}
+
+pub fn auto_zoom(zoom: AutoZoom) -> [u8; MESSAGE_LEN] {
+    ai_block(0x0f, auto_zoom_value(zoom))
+}
+
+/// The Auto Zoom framing in the status block; `None` for values never
+/// observed.
+pub fn read_auto_zoom(data: &[u8]) -> Option<AutoZoom> {
+    sleeping(data)?;
+    let value = *data.get(42)?;
+    AutoZoom::ALL
+        .into_iter()
+        .find(|&zoom| auto_zoom_value(zoom) == value)
 }
 
 fn tracking_speed_value(speed: TrackingSpeed) -> u32 {
@@ -589,15 +619,22 @@ mod tests {
 
     #[test]
     fn human_tracking_matches_capture() {
-        // Selector 6 blocks from the 2026-11-21 capture.
-        let blocks = |on| {
-            human_tracking(on)
+        // Selector 6 blocks from the 2026-11-21 captures.
+        let blocks = |mode| {
+            human_tracking(mode)
                 .iter()
                 .map(|b| b.to_vec())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(blocks(true), [padded("160202"), padded("16020e")]);
-        assert_eq!(blocks(false), [padded("1602")]);
+        assert_eq!(
+            blocks(Some(TrackingMode::Single)),
+            [padded("160202"), padded("16020e")]
+        );
+        assert_eq!(
+            blocks(Some(TrackingMode::Group)),
+            [padded("160202"), padded("16020e01")]
+        );
+        assert_eq!(blocks(None), [padded("1602")]);
         let off = hex(
             "2e00000100000001000178000001010001000000017f000000004b030000001e0003100000000000080000000301",
         );
@@ -608,6 +645,33 @@ mod tests {
         assert_eq!(tracking(&on), Some(true));
         assert_eq!(tracking(&on[..45]), None);
         assert_eq!(tracking(&padded("aa")), None);
+    }
+
+    #[test]
+    fn auto_zoom_matches_capture() {
+        // Selector 6 writes and status reads from the 2026-11-21 capture.
+        let expected = [
+            (AutoZoom::Off, "16020f"),
+            (AutoZoom::FullBody, "16020f01"),
+            (AutoZoom::UpperBody, "16020f02"),
+            (AutoZoom::CloseUp, "16020f03"),
+            (AutoZoom::Headless, "16020f05"),
+            (AutoZoom::LowerBody, "16020f06"),
+        ];
+        let status = |value: u8| {
+            let mut block = hex(
+                "2e00000100000001000178000001010001000000017f000000004b030000553c00031000000000000800000003010100000000000000000000000000",
+            );
+            block[42] = value;
+            block
+        };
+        for (zoom, block) in expected {
+            assert_eq!(auto_zoom(zoom).to_vec(), padded(block));
+            assert_eq!(read_auto_zoom(&status(auto_zoom_value(zoom))), Some(zoom));
+        }
+        assert_eq!(read_auto_zoom(&status(4)), None);
+        assert_eq!(read_auto_zoom(&status(1)[..42]), None);
+        assert_eq!(read_auto_zoom(&padded("aa")), None);
     }
 
     #[test]

@@ -210,6 +210,11 @@ pub struct SessionStatus {
     pub fov: Option<Fov>,
     /// Human Tracking state the camera reports; `None` until read.
     pub human_tracking: Option<bool>,
+    /// Mode Gimbly last turned tracking on in. The camera reports the same
+    /// state for both modes, so this is `None` when Gimbly did not set it.
+    pub tracking_mode: Option<TrackingMode>,
+    /// Auto Zoom framing the camera reports; `None` until read.
+    pub auto_zoom: Option<AutoZoom>,
     /// Tracking speed the camera reports; `None` until read.
     pub tracking_speed: Option<TrackingSpeed>,
     /// Stored preset positions, in the camera's order. `None` until read.
@@ -250,8 +255,9 @@ pub enum GimbalCommand {
     /// Zoom to a ratio between 1.0 and [`ZOOM_RATIO_MAX`].
     ZoomRatio(f32),
     SetFov(Fov),
-    /// Turn Human Tracking (Single Mode) on or off.
-    SetHumanTracking(bool),
+    /// Turn Human Tracking on in a mode, or off with `None`.
+    SetHumanTracking(Option<TrackingMode>),
+    SetAutoZoom(AutoZoom),
     SetTrackingSpeed(TrackingSpeed),
     TriggerPreset(u8),
     /// Store the current position as a new preset in the first free slot.
@@ -277,6 +283,40 @@ pub enum Fov {
 
 impl Fov {
     pub const ALL: [Fov; 3] = [Fov::Wide, Fov::Medium, Fov::Narrow];
+}
+
+/// The two Human Tracking buttons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrackingMode {
+    Single,
+    Group,
+}
+
+/// How Auto Zoom frames the tracked person (the Auto Zoom buttons).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoZoom {
+    Off,
+    FullBody,
+    UpperBody,
+    CloseUp,
+    Headless,
+    LowerBody,
+}
+
+impl AutoZoom {
+    pub const ALL: [AutoZoom; 6] = [
+        Self::Off,
+        Self::FullBody,
+        Self::UpperBody,
+        Self::CloseUp,
+        Self::Headless,
+        Self::LowerBody,
+    ];
+
+    /// The official app disables these in Group Mode.
+    pub fn single_only(self) -> bool {
+        matches!(self, Self::CloseUp | Self::Headless | Self::LowerBody)
+    }
 }
 
 /// How fast AI tracking turns the gimbal (the Tracking Speed row).

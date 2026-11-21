@@ -4,8 +4,8 @@ mod view_gimbal;
 
 use crate::branding::Branding;
 use crate::camera::{
-    self, Command, DeviceInfo, GimbalCommand, PreviewFrame, Session, SessionState, SessionStatus,
-    TrackingSpeed,
+    self, AutoZoom, Command, DeviceInfo, GimbalCommand, PreviewFrame, Session, SessionState,
+    SessionStatus, TrackingMode, TrackingSpeed,
 };
 use crate::hotkeys::GlobalHotkeys;
 use crate::os;
@@ -859,10 +859,15 @@ impl GimblyApp {
             };
             let tracking = self.status.human_tracking;
             let ready = self.gimbal_ready() && tracking.is_some();
+            // The camera reports on/off only; highlight the mode Gimbly set.
+            let mode = self.status.tracking_mode.filter(|_| tracking == Some(true));
+            let zoom = self.status.auto_zoom;
+            let zoom_ready = self.gimbal_ready() && zoom.is_some();
             let speed = self.status.tracking_speed;
             let speed_ready = self.gimbal_ready() && speed.is_some();
             let tip = self.gimbal_tip();
-            let mut toggled = false;
+            let mut picked_mode = None;
+            let mut picked_zoom = None;
             let mut picked_speed = None;
             band(ui, SECTION, margin, |ui| {
                 ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
@@ -872,19 +877,71 @@ impl GimblyApp {
                 let size = vec2((ui.available_width() - gap) / 2.0, BUTTON_HEIGHT);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = gap;
-                    toggled = ui
-                        .add_enabled_ui(ready, |ui| {
-                            pill(ui, "Single Mode", tracking == Some(true), size)
-                                .on_hover_text("Follow one person; click again to stop")
-                                .on_disabled_hover_text(tip)
-                        })
-                        .inner
-                        .clicked();
-                    ui.add_enabled_ui(false, |ui| {
-                        pill(ui, "Group Mode", false, size).on_disabled_hover_text(NOT_YET)
-                    });
+                    for (m, label, hint) in [
+                        (
+                            TrackingMode::Single,
+                            "Single Mode",
+                            "Follow one person; click again to stop",
+                        ),
+                        (
+                            TrackingMode::Group,
+                            "Group Mode",
+                            "Keep everyone in view; click again to stop",
+                        ),
+                    ] {
+                        let clicked = ui
+                            .add_enabled_ui(ready, |ui| {
+                                pill(ui, label, mode == Some(m), size)
+                                    .on_hover_text(hint)
+                                    .on_disabled_hover_text(tip)
+                            })
+                            .inner
+                            .clicked();
+                        if clicked {
+                            picked_mode = Some((mode != Some(m)).then_some(m));
+                        }
+                    }
                 });
                 ui.add_space(22.0);
+                ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Auto Zoom").size(15.0));
+                    help(ui, "How tightly tracking frames the person");
+                });
+                ui.add_space(12.0);
+                let width = (ui.available_width() - 2.0 * 16.0) / 3.0;
+                for row in AutoZoom::ALL.chunks(3) {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 16.0;
+                        for &z in row {
+                            let enabled = zoom_ready
+                                && !(mode == Some(TrackingMode::Group) && z.single_only());
+                            let clicked = ui
+                                .add_enabled_ui(enabled, |ui| {
+                                    pill(
+                                        ui,
+                                        auto_zoom_label(z),
+                                        zoom == Some(z),
+                                        vec2(width, BUTTON_HEIGHT),
+                                    )
+                                    .on_disabled_hover_text(
+                                        if zoom_ready {
+                                            "Not available in Group Mode"
+                                        } else {
+                                            tip
+                                        },
+                                    )
+                                })
+                                .inner
+                                .clicked();
+                            if clicked {
+                                picked_zoom = Some(z);
+                            }
+                        }
+                    });
+                    ui.add_space(12.0);
+                }
+                ui.add_space(10.0);
                 ui.add_enabled_ui(false, ai_tracking);
                 ui.add_space(22.0);
                 group_label(ui, Some(icon::GAUGE), "Tracking Speed");
@@ -900,8 +957,11 @@ impl GimblyApp {
                 row.response.on_disabled_hover_text(tip);
                 picked_speed = row.inner;
             });
-            if toggled {
-                self.gimbal(GimbalCommand::SetHumanTracking(tracking != Some(true)));
+            if let Some(mode) = picked_mode {
+                self.gimbal(GimbalCommand::SetHumanTracking(mode));
+            }
+            if let Some(zoom) = picked_zoom {
+                self.gimbal(GimbalCommand::SetAutoZoom(zoom));
             }
             if let Some(i) = picked_speed {
                 self.gimbal(GimbalCommand::SetTrackingSpeed(TrackingSpeed::ALL[i]));
@@ -1082,17 +1142,19 @@ impl GimblyApp {
 }
 
 /// The AI Tracking controls below Human Tracking, not implemented yet.
+fn auto_zoom_label(zoom: AutoZoom) -> &'static str {
+    match zoom {
+        AutoZoom::Off => "Off",
+        AutoZoom::FullBody => "Full Body",
+        AutoZoom::UpperBody => "Upper Body",
+        AutoZoom::CloseUp => "Close-up",
+        AutoZoom::Headless => "Headless",
+        AutoZoom::LowerBody => "Lower Body",
+    }
+}
+
 fn ai_tracking(ui: &mut Ui) {
     ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Auto Zoom").size(15.0));
-        help(ui, NOT_YET);
-    });
-    ui.add_space(12.0);
-    pill_row(ui, &["Off", "Full Body", "Upper Body"], Some(1), 16.0);
-    ui.add_space(12.0);
-    pill_row(ui, &["Close-up", "Headless", "Lower Body"], None, 16.0);
-    ui.add_space(22.0);
     switch_row(ui, "Zone Tracking", true, true);
     ui.add_space(18.0);
     switch_row(ui, "Sound Source Assisted Tracking", false, true);

@@ -3,7 +3,7 @@
 
 use super::queue::Receiver;
 use super::sleep::SleepReadback;
-use super::{Command, GimbalCommand, PRESET_SLOTS, Preset, Shared, vendor};
+use super::{Command, GimbalCommand, PRESET_SLOTS, Preset, Shared, TrackingSpeed, vendor};
 use std::time::{Duration, Instant};
 
 pub(super) const TINY_3_LITE: u16 = 0xff04;
@@ -35,8 +35,10 @@ impl<T: Transport> Channel<T> {
         shared.set_sleeping(view.map(|(sleeping, _)| sleeping).unwrap_or(false));
         let ratio = self.read_zoom().ok();
         let presets = self.presets().ok();
+        let tracking_speed = self.read_tracking_speed().ok();
         let mut status = shared.status();
         status.human_tracking = view.and_then(|(_, tracking)| tracking);
+        status.tracking_speed = tracking_speed;
         status.zoom_ratio = ratio;
         status.presets = presets;
         status.vendor_control = true;
@@ -106,6 +108,12 @@ impl<T: Transport> Channel<T> {
     pub(super) fn read_zoom(&mut self) -> Result<f32, String> {
         vendor::read_zoom(&self.request(vendor::READ_ZOOM, Vec::new())?)
             .ok_or_else(|| "Camera returned an invalid zoom ratio".into())
+    }
+
+    fn read_tracking_speed(&mut self) -> Result<TrackingSpeed, String> {
+        let data = self.request(vendor::READ_SETTING, vendor::read_tracking_speed_request())?;
+        vendor::read_tracking_speed(&data)
+            .ok_or_else(|| "Camera returned an unknown tracking speed".into())
     }
 
     fn preset_ids(&mut self) -> Result<Vec<u8>, String> {
@@ -197,6 +205,15 @@ impl<T: Transport> Channel<T> {
                     self.set(vendor::SELECTOR_VIEW, &mut block)?;
                 }
                 shared.status().human_tracking = Some(on);
+            }
+            GimbalCommand::SetTrackingSpeed(speed) => {
+                if shared.status().tracking_speed == Some(speed) {
+                    return Ok(());
+                }
+                for message in vendor::tracking_speed(speed) {
+                    self.send(message)?;
+                }
+                shared.status().tracking_speed = Some(speed);
             }
             GimbalCommand::ZoomRatio(ratio) => {
                 let (message, ratio) = vendor::zoom(ratio).ok_or("Zoom ratio is out of range")?;
@@ -351,19 +368,27 @@ pub(super) fn control_loop(
             }
             sleep_polled = Instant::now();
             // Opening or waking the stream can briefly interrupt replies.
-            let retry_presets = {
+            let (retry_presets, retry_speed) = {
                 let status = shared.status();
-                if status.presets.is_some() {
+                if status.presets.is_some() && status.tracking_speed.is_some() {
                     preset_retries = 0;
                 }
-                !status.sleeping && status.presets.is_none() && preset_retries < 3
+                let retry = !status.sleeping && preset_retries < 3;
+                (
+                    retry && status.presets.is_none(),
+                    retry && status.tracking_speed.is_none(),
+                )
             };
-            if retry_presets {
+            if retry_presets || retry_speed {
                 preset_retries += 1;
-                if let Ok(presets) = xu.presets() {
-                    shared.status().presets = Some(presets);
-                    repaint();
-                }
+            }
+            if retry_presets && let Ok(presets) = xu.presets() {
+                shared.status().presets = Some(presets);
+                repaint();
+            }
+            if retry_speed && let Ok(speed) = xu.read_tracking_speed() {
+                shared.status().tracking_speed = Some(speed);
+                repaint();
             }
         }
         if let Some((next, until)) = zoom_refresh.filter(|(next, _)| Instant::now() >= *next) {

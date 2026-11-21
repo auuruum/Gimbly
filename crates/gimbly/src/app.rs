@@ -5,6 +5,7 @@ mod view_gimbal;
 use crate::branding::Branding;
 use crate::camera::{
     self, Command, DeviceInfo, GimbalCommand, PreviewFrame, Session, SessionState, SessionStatus,
+    TrackingSpeed,
 };
 use crate::hotkeys::GlobalHotkeys;
 use crate::os;
@@ -858,8 +859,11 @@ impl GimblyApp {
             };
             let tracking = self.status.human_tracking;
             let ready = self.gimbal_ready() && tracking.is_some();
+            let speed = self.status.tracking_speed;
+            let speed_ready = self.gimbal_ready() && speed.is_some();
             let tip = self.gimbal_tip();
             let mut toggled = false;
+            let mut picked_speed = None;
             band(ui, SECTION, margin, |ui| {
                 ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
                 group_label(ui, Some(icon::PERSON_SIMPLE), "Human Tracking");
@@ -882,9 +886,25 @@ impl GimblyApp {
                 });
                 ui.add_space(22.0);
                 ui.add_enabled_ui(false, ai_tracking);
+                ui.add_space(22.0);
+                group_label(ui, Some(icon::GAUGE), "Tracking Speed");
+                ui.add_space(12.0);
+                let row = ui.add_enabled_ui(speed_ready, |ui| {
+                    pill_row(
+                        ui,
+                        &["Slow", "Standard", "Fast"],
+                        speed.and_then(|s| TrackingSpeed::ALL.iter().position(|&x| x == s)),
+                        16.0,
+                    )
+                });
+                row.response.on_disabled_hover_text(tip);
+                picked_speed = row.inner;
             });
             if toggled {
                 self.gimbal(GimbalCommand::SetHumanTracking(tracking != Some(true)));
+            }
+            if let Some(i) = picked_speed {
+                self.gimbal(GimbalCommand::SetTrackingSpeed(TrackingSpeed::ALL[i]));
             }
         }
 
@@ -1089,10 +1109,6 @@ fn ai_tracking(ui: &mut Ui) {
     });
     ui.add_space(12.0);
     pill_row(ui, &["Normal", "Close-up"], None, 16.0);
-    ui.add_space(22.0);
-    group_label(ui, Some(icon::GAUGE), "Tracking Speed");
-    ui.add_space(12.0);
-    pill_row(ui, &["Slow", "Standard", "Fast"], Some(1), 16.0);
 }
 
 fn switch_row(ui: &mut Ui, label: &str, settings: bool, on: bool) {

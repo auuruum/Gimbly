@@ -210,6 +210,8 @@ pub struct SessionStatus {
     pub fov: Option<Fov>,
     /// Human Tracking state the camera reports; `None` until read.
     pub human_tracking: Option<bool>,
+    /// Tracking speed the camera reports; `None` until read.
+    pub tracking_speed: Option<TrackingSpeed>,
     /// Stored preset positions, in the camera's order. `None` until read.
     pub presets: Option<Vec<Preset>>,
     /// The virtual camera has received at least one frame in this session.
@@ -250,6 +252,7 @@ pub enum GimbalCommand {
     SetFov(Fov),
     /// Turn Human Tracking (Single Mode) on or off.
     SetHumanTracking(bool),
+    SetTrackingSpeed(TrackingSpeed),
     TriggerPreset(u8),
     /// Store the current position as a new preset in the first free slot.
     AddPreset,
@@ -274,6 +277,18 @@ pub enum Fov {
 
 impl Fov {
     pub const ALL: [Fov; 3] = [Fov::Wide, Fov::Medium, Fov::Narrow];
+}
+
+/// How fast AI tracking turns the gimbal (the Tracking Speed row).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrackingSpeed {
+    Slow,
+    Standard,
+    Fast,
+}
+
+impl TrackingSpeed {
+    pub const ALL: [TrackingSpeed; 3] = [Self::Slow, Self::Standard, Self::Fast];
 }
 
 /// Largest zoom ratio of the Tiny 3 Lite.

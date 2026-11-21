@@ -8,7 +8,9 @@
 //! stepping the zoom; `--portrait` adds the 9:16 crop. Use
 //! `--virtual-camera` before `--gimbal` to exercise virtual output too.
 
-use crate::camera::{self, CaptureConfig, Command, Fov, GimbalCommand, SessionState};
+use crate::camera::{
+    self, CaptureConfig, Command, Fov, GimbalCommand, SessionState, TrackingSpeed,
+};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -42,6 +44,9 @@ fn control_step(step: &str) -> Option<Command> {
         ["narrow"] => GimbalCommand::SetFov(Fov::Narrow),
         ["track"] => GimbalCommand::SetHumanTracking(true),
         ["untrack"] => GimbalCommand::SetHumanTracking(false),
+        ["slow"] => GimbalCommand::SetTrackingSpeed(TrackingSpeed::Slow),
+        ["standard"] => GimbalCommand::SetTrackingSpeed(TrackingSpeed::Standard),
+        ["fast"] => GimbalCommand::SetTrackingSpeed(TrackingSpeed::Fast),
         ["zoom", ratio] => GimbalCommand::ZoomRatio(ratio.parse().ok()?),
         ["go", id] => GimbalCommand::TriggerPreset(id.parse().ok()?),
         ["add"] => GimbalCommand::AddPreset,
@@ -84,10 +89,11 @@ fn gimbal(session: &camera::Session, args: &[String], virtual_camera: bool) -> i
             .and_then(|f| crate::snapshot::save(&f, Path::new(dir), [0, 0, 0, 0, 0, step as u16]));
         let status = session.status();
         println!(
-            "step {step}: {saved:?}, vendor control {}, sleeping {}, tracking {:?}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
+            "step {step}: {saved:?}, vendor control {}, sleeping {}, tracking {:?}, speed {:?}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
             status.vendor_control,
             status.sleeping,
             status.human_tracking,
+            status.tracking_speed,
             status.zoom_ratio,
             status.fov,
             status.presets,

@@ -24,7 +24,10 @@
 //! | 14-15 | CRC of bytes 12-15 (this field zeroed) and the data |
 //! | 16.. | data, then padding |
 
-use super::{Fov, GimbalCommand, PRESET_NAME_MAX, PRESET_SLOTS, PresetPosition, ZOOM_RATIO_MAX};
+use super::{
+    Fov, GimbalCommand, PRESET_NAME_MAX, PRESET_SLOTS, PresetPosition, TrackingSpeed,
+    ZOOM_RATIO_MAX,
+};
 
 /// GUID of the extension unit, as the UVC descriptor stores it.
 #[cfg(windows)]
@@ -58,6 +61,14 @@ pub const READ_POSITION: [u8; 2] = [0x04, 0x66];
 pub const LIST_PRESETS: [u8; 2] = [0x04, 0x3d];
 pub const READ_PRESET_NAME: [u8; 2] = [0xc4, 0x3c];
 pub const READ_PRESET_POSITION: [u8; 2] = [0x44, 0x3a];
+/// Reads (`84 54`) and writes (`44 54`) a numbered gimbal setting; see
+/// `docs/clean-room/2026-11-21-tracking-speed.md`.
+pub const READ_SETTING: [u8; 2] = [0x84, 0x54];
+const WRITE_SETTING: [u8; 2] = [0x44, 0x54];
+/// Setting the official app writes as 0 before every speed change (meaning
+/// unknown).
+const SETTING_BEFORE_SPEED: u32 = 4;
+const SETTING_TRACKING_SPEED: u32 = 5;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Message {
@@ -271,6 +282,46 @@ pub fn human_tracking(on: bool) -> Vec<[u8; MESSAGE_LEN]> {
             data
         })
         .collect()
+}
+
+fn tracking_speed_value(speed: TrackingSpeed) -> u32 {
+    match speed {
+        TrackingSpeed::Slow => 0,
+        TrackingSpeed::Standard => 2,
+        TrackingSpeed::Fast => 3,
+    }
+}
+
+/// The two writes the official app sends for one Tracking Speed click.
+pub fn tracking_speed(speed: TrackingSpeed) -> [Message; 2] {
+    let write = |setting: u32, value: u32| {
+        let data = [0, setting, value]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        Message::new(GIMBAL, WRITE_SETTING, data)
+    };
+    [
+        write(SETTING_BEFORE_SPEED, 0),
+        write(SETTING_TRACKING_SPEED, tracking_speed_value(speed)),
+    ]
+}
+
+/// Request data for [`READ_SETTING`] that asks for the tracking speed.
+pub fn read_tracking_speed_request() -> Vec<u8> {
+    [0, SETTING_TRACKING_SPEED]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect()
+}
+
+/// The speed in a [`READ_SETTING`] reply; `None` for values never observed
+/// (the app shows no speed for `1`).
+pub fn read_tracking_speed(data: &[u8]) -> Option<TrackingSpeed> {
+    let value = u32::from_le_bytes(data.try_into().ok()?);
+    TrackingSpeed::ALL
+        .into_iter()
+        .find(|&speed| tracking_speed_value(speed) == value)
 }
 
 pub fn sleeping(data: &[u8]) -> Option<bool> {
@@ -557,6 +608,64 @@ mod tests {
         assert_eq!(tracking(&on), Some(true));
         assert_eq!(tracking(&on[..45]), None);
         assert_eq!(tracking(&padded("aa")), None);
+    }
+
+    #[test]
+    fn tracking_speed_matches_capture() {
+        // Blocks from the 2026-11-21 tracking speed capture (channel 0).
+        let encoded = |speed, seqs: [u8; 2]| {
+            tracking_speed(speed)
+                .into_iter()
+                .zip(seqs)
+                .map(|(mut message, seq)| {
+                    (message.seq, message.channel) = (seq, 0);
+                    message.encode().to_vec()
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = |seq: &str, crc: &str| {
+            padded(&format!(
+                "aa25{seq}000c00{crc}0a0444540c0045f9000000000400000000000000"
+            ))
+        };
+        assert_eq!(
+            encoded(TrackingSpeed::Slow, [0x35, 0x36]),
+            [
+                before("35", "da74"),
+                padded("aa2536000c002a7b0a0444540c00843500000000050000000000000000")
+            ]
+        );
+        assert_eq!(
+            encoded(TrackingSpeed::Fast, [0x47, 0x48]),
+            [
+                before("47", "7995"),
+                padded("aa2548000c0049a50a0444540c00847100000000050000000300000000")
+            ]
+        );
+        assert_eq!(
+            encoded(TrackingSpeed::Standard, [0x59, 0x5a]),
+            [
+                before("59", "19f5"),
+                padded("aa255a000c00e9fa0a0444540c00858d00000000050000000200000000")
+            ]
+        );
+
+        let mut read =
+            Message::new(GIMBAL, READ_SETTING, read_tracking_speed_request()).requesting_reply();
+        (read.seq, read.channel) = (0x38, 0);
+        assert_eq!(
+            read.encode().to_vec(),
+            padded("aa2138000c000ebe0a04845408007aee0000000005000000")
+        );
+        let reply = Message::decode(&hex("aa2938000c0047f5040a84540400be0700000000")).unwrap();
+        assert!(reply.matches_reply(&read));
+        assert_eq!(read_tracking_speed(&reply.data), Some(TrackingSpeed::Slow));
+        assert_eq!(
+            read_tracking_speed(&[3, 0, 0, 0]),
+            Some(TrackingSpeed::Fast)
+        );
+        assert_eq!(read_tracking_speed(&[1, 0, 0, 0]), None);
+        assert_eq!(read_tracking_speed(&[2, 0, 0]), None);
     }
 
     #[test]

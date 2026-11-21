@@ -109,6 +109,9 @@ traffic with USBPcap for comparison.
 
 ## Unknown
 
+Update: the [Group Mode and Auto Zoom captures](2026-11-21-group-mode-auto-zoom.md)
+explain `0x0e` (the mode) and the unreliable "on" (no person in view).
+
 - Why the same tracking-on write only works sometimes (see above).
 - The meaning of the second on value (`0x0e`) and whether it changes with
   Zone Tracking, Sound Source Assisted Tracking, or Group Mode.

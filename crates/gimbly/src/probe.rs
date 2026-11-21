@@ -9,7 +9,8 @@
 //! `--virtual-camera` before `--gimbal` to exercise virtual output too.
 
 use crate::camera::{
-    self, CaptureConfig, Command, Fov, GimbalCommand, SessionState, TrackingSpeed,
+    self, AutoZoom, CaptureConfig, Command, Fov, GimbalCommand, SessionState, TrackingMode,
+    TrackingSpeed,
 };
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -42,8 +43,12 @@ fn control_step(step: &str) -> Option<Command> {
         ["wide"] => GimbalCommand::SetFov(Fov::Wide),
         ["medium"] => GimbalCommand::SetFov(Fov::Medium),
         ["narrow"] => GimbalCommand::SetFov(Fov::Narrow),
-        ["track"] => GimbalCommand::SetHumanTracking(true),
-        ["untrack"] => GimbalCommand::SetHumanTracking(false),
+        ["track"] => GimbalCommand::SetHumanTracking(Some(TrackingMode::Single)),
+        ["group"] => GimbalCommand::SetHumanTracking(Some(TrackingMode::Group)),
+        ["untrack"] => GimbalCommand::SetHumanTracking(None),
+        ["autozoom", zoom] => {
+            GimbalCommand::SetAutoZoom(*AutoZoom::ALL.get(zoom.parse::<usize>().ok()?)?)
+        }
         ["slow"] => GimbalCommand::SetTrackingSpeed(TrackingSpeed::Slow),
         ["standard"] => GimbalCommand::SetTrackingSpeed(TrackingSpeed::Standard),
         ["fast"] => GimbalCommand::SetTrackingSpeed(TrackingSpeed::Fast),
@@ -89,10 +94,12 @@ fn gimbal(session: &camera::Session, args: &[String], virtual_camera: bool) -> i
             .and_then(|f| crate::snapshot::save(&f, Path::new(dir), [0, 0, 0, 0, 0, step as u16]));
         let status = session.status();
         println!(
-            "step {step}: {saved:?}, vendor control {}, sleeping {}, tracking {:?}, speed {:?}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
+            "step {step}: {saved:?}, vendor control {}, sleeping {}, tracking {:?} {:?}, auto zoom {:?}, speed {:?}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
             status.vendor_control,
             status.sleeping,
             status.human_tracking,
+            status.tracking_mode,
+            status.auto_zoom,
             status.tracking_speed,
             status.zoom_ratio,
             status.fov,

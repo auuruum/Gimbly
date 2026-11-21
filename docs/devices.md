@@ -21,6 +21,7 @@ code builds for that system but was not run there.
 | OBSBOT Tiny 3 Lite | `3564:ff04` | 0x0510 | unknown | CachyOS Linux 7.3.3 x86_64 | MJPEG 1080p30 preview on the virtual camera branch | release capture probe received live frames at 30 fps | 2026-11-10 |
 | OBSBOT Tiny 3 Lite | `3564:ff04` | 0x0510 | unknown | CachyOS Linux 7.3.5 x86_64 | 1080p30 preview and virtual camera | capture probe received preview frames and a separate V4L2 client read 45 YUYV frames from the loopback | 2026-11-20 |
 | OBSBOT Tiny 3 Lite | `3564:ff04` | not reread | 6.5.11.1 | Windows 10 Pro 19045 | Tracking Speed (Slow, Standard, Fast) | probe readback across processes, OBSBOT Center showed the value Gimbly wrote, buttons in the running app | 2026-11-21 |
+| OBSBOT Tiny 3 Lite | `3564:ff04` | not reread | 6.5.11.1 | Windows 10 Pro 19045 | Human Tracking Single/Group Mode and Auto Zoom | buttons in the running app with a person in view; camera status agreed with each write | 2026-11-21 |
 
 The 2026-11-08 Windows rows describe the earlier Windows build. The
 cross-platform change was checked by the compiler and Clippy for

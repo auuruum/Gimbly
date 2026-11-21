@@ -31,6 +31,9 @@ Human Tracking toggle for this device.
 
 ## Unknown
 
+Update: the [2026-11-21 capture](2026-11-21-human-tracking-capture.md)
+identified the on/off writes and the status byte.
+
 The command payloads for starting and stopping Human Tracking and the
 camera's state response are unknown. A short USB capture filtered to
 this camera while switching tracking off, on, and off again in OBSBOT

@@ -77,11 +77,39 @@ file is kept outside the repository.
   The camera's state changed before that exchange, so this record looks like
   a stored setting and not the toggle itself.
 
+## Black-box experiments (2026-11-21, same setup)
+
+Gimbly sent the selector 6 blocks itself (`gimbly --probe --gimbal DIR track
+untrack`, and the new Single Mode button). We captured Gimbly's own
+traffic with USBPcap for comparison.
+
+- **Observed:** Gimbly's writes matched the official app's byte for byte in
+  wIndex (`0x0200`), wLength (60) and data.
+- **Observed:** `16 02 00` turned tracking off every time (status offset 24
+  read `00` within about 0.6 s).
+- **Observed:** tracking turned on (offset 24 read `02` within about 0.3 s)
+  in only some sessions: about 1 of 4–5 tries over the day, with or without
+  the official app running. Within one probe session the result was
+  consistent: it turned on every time or never. The following variants all
+  showed the same uneven behaviour:
+  - `02` alone;
+  - `0e` alone;
+  - `02` then `0e` 21 ms apart;
+  - `02` then `0e` back to back.
+
+  A 15 s pause between sessions did not help. Clicking Single Mode in the
+  official app turned tracking on reliably in the same conditions.
+- **Observed:** the selector 6 status block was identical before writes that
+  worked and before writes that did not.
+- **Observed:** the camera faced down at the owner's head in a dark room
+  during these tests, and the face was mostly out of view.
+- **Inferred (unconfirmed):** the camera may engage tracking only when it
+  detects a person at that moment. A test in good light with the owner
+  facing the camera would settle it.
+
 ## Unknown
 
-- Whether the selector 6 command alone starts tracking. A black-box write of
-  `16 02 02 00` from Gimbly, checked with status offset 24 and by watching
-  the camera follow a person, would settle it.
+- Why the same tracking-on write only works sometimes (see above).
 - The meaning of the second on value (`0x0e`) and whether it changes with
   Zone Tracking, Sound Source Assisted Tracking, or Group Mode.
 - The status value for Group Mode and other AI modes.
@@ -90,9 +118,15 @@ file is kept outside the repository.
 
 ## Test
 
-There is no Gimbly code for this yet. The implementation should add unit
-tests that compare the encoded selector 6 on/off blocks with the bytes above.
-It should also decode status offset 24 from the captured off/on blocks and
-decode the `0x40`-flagged messages, including their data. The hardware test
-should confirm the state after enabling, disabling, and reconnecting while
-preview and the virtual camera are running.
+`camera::vendor::tests::human_tracking_matches_capture` compares the encoded
+on/off blocks with the captured bytes. It also decodes status offset 24 from
+the captured off and on blocks and rejects short or foreign blocks. Gimbly
+does not decode the `0x40`-flagged messages yet.
+
+Hardware: the probe and the Single Mode button were checked on Windows 10
+with the Tiny 3 Lite (firmware 6.5.11.1). Turning off and reading the state
+worked. Turning on was unreliable, as described above. Still to check:
+- turning on with a person clearly in view;
+- state after reconnecting;
+- a joystick drag with preview and virtual camera running;
+- macOS, native Wayland and native X11, which are untested.

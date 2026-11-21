@@ -132,11 +132,11 @@ fn header(
 }
 
 impl GimblyApp {
-    fn gimbal_ready(&self) -> bool {
+    pub(super) fn gimbal_ready(&self) -> bool {
         self.status.vendor_control && self.status.state == SessionState::Streaming
     }
 
-    fn gimbal_tip(&self) -> &'static str {
+    pub(super) fn gimbal_tip(&self) -> &'static str {
         if self.status.vendor_control_untested {
             "Gimbal control is not verified on this camera model yet"
         } else if self.status.state == SessionState::Streaming {

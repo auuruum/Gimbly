@@ -318,9 +318,9 @@ pub fn probe_controls(device: &DeviceInfo, script: Vec<String>) -> Result<Vec<St
     if device.is_obsbot() && device.usb_product_id == Some(control::TINY_3_LITE) {
         let mut xu = Xu::open(device)?;
         lines.push(format!(
-            "vendor zoom: {:?}, sleeping: {:?}, presets: {:?}",
+            "vendor zoom: {:?}, sleeping and tracking: {:?}, presets: {:?}",
             xu.read_zoom(),
-            xu.read_sleep(),
+            xu.read_view(),
             xu.presets()
         ));
         lines.extend(control::probe(&mut xu, script)?);

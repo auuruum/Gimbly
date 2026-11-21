@@ -31,10 +31,12 @@ impl<T: Transport> Channel<T> {
     }
 
     pub(super) fn initialize(&mut self, shared: &Shared) -> ZoomRefresh {
-        shared.set_sleeping(self.read_sleep().unwrap_or(false));
+        let view = self.read_view();
+        shared.set_sleeping(view.map(|(sleeping, _)| sleeping).unwrap_or(false));
         let ratio = self.read_zoom().ok();
         let presets = self.presets().ok();
         let mut status = shared.status();
+        status.human_tracking = view.and_then(|(_, tracking)| tracking);
         status.zoom_ratio = ratio;
         status.presets = presets;
         status.vendor_control = true;
@@ -94,9 +96,11 @@ impl<T: Transport> Channel<T> {
         ))
     }
 
-    pub(super) fn read_sleep(&self) -> Option<bool> {
+    /// Sleep and tracking state from one read of the status block.
+    pub(super) fn read_view(&self) -> Option<(bool, Option<bool>)> {
         let (block, len) = self.get(vendor::SELECTOR_VIEW).ok()?;
-        vendor::sleeping(&block[..len])
+        let block = &block[..len];
+        Some((vendor::sleeping(block)?, vendor::tracking(block)))
     }
 
     pub(super) fn read_zoom(&mut self) -> Result<f32, String> {
@@ -188,6 +192,12 @@ impl<T: Transport> Channel<T> {
                 shared.status().fov = Some(fov);
                 *zoom_refresh = follow_zoom();
             }
+            GimbalCommand::SetHumanTracking(on) => {
+                for mut block in vendor::human_tracking(on) {
+                    self.set(vendor::SELECTOR_VIEW, &mut block)?;
+                }
+                shared.status().human_tracking = Some(on);
+            }
             GimbalCommand::ZoomRatio(ratio) => {
                 let (message, ratio) = vendor::zoom(ratio).ok_or("Zoom ratio is out of range")?;
                 if shared.status().zoom_ratio == Some(ratio) && shared.status().fov.is_none() {
@@ -230,6 +240,10 @@ const ZOOM_FOLLOW_EVERY: Duration = Duration::from_millis(200);
 /// Long enough for the camera to settle after a field of view change.
 const ZOOM_FOLLOW_FOR: Duration = Duration::from_millis(2500);
 
+/// How long the status block may lag a tracking write (it showed the new
+/// state within 2 s in the 2026-11-21 capture).
+const TRACKING_SETTLE: Duration = Duration::from_millis(2500);
+
 pub(super) fn read_zoom_in(delay: Duration) -> ZoomRefresh {
     let at = Instant::now() + delay;
     Some((at, at))
@@ -252,6 +266,7 @@ pub(super) fn control_loop(
 ) {
     let mut sleep_polled = Instant::now();
     let mut sleep_readback = SleepReadback::default();
+    let mut tracking_sent: Option<Instant> = None;
     let mut preset_retries = 0;
     let mut dragging = false;
     let mut stopped = false;
@@ -294,6 +309,9 @@ pub(super) fn control_loop(
                     if matches!(command, GimbalCommand::Drag(false)) && !stopped {
                         let _ = xu.send(vendor::speed(0.0, 0.0));
                     }
+                    if matches!(command, GimbalCommand::SetHumanTracking(_)) {
+                        tracking_sent = Some(Instant::now());
+                    }
                     match xu.gimbal(command, shared, &mut zoom_refresh) {
                         Ok(()) => {
                             dragging = next_dragging;
@@ -307,9 +325,20 @@ pub(super) fn control_loop(
             }
         }
         if sleep_polled.elapsed() >= Duration::from_secs(1) {
-            if let Some(sleeping) = xu
-                .read_sleep()
-                .and_then(|sleeping| sleep_readback.observe(sleeping, Instant::now()))
+            let view = xu.read_view();
+            // The status block can still show the old state just after a write.
+            if let Some(tracking) = view.and_then(|(_, tracking)| tracking)
+                && tracking_sent.is_none_or(|sent| sent.elapsed() >= TRACKING_SETTLE)
+            {
+                let mut status = shared.status();
+                if status.human_tracking != Some(tracking) {
+                    status.human_tracking = Some(tracking);
+                    drop(status);
+                    repaint();
+                }
+            }
+            if let Some(sleeping) =
+                view.and_then(|(sleeping, _)| sleep_readback.observe(sleeping, Instant::now()))
                 && shared.set_sleeping(sleeping)
             {
                 preset_retries = 0;

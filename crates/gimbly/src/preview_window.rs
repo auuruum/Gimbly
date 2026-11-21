@@ -346,8 +346,9 @@ impl PreviewWindow {
                     )));
                 }
                 ui.add_enabled_ui(false, |ui| {
-                    icon_button(ui, icon::SCAN, BUTTON, GLYPH, false)
-                        .on_disabled_hover_text(format!("Object tracking: {NOT_YET}"));
+                    icon_button(ui, icon::SCAN, BUTTON, GLYPH, false).on_disabled_hover_text(
+                        "Object tracking is not available on this camera model",
+                    );
                 });
                 if icon_button(ui, icon::GRID_NINE, BUTTON, GLYPH, self.composition_lines)
                     .on_hover_text("Composition lines")

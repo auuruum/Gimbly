@@ -1,4 +1,4 @@
-//! The Console sections that drive the gimbal: AI Mode (placeholder),
+//! The Console sections that drive the gimbal: AI Mode,
 //! Preset and View and Gimbal, plus the preset rename dialog.
 //!
 //! Layout and behaviour follow OBSBOT Center's panel for the Tiny 3 Lite; the code is
@@ -6,7 +6,7 @@
 
 use super::{GimblyApp, NOT_YET};
 use crate::camera::{
-    Command, Fov, GimbalCommand, PRESET_NAME_MAX, PRESET_SLOTS, Preset, SessionState,
+    AiMode, Command, Fov, GimbalCommand, PRESET_NAME_MAX, PRESET_SLOTS, Preset, SessionState,
     ZOOM_RATIO_MAX,
 };
 use crate::gimbal::{self, PanelPull, SpeedMode};
@@ -156,7 +156,10 @@ impl GimblyApp {
         self.gimbal_ui.ai_mode_open = header(
             ui,
             "AI Mode",
-            Some(NOT_YET),
+            Some(
+                "Voice Tracking follows voice commands; Hand Tracking follows hand \
+                 gestures. Only one AI tracking runs at a time.",
+            ),
             self.gimbal_ui.ai_mode_open,
             |_| {},
         );
@@ -169,13 +172,33 @@ impl GimblyApp {
             top: 20,
             bottom: 20,
         };
+        // The camera reports the mode together with Human Tracking.
+        let ready = self.gimbal_ready() && self.status.human_tracking.is_some();
+        let current = self.status.ai_mode;
+        let modes = [AiMode::Voice, AiMode::Hand];
+        let tip = self.gimbal_tip();
+        let mut picked = None;
         band(ui, SECTION, margin, |ui| {
-            ui.add_enabled_ui(false, |ui| {
-                pill_row(ui, &["Voice Tracking", "Hand Tracking"], None, 16.0);
-            })
-            .response
-            .on_disabled_hover_text(NOT_YET);
+            let row = ui.add_enabled_ui(ready, |ui| {
+                pill_row(
+                    ui,
+                    &["Voice Tracking", "Hand Tracking"],
+                    current.and_then(|m| modes.iter().position(|&x| x == m)),
+                    16.0,
+                )
+            });
+            row.response.on_disabled_hover_text(tip);
+            picked = row.inner;
         });
+        if let Some(i) = picked {
+            self.toggle_ai_mode(modes[i]);
+        }
+    }
+
+    /// Starts `mode`, or stops it when it already runs.
+    pub(super) fn toggle_ai_mode(&mut self, mode: AiMode) {
+        let next = (self.status.ai_mode != Some(mode)).then_some(mode);
+        self.gimbal(GimbalCommand::SetAiMode(next));
     }
 
     // ---- presets ----------------------------------------------------------

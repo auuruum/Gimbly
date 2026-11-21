@@ -4,8 +4,8 @@
 use super::queue::Receiver;
 use super::sleep::SleepReadback;
 use super::{
-    AutoZoom, Command, GimbalCommand, PRESET_SLOTS, Preset, Shared, TrackingMode, TrackingSpeed,
-    vendor,
+    AiState, AutoZoom, Command, GimbalCommand, PRESET_SLOTS, Preset, SessionStatus, Shared,
+    TrackingMode, TrackingSpeed, vendor,
 };
 use std::time::{Duration, Instant};
 
@@ -35,18 +35,23 @@ impl<T: Transport> Channel<T> {
 
     pub(super) fn initialize(&mut self, shared: &Shared) -> ZoomRefresh {
         let view = self.read_view();
-        shared.set_sleeping(view.map(|(sleeping, ..)| sleeping).unwrap_or(false));
+        shared.set_sleeping(view.as_ref().is_some_and(|v| v.sleeping));
         let ratio = self.read_zoom().ok();
         let presets = self.presets().ok();
         let tracking_speed = self.read_tracking_speed().ok();
-        let tracking = view.and_then(|(_, tracking, _)| tracking);
-        let tracking_mode = (tracking == Some(true))
+        let zone_tracking = self.read_zone_tracking().ok();
+        let ai = view.as_ref().and_then(|v| v.ai);
+        let tracking_mode = (ai == Some(AiState::Human))
             .then(|| self.read_tracking_mode())
             .flatten();
         let mut status = shared.status();
-        status.human_tracking = tracking;
+        if let Some(ai) = ai {
+            set_ai_state(&mut status, ai);
+        }
         status.tracking_mode = tracking_mode;
-        status.auto_zoom = view.and_then(|(.., zoom)| zoom);
+        status.auto_zoom = view.as_ref().and_then(|v| v.zoom);
+        status.sound_source = view.as_ref().and_then(|v| v.sound);
+        status.zone_tracking = zone_tracking;
         status.tracking_speed = tracking_speed;
         status.zoom_ratio = ratio;
         status.presets = presets;
@@ -107,15 +112,23 @@ impl<T: Transport> Channel<T> {
         ))
     }
 
-    /// Sleep, tracking and Auto Zoom state from one read of the status block.
-    pub(super) fn read_view(&self) -> Option<(bool, Option<bool>, Option<AutoZoom>)> {
+    /// Sleep, tracking, Auto Zoom and Sound Source state from one read of
+    /// the status block.
+    pub(super) fn read_view(&self) -> Option<View> {
         let (block, len) = self.get(vendor::SELECTOR_VIEW).ok()?;
         let block = &block[..len];
-        Some((
-            vendor::sleeping(block)?,
-            vendor::tracking(block),
-            vendor::read_auto_zoom(block),
-        ))
+        Some(View {
+            sleeping: vendor::sleeping(block)?,
+            ai: vendor::ai_state(block),
+            zoom: vendor::read_auto_zoom(block),
+            sound: vendor::read_sound_source(block),
+        })
+    }
+
+    fn read_zone_tracking(&mut self) -> Result<bool, String> {
+        let data = self.request(vendor::READ_SETTING, vendor::read_zone_tracking_request())?;
+        vendor::read_zone_tracking(&data)
+            .ok_or_else(|| "Camera returned an unknown Zone Tracking state".into())
     }
 
     pub(super) fn read_zoom(&mut self) -> Result<f32, String> {
@@ -227,7 +240,7 @@ impl<T: Transport> Channel<T> {
                     self.set(vendor::SELECTOR_VIEW, &mut block)?;
                 }
                 let mut status = shared.status();
-                status.human_tracking = Some(mode.is_some());
+                set_ai_state(&mut status, mode.map_or(AiState::Off, |_| AiState::Human));
                 status.tracking_mode = mode;
                 // Auto Zoom moves the zoom once tracking starts.
                 *zoom_refresh = follow_zoom();
@@ -245,6 +258,28 @@ impl<T: Transport> Channel<T> {
                 }
                 shared.status().auto_zoom = Some(zoom);
                 *zoom_refresh = follow_zoom();
+            }
+            GimbalCommand::SetAiMode(mode) => {
+                self.set(vendor::SELECTOR_VIEW, &mut vendor::ai_mode(mode))?;
+                set_ai_state(
+                    &mut shared.status(),
+                    mode.map_or(AiState::Off, AiState::Mode),
+                );
+                *zoom_refresh = follow_zoom();
+            }
+            GimbalCommand::SetSoundSource(on) => {
+                if shared.status().sound_source == Some(on) {
+                    return Ok(());
+                }
+                self.set(vendor::SELECTOR_VIEW, &mut vendor::sound_source(on))?;
+                shared.status().sound_source = Some(on);
+            }
+            GimbalCommand::SetZoneTracking(on) => {
+                if shared.status().zone_tracking == Some(on) {
+                    return Ok(());
+                }
+                self.send(vendor::zone_tracking(on))?;
+                shared.status().zone_tracking = Some(on);
             }
             GimbalCommand::SetTrackingSpeed(speed) => {
                 if shared.status().tracking_speed == Some(speed) {
@@ -285,6 +320,27 @@ impl<T: Transport> Channel<T> {
             }
         }
         Ok(())
+    }
+}
+
+/// One read of the selector 6 status block.
+#[derive(Debug)]
+pub(super) struct View {
+    pub sleeping: bool,
+    pub ai: Option<AiState>,
+    pub zoom: Option<AutoZoom>,
+    pub sound: Option<bool>,
+}
+
+/// Records which AI tracking runs; only one can run at a time.
+fn set_ai_state(status: &mut SessionStatus, ai: AiState) {
+    status.human_tracking = Some(ai == AiState::Human);
+    status.ai_mode = match ai {
+        AiState::Mode(mode) => Some(mode),
+        _ => None,
+    };
+    if ai != AiState::Human {
+        status.tracking_mode = None;
     }
 }
 
@@ -368,7 +424,10 @@ pub(super) fn control_loop(
                     }
                     if matches!(
                         command,
-                        GimbalCommand::SetHumanTracking(_) | GimbalCommand::SetAutoZoom(_)
+                        GimbalCommand::SetHumanTracking(_)
+                            | GimbalCommand::SetAutoZoom(_)
+                            | GimbalCommand::SetAiMode(_)
+                            | GimbalCommand::SetSoundSource(_)
                     ) {
                         tracking_sent = Some(Instant::now());
                     }
@@ -387,18 +446,31 @@ pub(super) fn control_loop(
         if sleep_polled.elapsed() >= Duration::from_secs(1) {
             let view = xu.read_view();
             // The status block can still show the old state just after a write.
-            if let Some((_, tracking, zoom)) = view
+            if let Some(View {
+                ai, zoom, sound, ..
+            }) = view
                 && tracking_sent.is_none_or(|sent| sent.elapsed() >= TRACKING_SETTLE)
             {
                 let mut status = shared.status();
-                let started = tracking == Some(true) && status.human_tracking != tracking;
-                let changed = (tracking.is_some() && status.human_tracking != tracking)
-                    || (zoom.is_some() && status.auto_zoom != zoom);
-                status.human_tracking = tracking.or(status.human_tracking);
-                status.auto_zoom = zoom.or(status.auto_zoom);
-                if tracking == Some(false) {
-                    status.tracking_mode = None;
+                let before = (
+                    status.human_tracking,
+                    status.ai_mode,
+                    status.auto_zoom,
+                    status.sound_source,
+                );
+                let started = ai == Some(AiState::Human) && status.human_tracking != Some(true);
+                if let Some(ai) = ai {
+                    set_ai_state(&mut status, ai);
                 }
+                status.auto_zoom = zoom.or(status.auto_zoom);
+                status.sound_source = sound.or(status.sound_source);
+                let changed = before
+                    != (
+                        status.human_tracking,
+                        status.ai_mode,
+                        status.auto_zoom,
+                        status.sound_source,
+                    );
                 drop(status);
                 // Tracking started outside Gimbly, for example in another app.
                 if started && let Some(mode) = xu.read_tracking_mode() {
@@ -408,8 +480,9 @@ pub(super) fn control_loop(
                     repaint();
                 }
             }
-            if let Some(sleeping) =
-                view.and_then(|(sleeping, ..)| sleep_readback.observe(sleeping, Instant::now()))
+            if let Some(sleeping) = view
+                .as_ref()
+                .and_then(|v| sleep_readback.observe(v.sleeping, Instant::now()))
                 && shared.set_sleeping(sleeping)
             {
                 preset_retries = 0;
@@ -422,18 +495,22 @@ pub(super) fn control_loop(
             }
             sleep_polled = Instant::now();
             // Opening or waking the stream can briefly interrupt replies.
-            let (retry_presets, retry_speed) = {
+            let (retry_presets, retry_speed, retry_zone) = {
                 let status = shared.status();
-                if status.presets.is_some() && status.tracking_speed.is_some() {
+                if status.presets.is_some()
+                    && status.tracking_speed.is_some()
+                    && status.zone_tracking.is_some()
+                {
                     preset_retries = 0;
                 }
                 let retry = !status.sleeping && preset_retries < 3;
                 (
                     retry && status.presets.is_none(),
                     retry && status.tracking_speed.is_none(),
+                    retry && status.zone_tracking.is_none(),
                 )
             };
-            if retry_presets || retry_speed {
+            if retry_presets || retry_speed || retry_zone {
                 preset_retries += 1;
             }
             if retry_presets && let Ok(presets) = xu.presets() {
@@ -442,6 +519,10 @@ pub(super) fn control_loop(
             }
             if retry_speed && let Ok(speed) = xu.read_tracking_speed() {
                 shared.status().tracking_speed = Some(speed);
+                repaint();
+            }
+            if retry_zone && let Ok(on) = xu.read_zone_tracking() {
+                shared.status().zone_tracking = Some(on);
                 repaint();
             }
         }

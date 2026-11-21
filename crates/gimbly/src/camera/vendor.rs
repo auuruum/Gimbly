@@ -25,8 +25,8 @@
 //! | 16.. | data, then padding |
 
 use super::{
-    AutoZoom, Fov, GimbalCommand, PRESET_NAME_MAX, PRESET_SLOTS, PresetPosition, TrackingMode,
-    TrackingSpeed, ZOOM_RATIO_MAX,
+    AiMode, AiState, AutoZoom, Fov, GimbalCommand, PRESET_NAME_MAX, PRESET_SLOTS, PresetPosition,
+    TrackingMode, TrackingSpeed, ZOOM_RATIO_MAX,
 };
 
 /// GUID of the extension unit, as the UVC descriptor stores it.
@@ -72,6 +72,9 @@ const SETTING_TRACKING_SPEED: u32 = 5;
 /// `1` while tracking runs in Group Mode, `0` in Single Mode; see
 /// `docs/clean-room/2026-11-21-ai-tracking-options.md`.
 const SETTING_GROUP_MODE: u32 = 2;
+/// Zone Tracking on (`1`) or off (`0`); see
+/// `docs/clean-room/2026-11-21-ai-tracking-options.md`.
+const SETTING_ZONE_TRACKING: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Message {
@@ -291,6 +294,37 @@ pub fn human_tracking(mode: Option<TrackingMode>, zoom: AutoZoom) -> Vec<[u8; ME
     }
 }
 
+/// Starts an AI Mode, or stops it (and any other AI tracking) with `None`.
+/// The official app sends one write for each click.
+pub fn ai_mode(mode: Option<AiMode>) -> [u8; MESSAGE_LEN] {
+    ai_block(
+        match mode {
+            None => 0,
+            Some(AiMode::Hand) => 3,
+            Some(AiMode::Voice) => 7,
+        },
+        0,
+    )
+}
+
+/// Turns Sound Source Assisted Tracking on or off (selector 6 command
+/// `0x25`, one data byte).
+pub fn sound_source(on: bool) -> [u8; MESSAGE_LEN] {
+    let mut data = [0; MESSAGE_LEN];
+    data[..3].copy_from_slice(&[0x25, 1, on.into()]);
+    data
+}
+
+/// Sound Source Assisted Tracking in the status block.
+pub fn read_sound_source(data: &[u8]) -> Option<bool> {
+    sleeping(data)?;
+    match data.get(46)? {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
+
 fn mode_block(mode: TrackingMode) -> [u8; MESSAGE_LEN] {
     ai_block(0x0e, (mode == TrackingMode::Group).into())
 }
@@ -340,16 +374,9 @@ fn tracking_speed_value(speed: TrackingSpeed) -> u32 {
 
 /// The two writes the official app sends for one Tracking Speed click.
 pub fn tracking_speed(speed: TrackingSpeed) -> [Message; 2] {
-    let write = |setting: u32, value: u32| {
-        let data = [0, setting, value]
-            .into_iter()
-            .flat_map(u32::to_le_bytes)
-            .collect();
-        Message::new(GIMBAL, WRITE_SETTING, data)
-    };
     [
-        write(SETTING_BEFORE_SPEED, 0),
-        write(SETTING_TRACKING_SPEED, tracking_speed_value(speed)),
+        write_setting(SETTING_BEFORE_SPEED, 0),
+        write_setting(SETTING_TRACKING_SPEED, tracking_speed_value(speed)),
     ]
 }
 
@@ -358,6 +385,33 @@ fn read_setting_request(setting: u32) -> Vec<u8> {
         .into_iter()
         .flat_map(u32::to_le_bytes)
         .collect()
+}
+
+fn write_setting(setting: u32, value: u32) -> Message {
+    let data = [0, setting, value]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    Message::new(GIMBAL, WRITE_SETTING, data)
+}
+
+/// Turns Zone Tracking on or off.
+pub fn zone_tracking(on: bool) -> Message {
+    write_setting(SETTING_ZONE_TRACKING, on.into())
+}
+
+/// Request data for [`READ_SETTING`] that asks for Zone Tracking.
+pub fn read_zone_tracking_request() -> Vec<u8> {
+    read_setting_request(SETTING_ZONE_TRACKING)
+}
+
+/// Zone Tracking in a [`READ_SETTING`] reply (four bytes in the capture).
+pub fn read_zone_tracking(data: &[u8]) -> Option<bool> {
+    match u32::from_le_bytes(data.try_into().ok()?) {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
 }
 
 /// Request data for [`READ_SETTING`] that asks for the tracking speed.
@@ -401,11 +455,17 @@ pub fn sleeping(data: &[u8]) -> Option<bool> {
     }
 }
 
-/// Whether the status block reports AI tracking active (`2` was Single Mode;
-/// other non-zero values are untested modes and also count as on).
-pub fn tracking(data: &[u8]) -> Option<bool> {
+/// Which AI tracking runs, from offset 24 of the status block: `2` Human
+/// Tracking, `3` Hand Tracking, `7` Voice Tracking. Other non-zero values
+/// (a transient `6` while stopping) count as Human Tracking, as before.
+pub fn ai_state(data: &[u8]) -> Option<AiState> {
     sleeping(data)?;
-    data.get(24).map(|&mode| mode != 0)
+    Some(match data.get(24)? {
+        0 => AiState::Off,
+        3 => AiState::Mode(AiMode::Hand),
+        7 => AiState::Mode(AiMode::Voice),
+        _ => AiState::Human,
+    })
 }
 
 pub fn zoom(ratio: f32) -> Option<(Message, f32)> {
@@ -685,10 +745,52 @@ mod tests {
         let on = hex(
             "2e00000100000001000178000001010001000000017f000002004b030000001e0003100000000000080000000301",
         );
-        assert_eq!(tracking(&off), Some(false));
-        assert_eq!(tracking(&on), Some(true));
-        assert_eq!(tracking(&on[..45]), None);
-        assert_eq!(tracking(&padded("aa")), None);
+        assert_eq!(ai_state(&off), Some(AiState::Off));
+        assert_eq!(ai_state(&on), Some(AiState::Human));
+        assert_eq!(ai_state(&on[..24]), None);
+        assert_eq!(ai_state(&padded("aa")), None);
+    }
+
+    #[test]
+    fn ai_options_match_capture() {
+        // Selector 6 writes from the 2026-11-21 AI tracking options capture.
+        assert_eq!(ai_mode(Some(AiMode::Voice)).to_vec(), padded("160207"));
+        assert_eq!(ai_mode(Some(AiMode::Hand)).to_vec(), padded("160203"));
+        assert_eq!(ai_mode(None).to_vec(), padded("1602"));
+        assert_eq!(sound_source(false).to_vec(), padded("2501"));
+        assert_eq!(sound_source(true).to_vec(), padded("250101"));
+
+        // Status offset 24 while each mode ran, offset 46 for Sound Source.
+        let status = |mode: u8, sound: u8| {
+            let mut block = hex(
+                "2e00000100000001000178000001010001000000017f000000004b030000553c00031000000000000800000003010100000000000000000000000000",
+            );
+            block[24] = mode;
+            block[46] = sound;
+            block
+        };
+        assert_eq!(ai_state(&status(7, 1)), Some(AiState::Mode(AiMode::Voice)));
+        assert_eq!(ai_state(&status(3, 1)), Some(AiState::Mode(AiMode::Hand)));
+        assert_eq!(ai_state(&status(6, 1)), Some(AiState::Human));
+        assert_eq!(read_sound_source(&status(0, 1)), Some(true));
+        assert_eq!(read_sound_source(&status(0, 0)), Some(false));
+        assert_eq!(read_sound_source(&status(0, 2)), None);
+        assert_eq!(read_sound_source(&status(0, 1)[..46]), None);
+
+        // Zone Tracking is gimbal setting 3, written as three u32 values.
+        let on = zone_tracking(true);
+        let off = zone_tracking(false);
+        assert_eq!(on.data, hex("000000000300000001000000"));
+        assert_eq!(off.data, hex("000000000300000000000000"));
+        assert_eq!(on.command, [0x44, 0x54]);
+        assert_eq!(
+            read_zone_tracking_request(),
+            hex("0000000003000000").as_slice()
+        );
+        assert_eq!(read_zone_tracking(&[1, 0, 0, 0]), Some(true));
+        assert_eq!(read_zone_tracking(&[0, 0, 0, 0]), Some(false));
+        assert_eq!(read_zone_tracking(&[2, 0, 0, 0]), None);
+        assert_eq!(read_zone_tracking(&[1]), None);
     }
 
     #[test]

@@ -213,6 +213,13 @@ pub struct SessionStatus {
     /// Mode tracking runs in: set by Gimbly, or read from the camera when
     /// tracking was already on. `None` while off or unknown.
     pub tracking_mode: Option<TrackingMode>,
+    /// AI Mode the camera reports running; `None` when none runs. Read
+    /// together with `human_tracking`.
+    pub ai_mode: Option<AiMode>,
+    /// Sound Source Assisted Tracking the camera reports; `None` until read.
+    pub sound_source: Option<bool>,
+    /// Zone Tracking the camera reports; `None` until read.
+    pub zone_tracking: Option<bool>,
     /// Auto Zoom framing the camera reports; `None` until read.
     pub auto_zoom: Option<AutoZoom>,
     /// Tracking speed the camera reports; `None` until read.
@@ -259,6 +266,10 @@ pub enum GimbalCommand {
     SetHumanTracking(Option<TrackingMode>),
     SetAutoZoom(AutoZoom),
     SetTrackingSpeed(TrackingSpeed),
+    /// Start an AI Mode, or stop it with `None`.
+    SetAiMode(Option<AiMode>),
+    SetSoundSource(bool),
+    SetZoneTracking(bool),
     TriggerPreset(u8),
     /// Store the current position as a new preset in the first free slot.
     AddPreset,
@@ -290,6 +301,21 @@ impl Fov {
 pub enum TrackingMode {
     Single,
     Group,
+}
+
+/// The two AI Mode buttons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AiMode {
+    Voice,
+    Hand,
+}
+
+/// Which AI tracking the camera runs. Only one runs at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AiState {
+    Off,
+    Human,
+    Mode(AiMode),
 }
 
 /// How Auto Zoom frames the tracked person (the Auto Zoom buttons).

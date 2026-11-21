@@ -371,6 +371,7 @@ impl HotkeyAction {
                 | ZoomMax
                 | ZoomMin
                 | Snapshot
+                | HandTracking
                 | GimbalReset
                 | Preset1
                 | Preset2

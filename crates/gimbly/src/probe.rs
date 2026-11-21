@@ -9,7 +9,7 @@
 //! `--virtual-camera` before `--gimbal` to exercise virtual output too.
 
 use crate::camera::{
-    self, AutoZoom, CaptureConfig, Command, Fov, GimbalCommand, SessionState, TrackingMode,
+    self, AiMode, AutoZoom, CaptureConfig, Command, Fov, GimbalCommand, SessionState, TrackingMode,
     TrackingSpeed,
 };
 use std::path::Path;
@@ -49,6 +49,11 @@ fn control_step(step: &str) -> Option<Command> {
         ["autozoom", zoom] => {
             GimbalCommand::SetAutoZoom(*AutoZoom::ALL.get(zoom.parse::<usize>().ok()?)?)
         }
+        ["voice"] => GimbalCommand::SetAiMode(Some(AiMode::Voice)),
+        ["hand"] => GimbalCommand::SetAiMode(Some(AiMode::Hand)),
+        ["noai"] => GimbalCommand::SetAiMode(None),
+        ["sound", on] => GimbalCommand::SetSoundSource(on.parse().ok()?),
+        ["zone", on] => GimbalCommand::SetZoneTracking(on.parse().ok()?),
         ["slow"] => GimbalCommand::SetTrackingSpeed(TrackingSpeed::Slow),
         ["standard"] => GimbalCommand::SetTrackingSpeed(TrackingSpeed::Standard),
         ["fast"] => GimbalCommand::SetTrackingSpeed(TrackingSpeed::Fast),
@@ -94,11 +99,14 @@ fn gimbal(session: &camera::Session, args: &[String], virtual_camera: bool) -> i
             .and_then(|f| crate::snapshot::save(&f, Path::new(dir), [0, 0, 0, 0, 0, step as u16]));
         let status = session.status();
         println!(
-            "step {step}: {saved:?}, vendor control {}, sleeping {}, tracking {:?} {:?}, auto zoom {:?}, speed {:?}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
+            "step {step}: {saved:?}, vendor control {}, sleeping {}, tracking {:?} {:?}, AI mode {:?}, sound {:?}, zone {:?}, auto zoom {:?}, speed {:?}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
             status.vendor_control,
             status.sleeping,
             status.human_tracking,
             status.tracking_mode,
+            status.ai_mode,
+            status.sound_source,
+            status.zone_tracking,
             status.auto_zoom,
             status.tracking_speed,
             status.zoom_ratio,

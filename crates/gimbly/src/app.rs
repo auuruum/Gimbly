@@ -4,8 +4,8 @@ mod view_gimbal;
 
 use crate::branding::Branding;
 use crate::camera::{
-    self, AutoZoom, Command, DeviceInfo, GimbalCommand, PreviewFrame, Session, SessionState,
-    SessionStatus, TrackingMode, TrackingSpeed,
+    self, AiMode, AutoZoom, Command, DeviceInfo, GimbalCommand, PreviewFrame, Session,
+    SessionState, SessionStatus, TrackingMode, TrackingSpeed,
 };
 use crate::hotkeys::GlobalHotkeys;
 use crate::os;
@@ -213,6 +213,7 @@ impl GimblyApp {
                 }
             }
             HotkeyAction::Snapshot => self.take_snapshot(),
+            HotkeyAction::HandTracking => self.toggle_ai_mode(AiMode::Hand),
             _ => {}
         }
     }
@@ -866,9 +867,16 @@ impl GimblyApp {
             let speed = self.status.tracking_speed;
             let speed_ready = self.gimbal_ready() && speed.is_some();
             let tip = self.gimbal_tip();
+            let options = AiOptions {
+                zone: self.status.zone_tracking.filter(|_| self.gimbal_ready()),
+                sound: self.status.sound_source.filter(|_| self.gimbal_ready()),
+                hand: self.status.ai_mode == Some(AiMode::Hand),
+                tip,
+            };
             let mut picked_mode = None;
             let mut picked_zoom = None;
             let mut picked_speed = None;
+            let mut picked_options = (None, None);
             band(ui, SECTION, margin, |ui| {
                 ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
                 group_label(ui, Some(icon::PERSON_SIMPLE), "Human Tracking");
@@ -942,7 +950,7 @@ impl GimblyApp {
                     ui.add_space(12.0);
                 }
                 ui.add_space(10.0);
-                ui.add_enabled_ui(false, ai_tracking);
+                picked_options = ai_tracking(ui, &options);
                 ui.add_space(22.0);
                 group_label(ui, Some(icon::GAUGE), "Tracking Speed");
                 ui.add_space(12.0);
@@ -965,6 +973,12 @@ impl GimblyApp {
             }
             if let Some(i) = picked_speed {
                 self.gimbal(GimbalCommand::SetTrackingSpeed(TrackingSpeed::ALL[i]));
+            }
+            if let Some(on) = picked_options.0 {
+                self.gimbal(GimbalCommand::SetZoneTracking(on));
+            }
+            if let Some(on) = picked_options.1 {
+                self.gimbal(GimbalCommand::SetSoundSource(on));
             }
         }
 
@@ -1141,7 +1155,6 @@ impl GimblyApp {
     }
 }
 
-/// The AI Tracking controls below Human Tracking, not implemented yet.
 fn auto_zoom_label(zoom: AutoZoom) -> &'static str {
     match zoom {
         AutoZoom::Off => "Off",
@@ -1153,12 +1166,51 @@ fn auto_zoom_label(zoom: AutoZoom) -> &'static str {
     }
 }
 
-fn ai_tracking(ui: &mut Ui) {
+/// Camera state behind the Zone Tracking and Sound Source switches; `None`
+/// while unknown or unavailable.
+struct AiOptions {
+    zone: Option<bool>,
+    sound: Option<bool>,
+    /// Hand Tracking runs; the official app disables Zone Tracking then.
+    hand: bool,
+    tip: &'static str,
+}
+
+/// The switches below Auto Zoom. Returns the new Zone Tracking and Sound
+/// Source values the user clicked.
+fn ai_tracking(ui: &mut Ui, options: &AiOptions) -> (Option<bool>, Option<bool>) {
     ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
-    switch_row(ui, "Zone Tracking", true, true);
+    let zone_tip = if options.hand {
+        "Not available during Hand Tracking"
+    } else {
+        options.tip
+    };
+    let zone = switch_row(
+        ui,
+        "Zone Tracking",
+        "Track only within a range of gimbal angles. The range itself is set in \
+         OBSBOT Center for now.",
+        true,
+        options.zone.filter(|_| !options.hand),
+        zone_tip,
+    );
     ui.add_space(18.0);
-    switch_row(ui, "Sound Source Assisted Tracking", false, true);
+    let sound = switch_row(
+        ui,
+        "Sound Source Assisted Tracking",
+        "Uses the microphones to help find the person who speaks",
+        false,
+        options.sound,
+        options.tip,
+    );
     ui.add_space(22.0);
+    ui.add_enabled_ui(false, object_tracking);
+    (zone, sound)
+}
+
+/// OBSBOT Center keeps these buttons disabled for the Tiny 3 Lite; see
+/// `docs/clean-room/2026-11-21-ai-tracking-options.md`.
+fn object_tracking(ui: &mut Ui) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.label(egui::RichText::new(icon::CUBE).size(16.0));
@@ -1170,25 +1222,45 @@ fn ai_tracking(ui: &mut Ui) {
         );
     });
     ui.add_space(12.0);
-    pill_row(ui, &["Normal", "Close-up"], None, 16.0);
+    ui.scope(|ui| pill_row(ui, &["Normal", "Close-up"], None, 16.0))
+        .response
+        .on_disabled_hover_text("Not available on this camera model");
 }
 
-fn switch_row(ui: &mut Ui, label: &str, settings: bool, on: bool) {
+/// A labelled switch; disabled while `on` is `None`. Returns the new value
+/// when clicked.
+fn switch_row(
+    ui: &mut Ui,
+    label: &str,
+    hint: &str,
+    settings: bool,
+    on: Option<bool>,
+    disabled_tip: &str,
+) -> Option<bool> {
+    let mut clicked = None;
     ui.horizontal(|ui| {
         ui.set_height(24.0);
         ui.label(egui::RichText::new(label).size(15.0));
-        help(ui, NOT_YET);
+        help(ui, hint);
         if settings {
             ui.label(
                 egui::RichText::new(icon::GEAR_SIX)
                     .size(14.0)
                     .color(TEXT_DIM),
-            );
+            )
+            .on_hover_text(format!("Zone settings: {NOT_YET}"));
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            toggle(ui, on);
+            let response = ui
+                .add_enabled_ui(on.is_some(), |ui| toggle(ui, on.unwrap_or(false)))
+                .inner
+                .on_disabled_hover_text(disabled_tip);
+            if response.clicked() {
+                clicked = on.map(|on| !on);
+            }
         });
     });
+    clicked
 }
 
 impl eframe::App for GimblyApp {

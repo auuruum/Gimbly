@@ -173,32 +173,50 @@ pub fn select(ui: &mut Ui, map: &Mapping, state: &mut Selection) -> SelectOutcom
     let to_fraction = |p: Pos2| ((picture.clamp(p) - picture.min) / size).to_pos2();
     let to_screen = |p: Pos2| picture.min + p.to_vec2() * size;
 
+    let rect_of = |state: &Selection| {
+        state
+            .from
+            .zip(state.to)
+            .map(|(a, b)| Rect::from_two_pos(to_screen(a), to_screen(b)))
+    };
+    // egui gives the drag to the picture even when the press is on ✓ or ✕
+    // (they only take clicks), so such a press must not start a new box.
+    let on_buttons = ui
+        .input(|i| i.pointer.press_origin())
+        .is_some_and(|origin| {
+            state.drawn
+                && rect_of(state).is_some_and(|rect| {
+                    choice_buttons(rect, picture)
+                        .iter()
+                        .any(|b| b.contains(origin))
+                })
+        });
     let response = ui.interact(picture, ui.id().with("select-object"), Sense::drag());
-    if response.drag_started()
-        && let Some(origin) = ui.input(|i| i.pointer.press_origin())
-    {
-        state.from = Some(to_fraction(origin));
-        state.to = state.from;
-        state.drawn = false;
-    }
-    if response.dragged()
-        && let Some(pointer) = response.interact_pointer_pos()
-    {
-        state.to = Some(to_fraction(pointer));
+    if !on_buttons {
+        if response.drag_started()
+            && let Some(origin) = ui.input(|i| i.pointer.press_origin())
+        {
+            state.from = Some(to_fraction(origin));
+            state.to = state.from;
+            state.drawn = false;
+        }
+        if response.dragged()
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            state.to = Some(to_fraction(pointer));
+        }
+        if response.drag_stopped() {
+            state.drawn =
+                rect_of(state).is_some_and(|r| r.width() >= MIN_BOX && r.height() >= MIN_BOX);
+            if !state.drawn {
+                *state = Selection::default();
+            }
+        }
     }
     if response.hovered() {
         ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
     }
-    let rect = state
-        .from
-        .zip(state.to)
-        .map(|(a, b)| Rect::from_two_pos(to_screen(a), to_screen(b)));
-    if response.drag_stopped() {
-        state.drawn = rect.is_some_and(|r| r.width() >= MIN_BOX && r.height() >= MIN_BOX);
-        if !state.drawn {
-            *state = Selection::default();
-        }
-    }
+    let rect = rect_of(state);
 
     let mut outcome = SelectOutcome::None;
     if let Some(rect) = rect {
@@ -209,35 +227,17 @@ pub fn select(ui: &mut Ui, map: &Mapping, state: &mut Selection) -> SelectOutcom
             StrokeKind::Inside,
         );
         if state.drawn {
-            // Under the box, or above it when it reaches the bottom.
-            let y = if rect.bottom() + 34.0 <= picture.bottom() {
-                rect.bottom() + 17.0
-            } else {
-                (rect.top() - 17.0).max(picture.top() + 12.0)
-            };
-            let at = |x: f32| Rect::from_center_size(pos2(x, y), Vec2::splat(28.0));
-            let cancel = place(
-                ui,
-                at(rect.left() + 14.0),
-                Layout::default(),
-                "select-cancel",
-                |ui| {
-                    icon_button(ui, icon::X, 28.0, 18.0, false)
-                        .on_hover_text("Draw again")
-                        .clicked()
-                },
-            );
-            let confirm = place(
-                ui,
-                at(rect.right() - 14.0),
-                Layout::default(),
-                "select-confirm",
-                |ui| {
-                    icon_button(ui, icon::CHECK, 28.0, 18.0, false)
-                        .on_hover_text("Track this object")
-                        .clicked()
-                },
-            );
+            let [cancel_at, confirm_at] = choice_buttons(rect, picture);
+            let cancel = place(ui, cancel_at, Layout::default(), "select-cancel", |ui| {
+                icon_button(ui, icon::X, 28.0, 18.0, false)
+                    .on_hover_text("Draw again")
+                    .clicked()
+            });
+            let confirm = place(ui, confirm_at, Layout::default(), "select-confirm", |ui| {
+                icon_button(ui, icon::CHECK, 28.0, 18.0, false)
+                    .on_hover_text("Track this object")
+                    .clicked()
+            });
             if cancel {
                 *state = Selection::default();
             } else if confirm {
@@ -250,6 +250,18 @@ pub fn select(ui: &mut Ui, map: &Mapping, state: &mut Selection) -> SelectOutcom
         outcome = SelectOutcome::Close;
     }
     outcome
+}
+
+/// Where ✕ and ✓ sit for a drawn box: under it, or above it when it
+/// reaches the bottom.
+fn choice_buttons(rect: Rect, picture: Rect) -> [Rect; 2] {
+    let y = if rect.bottom() + 34.0 <= picture.bottom() {
+        rect.bottom() + 17.0
+    } else {
+        (rect.top() - 17.0).max(picture.top() + 12.0)
+    };
+    let at = |x: f32| Rect::from_center_size(pos2(x, y), Vec2::splat(28.0));
+    [at(rect.left() + 14.0), at(rect.right() - 14.0)]
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -610,6 +622,57 @@ mod tests {
         assert_eq!(double_click(inside, true, Some(target)), select(inside));
         assert_eq!(double_click(outside, false, None), select(outside));
         assert_eq!(double_click(outside, true, None), select(outside));
+    }
+
+    #[test]
+    fn confirm_works_when_press_and_release_are_separate_frames() {
+        // Regression: the press on ✓ started a new box under it, so the
+        // release never reached ✓.
+        let ctx = egui::Context::default();
+        let m = map(Transform::default());
+        let mut state = Selection::default();
+        let mut tracked = None;
+        let frame = |events: Vec<egui::Event>, state: &mut Selection| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 600.0))),
+                events,
+                ..Default::default()
+            };
+            let mut outcome = None;
+            let mut output = ctx.run_ui(input, |ui| {
+                if let SelectOutcome::Track(t) = select(ui, &m, state) {
+                    outcome = Some(t);
+                }
+            });
+            output.textures_delta.clear();
+            outcome
+        };
+        let moved = |p: Pos2| egui::Event::PointerMoved(p);
+        let button = |p: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos: p,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let (a, b) = (pos2(200.0, 100.0), pos2(300.0, 200.0));
+        frame(vec![moved(a)], &mut state);
+        frame(vec![button(a, true)], &mut state);
+        for x in [220.0, 260.0, 300.0] {
+            frame(vec![moved(pos2(x, x - 100.0))], &mut state);
+        }
+        frame(vec![button(b, false)], &mut state);
+        assert!(state.drawn);
+        let confirm = choice_buttons(Rect::from_two_pos(a, b), m.picture)[1].center();
+        for events in [
+            vec![moved(confirm)],
+            vec![button(confirm, true)],
+            vec![moved(confirm + vec2(1.0, 0.0))],
+            vec![button(confirm + vec2(1.0, 0.0), false)],
+        ] {
+            tracked = tracked.or(frame(events, &mut state));
+        }
+        let target = tracked.expect("✓ should start tracking");
+        assert!((target.x0 - 0.125).abs() < 1e-3 && (target.y1 - 150.0 / 450.0).abs() < 1e-3);
     }
 
     #[test]

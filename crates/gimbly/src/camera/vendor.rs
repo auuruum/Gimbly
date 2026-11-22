@@ -231,6 +231,8 @@ pub fn for_gimbal(command: &GimbalCommand) -> Option<Message> {
         Drag(active) => Some(manual_move(active)),
         Speed { pitch, yaw } => Some(speed(pitch, yaw)),
         Reset => Some(Message::new(GIMBAL, [0x04, 0x39], Vec::new())),
+        ResetWithZoom => Some(Message::new(GIMBAL, [0x04, 0x39], vec![1])),
+        MoveTo { pitch, yaw } => Some(move_to(pitch, yaw)),
         TriggerPreset(id) => {
             let mut data = preset_id(id);
             data.extend([1.0f32; 4].into_iter().flat_map(f32::to_le_bytes));
@@ -239,6 +241,17 @@ pub fn for_gimbal(command: &GimbalCommand) -> Option<Message> {
         DeletePreset(id) => Some(Message::new(GIMBAL, [0x84, 0x39], preset_id(id))),
         _ => None,
     }
+}
+
+/// Turns to absolute angles in degrees; the official app sends -1000 for
+/// the roll and for an axis it keeps.
+pub fn move_to(pitch: Option<f32>, yaw: Option<f32>) -> Message {
+    const KEEP: f32 = -1000.0;
+    let data = [KEEP, pitch.unwrap_or(KEEP), yaw.unwrap_or(KEEP)]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    Message::new(GIMBAL, [0x44, 0x64], data)
 }
 
 /// Starts (`true`) or ends manual gimbal movement.
@@ -456,6 +469,12 @@ pub fn read_hand_limit(data: &[u8]) -> Option<f32> {
     let value = f32::from_le_bytes(data.try_into().ok()?);
     (value.is_finite() && value.abs() <= 360.0).then_some(value)
 }
+
+/// The return record the camera reported with none stored: id `ffffffff`,
+/// shown as P 0, T 0, Z 1.0.
+pub const RETURN_RECORD_NONE: [u8; 24] = [
+    0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 100, 0, 100, 0, 100, 0, 0, 0,
+];
 
 pub fn read_return_record(data: &[u8]) -> Option<[u8; 24]> {
     data.try_into().ok()
@@ -1036,10 +1055,39 @@ mod tests {
     }
 
     #[test]
+    fn hand_range_panel_moves_match_capture() {
+        // Writes from the 2026-11-22 14:26 capture: clicking the limits
+        // -45 / 30 / 45 / -30 and the return position P 44.90° T -30.00°.
+        let writes = [
+            (move_to(None, Some(-45.0)), "00007ac400007ac4000034c2"),
+            (move_to(Some(-30.0), None), "00007ac40000f0c100007ac4"),
+            (move_to(None, Some(45.0)), "00007ac400007ac400003442"),
+            (move_to(Some(30.0), None), "00007ac40000f04100007ac4"),
+            (move_to(Some(30.0), Some(44.9)), "00007ac40000f0419a993342"),
+        ];
+        for (message, data) in writes {
+            assert_gimbal_write(&message, [0x44, 0x64], data);
+        }
+        let move_to_command = GimbalCommand::MoveTo {
+            pitch: None,
+            yaw: Some(-45.0),
+        };
+        assert_eq!(
+            for_gimbal(&move_to_command),
+            Some(move_to(None, Some(-45.0)))
+        );
+        // The panel's Reset also zoomed back to 1.0x.
+        let reset = for_gimbal(&GimbalCommand::ResetWithZoom).unwrap();
+        assert_gimbal_write(&reset, [0x04, 0x39], "01");
+        assert_eq!(return_position(&RETURN_RECORD_NONE), (0.0, 0.0, 1.0));
+    }
+
+    #[test]
     fn hand_range_matches_capture() {
         // Replies and writes from the 2026-11-22 capture.
         let none =
             read_return_record(&hex("ffffffff0000000000006400000000006400640064000000")).unwrap();
+        assert_eq!(none, RETURN_RECORD_NONE);
         assert_eq!(return_position(&none), (0.0, 0.0, 1.0));
         assert_eq!(read_return_record(&none[..23]), None);
         let limits = ["000034c2", "00003442", "0000f0c1", "0000f041"]

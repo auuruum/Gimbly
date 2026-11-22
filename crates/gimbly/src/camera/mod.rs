@@ -224,6 +224,9 @@ pub struct SessionStatus {
     /// The Hand Tracking range being edited. `Some` exactly while the camera
     /// is in its range-edit state.
     pub hand_range: Option<HandRange>,
+    /// A return position outside the range, waiting for the user to widen
+    /// the range to it (see [`HandRange::including_return`]).
+    pub hand_range_proposal: Option<HandRange>,
     /// Stored preset positions, in the camera's order. `None` until read.
     pub presets: Option<Vec<Preset>>,
     /// The virtual camera has received at least one frame in this session.
@@ -259,6 +262,15 @@ pub enum GimbalCommand {
     },
     /// Return to the initial position.
     Reset,
+    /// Return to the initial position and zoom to 1.0x, as the Hand
+    /// Tracking range panel's Reset does.
+    ResetWithZoom,
+    /// Turn to absolute angles in degrees, in the camera's sign; `None`
+    /// keeps that axis.
+    MoveTo {
+        pitch: Option<f32>,
+        yaw: Option<f32>,
+    },
     /// Zoom to a ratio between 1.0 and [`ZOOM_RATIO_MAX`].
     ZoomRatio(f32),
     SetFov(Fov),
@@ -274,6 +286,14 @@ pub enum GimbalCommand {
     OpenHandRange,
     /// Take one range value from the current gimbal position (and zoom).
     UpdateHandRange(HandRangeField),
+    /// Put the four limits (`limits`) or the return position back to the
+    /// defaults in the panel; nothing is written until Done.
+    ResetHandRange {
+        limits: bool,
+    },
+    /// Answer the question in [`Status::hand_range_proposal`]: `true`
+    /// widens the range to take the new return position.
+    ConfirmHandRange(bool),
     /// Leave the edit state, writing the edited range when `save` is set.
     CloseHandRange {
         save: bool,
@@ -383,6 +403,23 @@ pub struct HandRange {
 }
 
 impl HandRange {
+    /// The panel's defaults; the camera reported these before any edit.
+    pub const DEFAULT_LIMITS: [f32; 4] = [-45.0, 45.0, -30.0, 30.0];
+
+    /// This range widened just enough to hold its return position, or
+    /// `None` when the position already lies within it.
+    pub fn including_return(&self) -> Option<HandRange> {
+        let (yaw, pitch, _) = self.return_position();
+        let [yaw_min, yaw_max, pitch_min, pitch_max] = self.limits;
+        let limits = [
+            yaw_min.min(yaw),
+            yaw_max.max(yaw),
+            pitch_min.min(pitch),
+            pitch_max.max(pitch),
+        ];
+        (limits != self.limits).then_some(HandRange { limits, ..*self })
+    }
+
     /// Yaw and pitch in degrees and the zoom ratio of the return position.
     pub fn return_position(&self) -> (f32, f32, f32) {
         vendor::return_position(&self.record)
@@ -673,6 +710,24 @@ pub fn parse_usb_ids(path: &str) -> (Option<u16>, Option<u16>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn return_outside_the_range_widens_only_the_crossed_limits() {
+        // Observed 2026-11-22: return P -55.60° T 30.20° with the default
+        // range turned the right limit into -55.6° and the top into 30.2°.
+        let inside =
+            vendor::set_return_position(&vendor::RETURN_RECORD_NONE, (4490, 3000), 1.42).unwrap();
+        let mut range = HandRange {
+            limits: HandRange::DEFAULT_LIMITS,
+            record: inside,
+        };
+        assert_eq!(range.including_return(), None);
+        range.record = vendor::set_return_position(&range.record, (-5560, -3020), 1.42).unwrap();
+        let wider = range.including_return().unwrap();
+        assert_eq!(wider.limits, [-55.6, 45.0, -30.2, 30.0]);
+        assert_eq!(wider.record, range.record);
+        assert_eq!(wider.including_return(), None);
+    }
 
     #[test]
     fn sleep_and_resume_discard_queued_and_in_flight_preview_frames() {

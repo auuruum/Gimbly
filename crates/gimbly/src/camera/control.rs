@@ -168,10 +168,35 @@ impl<T: Transport> Channel<T> {
                 let ratio = self.read_zoom()?;
                 range.record = vendor::set_return_position(&range.record, angles, ratio)
                     .ok_or("Camera returned an invalid zoom ratio")?;
+                // Like the official app, ask before widening the range to it.
+                if let Some(wider) = range.including_return() {
+                    shared.status().hand_range_proposal = Some(wider);
+                    return Ok(());
+                }
             }
         }
         shared.status().hand_range = Some(range);
         Ok(())
+    }
+
+    /// The panel's two reset icons; they only change the values on screen.
+    fn reset_hand_range(shared: &Shared, limits: bool) {
+        let mut status = shared.status();
+        if let Some(range) = &mut status.hand_range {
+            if limits {
+                range.limits = HandRange::DEFAULT_LIMITS;
+            } else {
+                range.record = vendor::RETURN_RECORD_NONE;
+            }
+        }
+    }
+
+    fn confirm_hand_range(shared: &Shared, widen: bool) {
+        let mut status = shared.status();
+        let proposal = status.hand_range_proposal.take();
+        if widen && status.hand_range.is_some() {
+            status.hand_range = proposal.or(status.hand_range);
+        }
     }
 
     /// Leaves the range-edit state, writing the range when `save` is set.
@@ -187,7 +212,9 @@ impl<T: Transport> Channel<T> {
         };
         let result = close();
         // Cleared only now: exiting waits for this.
-        shared.status().hand_range = None;
+        let mut status = shared.status();
+        status.hand_range = None;
+        status.hand_range_proposal = None;
         result
     }
 
@@ -344,6 +371,8 @@ impl<T: Transport> Channel<T> {
             }
             GimbalCommand::OpenHandRange => self.open_hand_range(shared)?,
             GimbalCommand::UpdateHandRange(field) => self.update_hand_range(shared, field)?,
+            GimbalCommand::ResetHandRange { limits } => Self::reset_hand_range(shared, limits),
+            GimbalCommand::ConfirmHandRange(widen) => Self::confirm_hand_range(shared, widen),
             GimbalCommand::CloseHandRange { save } => {
                 self.close_hand_range(shared, save)?;
                 // The close sequence zooms back to 1.0x.
@@ -372,8 +401,13 @@ impl<T: Transport> Channel<T> {
             }
             _ => {
                 self.send(vendor::for_gimbal(&command).ok_or("Unsupported gimbal command")?)?;
-                if matches!(command, GimbalCommand::TriggerPreset(_)) {
-                    shared.status().fov = None;
+                if matches!(
+                    command,
+                    GimbalCommand::TriggerPreset(_) | GimbalCommand::ResetWithZoom
+                ) {
+                    // The official app showed Wide after the 1.0x reset.
+                    shared.status().fov =
+                        (command == GimbalCommand::ResetWithZoom).then_some(super::Fov::Wide);
                     *zoom_refresh = follow_zoom();
                 }
             }

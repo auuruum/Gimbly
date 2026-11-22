@@ -1280,6 +1280,7 @@ impl eframe::App for GimblyApp {
         );
 
         self.rename_dialog(&ctx);
+        self.hand_range_dialog(&ctx);
         self.preview_window(&ctx);
         self.settings_window(&ctx);
         #[cfg(target_os = "linux")]

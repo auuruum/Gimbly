@@ -41,13 +41,16 @@ pub(super) fn target_stream(
             }
             match platform::Port::open(&path) {
                 Ok(mut port) => {
+                    if shared.status().serial_denied.take().is_some() {
+                        repaint();
+                    }
                     if follow(&mut port, trusted, shared, repaint, stop) {
                         break;
                     }
                 }
                 Err(e) if e.kind() == io::ErrorKind::PermissionDenied && !reported => {
                     reported = true;
-                    shared.status().error = Some(platform::permission_hint(&path));
+                    platform::report_denied(shared, &path);
                     repaint();
                 }
                 Err(_) => {}
@@ -269,10 +272,10 @@ mod platform {
             .then_some(name)
     }
 
-    pub(super) fn permission_hint(path: &str) -> String {
-        format!(
+    pub(super) fn report_denied(shared: &super::Shared, path: &str) {
+        shared.status().error = Some(format!(
             "Gimbly could not open the camera's serial port {path}, so the tracking box is hidden"
-        )
+        ));
     }
 
     pub(super) struct Port(HANDLE);
@@ -375,21 +378,18 @@ mod platform {
         ports
     }
 
+    /// The app offers to install Gimbly's udev rule (see `serial_access`).
     #[cfg(target_os = "linux")]
-    pub(super) fn permission_hint(path: &str) -> String {
+    pub(super) fn report_denied(shared: &super::Shared, path: &str) {
         use std::os::unix::fs::MetadataExt;
-        let group = std::fs::metadata(path)
-            .ok()
-            .and_then(|meta| {
-                let groups = std::fs::read_to_string("/etc/group").ok()?;
-                super::group_name(&groups, meta.gid())
-            })
-            .unwrap_or_else(|| "that owns it (usually uucp or dialout)".into());
-        format!(
-            "Gimbly cannot open the camera's serial port {path}, so the tracking box is hidden. \
-             Install Gimbly's udev rule (packaging/linux/70-gimbly.rules, see the Linux setup), \
-             or add your user to the group {group} and sign in again."
-        )
+        let group = std::fs::metadata(path).ok().and_then(|meta| {
+            let groups = std::fs::read_to_string("/etc/group").ok()?;
+            super::group_name(&groups, meta.gid())
+        });
+        shared.status().serial_denied = Some(super::super::SerialDenied {
+            path: path.to_owned(),
+            group,
+        });
     }
 
     /// macOS names a CDC port after the USB location, e.g. location
@@ -419,8 +419,10 @@ mod platform {
     }
 
     #[cfg(target_os = "macos")]
-    pub(super) fn permission_hint(path: &str) -> String {
-        format!("Gimbly cannot read the camera's serial port {path}, so the tracking box is hidden")
+    pub(super) fn report_denied(shared: &super::Shared, path: &str) {
+        shared.status().error = Some(format!(
+            "Gimbly cannot read the camera's serial port {path}, so the tracking box is hidden"
+        ));
     }
 
     pub(super) struct Port(libc::c_int);
@@ -515,8 +517,8 @@ mod platform {
         Vec::new()
     }
 
-    pub(super) fn permission_hint(path: &str) -> String {
-        format!("Cannot open {path}")
+    pub(super) fn report_denied(shared: &super::Shared, path: &str) {
+        shared.status().error = Some(format!("Cannot open {path}"));
     }
 
     pub(super) struct Port;

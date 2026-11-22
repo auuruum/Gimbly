@@ -64,6 +64,8 @@ pub struct GimblyApp {
     virtual_camera_hint: Option<String>,
     #[cfg(target_os = "linux")]
     virtual_camera_setup: vcam::setup::Setup,
+    #[cfg(target_os = "linux")]
+    serial_access: crate::serial_access::SerialAccess,
     /// Where the toolbar's sleep button sits, so the sleep overlay can keep
     /// it reachable.
     sleep_button: Rect,
@@ -107,6 +109,8 @@ impl GimblyApp {
             virtual_camera_hint: None,
             #[cfg(target_os = "linux")]
             virtual_camera_setup: Default::default(),
+            #[cfg(target_os = "linux")]
+            serial_access: Default::default(),
             sleep_button: Rect::NOTHING,
             toast: None,
             settings,
@@ -1321,6 +1325,9 @@ impl eframe::App for GimblyApp {
         self.settings_window(&ctx);
         #[cfg(target_os = "linux")]
         self.virtual_camera_setup.show(&ctx);
+        #[cfg(target_os = "linux")]
+        self.serial_access
+            .show(&ctx, self.status.serial_denied.as_ref());
         self.toast(&ctx);
     }
 }

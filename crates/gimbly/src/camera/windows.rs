@@ -757,12 +757,13 @@ fn capture_loop<'scope, 'env>(
 
     let control = if xu.is_some() || zoom.is_some() {
         let (sender, receiver) = queue::channel();
+        let device_id = device.id.clone();
         let shared: &'env Shared = &worker.shared;
         let repaint: &'env (dyn Fn() + Send + Sync) = &*worker.repaint;
         scope.spawn(move || match MfThread::init() {
             Ok(_com) => {
                 if let Some(xu) = xu {
-                    control_loop(xu, &receiver, shared, repaint, zoom_refresh);
+                    control_loop(xu, &receiver, shared, repaint, zoom_refresh, &device_id);
                 } else if let Some(zoom) = zoom {
                     let value = zoom.get();
                     shared.status().zoom = value;

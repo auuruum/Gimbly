@@ -20,13 +20,14 @@
 //! | 8 | source |
 //! | 9 | destination |
 //! | 10-11 | command |
-//! | 12-13 | data length (only with flag `0x20`) |
+//! | 12-13 | data length (only with flag `0x20` or `0x40`) |
 //! | 14-15 | CRC of bytes 12-15 (this field zeroed) and the data |
 //! | 16.. | data, then padding |
 
 use super::{
-    AiMode, AutoZoom, Fov, GimbalCommand, Hand, HandRange, PRESET_NAME_MAX, PRESET_SLOTS,
-    PresetPosition, TrackingMode, TrackingSpeed, VoiceRange, ZOOM_RATIO_MAX,
+    AiMode, AutoZoom, Fov, GimbalCommand, Hand, HandRange, ObjectFraming, PRESET_NAME_MAX,
+    PRESET_SLOTS, PresetPosition, TargetBox, TrackingMode, TrackingSpeed, VoiceRange,
+    ZOOM_RATIO_MAX,
 };
 
 /// GUID of the extension unit, as the UVC descriptor stores it.
@@ -43,6 +44,8 @@ const HEADER_LEN: usize = 16;
 pub const DATA_MAX: usize = MESSAGE_LEN - HEADER_LEN;
 
 const FLAG_DATA: u8 = 0x20;
+/// Data in protobuf form; it carries a length like [`FLAG_DATA`].
+const FLAG_PROTOBUF: u8 = 0x40;
 const FLAG_NO_REPLY: u8 = 0x04;
 const FLAG_REPLY: u8 = 0x08;
 /// The address the official app sends from.
@@ -75,6 +78,16 @@ pub const READ_HAND_SETTING: [u8; 2] = [0x84, 0x20];
 const WRITE_HAND_SETTING: [u8; 2] = [0x44, 0x20];
 pub const HAND_SIDE: u32 = 4;
 /// Reads (`04 25`) and writes (`c4 24`) the Hand Tracking return position.
+/// Composition settings (`READ_SETTING` / `WRITE_SETTING` keys); see
+/// `docs/clean-room/2026-11-22-preview-tracking.md`.
+pub const SETTING_FACE_FRAMING: u32 = 0x0e;
+pub const SETTING_COMPOSITION_X: u32 = 0x0f;
+pub const SETTING_COMPOSITION_Y: u32 = 0x11;
+/// How far the official app lets the composition lines move from the centre.
+pub const COMPOSITION_LIMIT: f32 = 0.16;
+const SELECT_TARGET: [u8; 2] = [0x84, 0x06];
+const OBJECT_FRAMING: [u8; 2] = [0xc4, 0x06];
+
 pub const READ_RETURN_POSITION: [u8; 2] = [0x04, 0x25];
 const WRITE_RETURN_POSITION: [u8; 2] = [0xc4, 0x24];
 
@@ -131,6 +144,14 @@ impl Message {
         }
     }
 
+    /// A message whose data is in protobuf form (flag `0x40`).
+    pub fn protobuf(destination: u8, command: [u8; 2], data: Vec<u8>) -> Self {
+        Self {
+            flags: 0x01 | FLAG_NO_REPLY | FLAG_PROTOBUF,
+            ..Self::new(destination, command, data)
+        }
+    }
+
     pub fn requesting_reply(mut self) -> Self {
         self.flags &= !FLAG_NO_REPLY;
         self
@@ -177,14 +198,11 @@ impl Message {
         if crc16(&zeroed) != u16::from_le_bytes([header[6], header[7]]) {
             return None;
         }
-        let data = if header[1] & FLAG_DATA != 0 {
+        let data = if header[1] & (FLAG_DATA | FLAG_PROTOBUF) != 0 {
             let &[lo, hi, crc_lo, crc_hi] = bytes.get(12..HEADER_LEN)? else {
                 return None;
             };
             let len = u16::from_le_bytes([lo, hi]) as usize;
-            if len > DATA_MAX {
-                return None;
-            }
             let data = bytes.get(HEADER_LEN..HEADER_LEN + len)?;
             if data_crc(data) != u16::from_le_bytes([crc_lo, crc_hi]) {
                 return None;
@@ -386,6 +404,359 @@ pub fn read_tracking_speed(data: &[u8]) -> Option<TrackingSpeed> {
     TrackingSpeed::ALL
         .into_iter()
         .find(|&speed| tracking_speed_value(speed) == value)
+}
+
+/// Request data for [`READ_SETTING`] that asks for setting `key`.
+pub fn read_setting_request(key: u32) -> Vec<u8> {
+    [0, key].into_iter().flat_map(u32::to_le_bytes).collect()
+}
+
+fn write_setting(key: u32, value: &[u8]) -> Message {
+    let mut data = read_setting_request(key);
+    data.extend_from_slice(value);
+    Message::new(GIMBAL, WRITE_SETTING, data)
+}
+
+/// A composition offset kept within [`COMPOSITION_LIMIT`].
+pub fn clamp_composition(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(-COMPOSITION_LIMIT, COMPOSITION_LIMIT)
+    } else {
+        0.0
+    }
+}
+
+/// The two writes the official app sends when a composition line is
+/// released: the subject's offset from the centre, in fractions of the
+/// picture, horizontal then vertical.
+pub fn composition(x: f32, y: f32) -> [Message; 2] {
+    [
+        write_setting(SETTING_COMPOSITION_X, &clamp_composition(x).to_le_bytes()),
+        write_setting(SETTING_COMPOSITION_Y, &clamp_composition(y).to_le_bytes()),
+    ]
+}
+
+pub fn face_framing(on: bool) -> Message {
+    write_setting(SETTING_FACE_FRAMING, &[on.into()])
+}
+
+/// A composition offset from a [`READ_SETTING`] reply; `None` unless it is
+/// a plausible value.
+pub fn read_composition(data: &[u8]) -> Option<f32> {
+    let value = f32::from_le_bytes(data.try_into().ok()?);
+    (value.is_finite() && value.abs() <= 1.0).then(|| clamp_composition(value))
+}
+
+pub fn read_face_framing(data: &[u8]) -> Option<bool> {
+    match data {
+        [0] => Some(false),
+        [1] => Some(true),
+        _ => None,
+    }
+}
+
+fn select(kind: [i16; 4], values: [f32; 4]) -> Message {
+    let data = kind
+        .into_iter()
+        .flat_map(i16::to_le_bytes)
+        .chain(values.into_iter().flat_map(f32::to_le_bytes))
+        .collect();
+    Message::new(GIMBAL, SELECT_TARGET, data)
+}
+
+/// A fraction of the picture, kept inside it.
+fn unit(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.5
+    }
+}
+
+/// Track the person at `(x, y)`, in fractions of the camera picture. The
+/// official app sends this for a double-click.
+pub fn select_point(x: f32, y: f32) -> Message {
+    // 101, 99 and -2 are copied from the capture; their meaning is unknown.
+    select([2, 101, 99, -2], [unit(x), unit(y), 0.0, 0.0])
+}
+
+/// Track the object inside `target` (object tracking).
+pub fn select_object(target: TargetBox) -> Message {
+    let TargetBox { x0, y0, x1, y1 } = target;
+    let (x0, y0, x1, y1) = (unit(x0), unit(y0), unit(x1), unit(y1));
+    select(
+        [3, 2, 0, -2],
+        [x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)],
+    )
+}
+
+/// Stop tracking the current target. This is the double-click cancel form;
+/// the official app repeats the last point after it, which we leave zero.
+pub fn cancel_target() -> Message {
+    select([-1, -1, 0, -2], [0.0; 4])
+}
+
+pub fn object_framing(framing: ObjectFraming) -> Message {
+    let mut data = vec![0; 8];
+    data[0] = match framing {
+        ObjectFraming::Normal => 0,
+        ObjectFraming::CloseUp => 3,
+    };
+    Message::new(GIMBAL, OBJECT_FRAMING, data)
+}
+
+/// The object framing in status offset 28 while object tracking runs;
+/// `None` when it does not (or for values never observed).
+pub fn read_object_framing(data: &[u8]) -> Option<ObjectFraming> {
+    if read_ai_mode(data)? != AiMode::Human {
+        return None;
+    }
+    match *data.get(28)? {
+        0x14 => Some(ObjectFraming::Normal),
+        0x17 => Some(ObjectFraming::CloseUp),
+        _ => None,
+    }
+}
+
+/// The 12-byte message the official app writes to the CDC serial port every
+/// 500 ms: command `42 ae` to `0x02`, no data.
+pub fn target_keepalive() -> [u8; 12] {
+    let block = Message::new(CAMERA, [0x42, 0xae], Vec::new()).encode();
+    let mut bytes = [0; 12];
+    bytes.copy_from_slice(&block[..12]);
+    bytes
+}
+
+/// Largest serial message data accepted; longer lengths mean a lost sync.
+const SERIAL_DATA_MAX: usize = 1024;
+/// Bytes kept while waiting for the rest of a message.
+const SERIAL_BUFFER_MAX: usize = 4 * (HEADER_LEN + SERIAL_DATA_MAX);
+
+/// Appends serial bytes to `buffer` and returns the whole messages in it,
+/// skipping bytes that do not start a valid message.
+pub fn split_serial(buffer: &mut Vec<u8>, bytes: &[u8]) -> Vec<Message> {
+    buffer.extend_from_slice(bytes);
+    let mut messages = Vec::new();
+    let mut start = 0;
+    while let Some(rest) = buffer.get(start..) {
+        let Some(at) = rest.iter().position(|&b| b == 0xaa) else {
+            start = buffer.len();
+            break;
+        };
+        start += at;
+        let Some(header) = buffer.get(start..start + 12) else {
+            break;
+        };
+        let valid = header[4..6] == [12, 0] && {
+            let mut zeroed = [0u8; 12];
+            zeroed.copy_from_slice(header);
+            zeroed[6..8].fill(0);
+            crc16(&zeroed) == u16::from_le_bytes([header[6], header[7]])
+        };
+        if !valid {
+            start += 1;
+            continue;
+        }
+        let len = if header[1] & (FLAG_DATA | FLAG_PROTOBUF) != 0 {
+            let Some(&[lo, hi]) = buffer.get(start + 12..start + 14) else {
+                break;
+            };
+            let len = usize::from(u16::from_le_bytes([lo, hi]));
+            if len > SERIAL_DATA_MAX {
+                start += 1;
+                continue;
+            }
+            HEADER_LEN + len
+        } else {
+            12
+        };
+        let Some(frame) = buffer.get(start..start + len) else {
+            break;
+        };
+        match Message::decode(frame) {
+            Some(message) => {
+                messages.push(message);
+                start += len;
+            }
+            None => start += 1,
+        }
+    }
+    buffer.drain(..start.min(buffer.len()));
+    if buffer.len() > SERIAL_BUFFER_MAX {
+        buffer.clear();
+    }
+    messages
+}
+
+/// Destination and command the official app sent once when it connected,
+/// right before the camera started the target stream (no data; the reply
+/// was `u32 0`).
+pub const TARGET_STREAM_START: (u8, [u8; 2]) = (CAMERA, [0x42, 0xc4]);
+
+/// Reads the camera's report settings record (protobuf, `82 ad` to `0x02`,
+/// data `0a 01 01` as the official app sends it).
+pub fn read_report_settings() -> Message {
+    Message::protobuf(CAMERA, [0x82, 0xad], vec![0x0a, 0x01, 0x01]).requesting_reply()
+}
+
+fn put_varint(out: &mut Vec<u8>, mut value: u64) {
+    while value >= 0x80 {
+        out.push(value as u8 | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn put_field(out: &mut Vec<u8>, number: u64, value: &Field<'_>) {
+    match value {
+        Field::Varint(v) => {
+            put_varint(out, number << 3);
+            put_varint(out, *v);
+        }
+        Field::Bytes(bytes) => {
+            put_varint(out, number << 3 | 2);
+            put_varint(out, bytes.len() as u64);
+            out.extend_from_slice(bytes);
+        }
+        Field::Fixed(bytes) => {
+            put_varint(out, number << 3 | if bytes.len() == 8 { 1 } else { 5 });
+            out.extend_from_slice(bytes);
+        }
+    }
+}
+
+/// The write (`c2 ad`) that sets the camera's target report, from the reply
+/// to [`read_report_settings`]: the same record with field 2.4 = 1 (the
+/// stream runs; the camera started it 0.4 s after this) and field 2.1 =
+/// `tracking` (the stream carries the target's box). The official app wrote
+/// it after every tracking change. `None` when nothing would change or the
+/// reply cannot be read.
+pub fn target_report(reply: &[u8], tracking: bool) -> Option<Message> {
+    let mut record = None;
+    protobuf_fields(reply, |number, value| {
+        if let (1, Field::Bytes(bytes)) = (number, value) {
+            record = Some(bytes);
+        }
+    })?;
+    let record = record?;
+    let mut fields = Vec::new();
+    protobuf_fields(record, |number, value| fields.push((number, value)))?;
+    if !fields
+        .iter()
+        .any(|(number, value)| *number == 2 && matches!(value, Field::Bytes(_)))
+    {
+        fields.push((2, Field::Bytes(&[])));
+    }
+    let mut out = Vec::new();
+    for (number, value) in fields {
+        let (2, Field::Bytes(inner)) = (number, value) else {
+            put_field(&mut out, number, &value);
+            continue;
+        };
+        let mut report = Vec::new();
+        if tracking {
+            put_field(&mut report, 1, &Field::Varint(1));
+        }
+        protobuf_fields(inner, |number, value| {
+            if number != 1 && number != 4 {
+                put_field(&mut report, number, &value);
+            }
+        })?;
+        put_field(&mut report, 4, &Field::Varint(1));
+        put_field(&mut out, 2, &Field::Bytes(&report));
+    }
+    (out != record).then(|| Message::protobuf(CAMERA, [0xc2, 0xad], out))
+}
+
+/// The command the camera streams the tracked target with.
+pub const TARGET_STREAM: [u8; 2] = [0x02, 0xae];
+
+fn varint(bytes: &mut &[u8]) -> Option<u64> {
+    let mut value = 0u64;
+    for shift in (0..64).step_by(7) {
+        let (&byte, rest) = bytes.split_first()?;
+        *bytes = rest;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// A protobuf field value: a varint, or the bytes of a fixed-size or
+/// length-delimited field.
+#[derive(Clone, Copy)]
+enum Field<'a> {
+    Varint(u64),
+    /// Length-delimited: bytes, a string or a nested message.
+    Bytes(&'a [u8]),
+    /// A 32- or 64-bit value (`f32`, `fixed32`, ...).
+    Fixed(&'a [u8]),
+}
+
+/// Calls `field` with each field number and value; `None` when the input
+/// is malformed.
+fn protobuf_fields<'a>(mut bytes: &'a [u8], mut field: impl FnMut(u64, Field<'a>)) -> Option<()> {
+    while !bytes.is_empty() {
+        let key = varint(&mut bytes)?;
+        let (size, fixed) = match key & 7 {
+            0 => {
+                field(key >> 3, Field::Varint(varint(&mut bytes)?));
+                continue;
+            }
+            1 => (8, true),
+            2 => (usize::try_from(varint(&mut bytes)?).ok()?, false),
+            5 => (4, true),
+            _ => return None,
+        };
+        let (value, rest) = bytes.split_at_checked(size)?;
+        bytes = rest;
+        field(
+            key >> 3,
+            if fixed {
+                Field::Fixed(value)
+            } else {
+                Field::Bytes(value)
+            },
+        );
+    }
+    Some(())
+}
+
+/// The boxes of the tracked targets in a [`TARGET_STREAM`] message, in
+/// fractions of the camera picture; `None` when the data is malformed.
+pub fn read_targets(data: &[u8]) -> Option<Vec<TargetBox>> {
+    let mut targets = Vec::new();
+    let mut valid = true;
+    protobuf_fields(data, |number, value| {
+        let (1, Field::Bytes(entry)) = (number, value) else {
+            return;
+        };
+        let mut corners = [0.0f32; 4];
+        let mut has_box = false;
+        let mut none = false;
+        valid &= protobuf_fields(entry, |number, value| match (number, value) {
+            // A cancelled target is reported with id 255 and no box.
+            (1, Field::Varint(255)) => none = true,
+            (6..=9, Field::Fixed(&[a, b, c, d])) => {
+                let value = f32::from_le_bytes([a, b, c, d]);
+                if value.is_finite()
+                    && let Some(corner) = corners.get_mut((number - 6) as usize)
+                {
+                    *corner = value.clamp(0.0, 1.0);
+                    has_box = true;
+                }
+            }
+            _ => {}
+        })
+        .is_some();
+        let [x0, y0, x1, y1] = corners;
+        if has_box && !none && x1 > x0 && y1 > y0 {
+            targets.push(TargetBox { x0, y0, x1, y1 });
+        }
+    })?;
+    valid.then_some(targets)
 }
 
 pub fn sleeping(data: &[u8]) -> Option<bool> {
@@ -1138,5 +1509,190 @@ mod tests {
         let set = set_return_position(&none, (-2270, -540), 1.0).unwrap();
         assert_eq!(set, stored);
         assert!(set_return_position(&none, (0, 0), f32::NAN).is_none());
+    }
+
+    #[test]
+    fn target_selection_matches_capture() {
+        // Gimbal writes from the 2026-11-22 preview captures.
+        let f = |text: &str| f32::from_le_bytes(hex(text).try_into().unwrap());
+        assert_gimbal_write(
+            &select_point(f("9a99473f"), f("02c93a3f")),
+            [0x84, 0x06],
+            "020065006300feff9a99473f02c93a3f0000000000000000",
+        );
+        let target = TargetBox {
+            x0: f("cdcc043e"),
+            y0: f("c5a8e13d"),
+            x1: f("0000483e"),
+            y1: f("398ea33e"),
+        };
+        let captured = "030002000000feffcdcc043ec5a8e13d0000483e398ea33e";
+        assert_gimbal_write(&select_object(target), [0x84, 0x06], captured);
+        // A box drawn from the far corner sends the same corners.
+        let reversed = TargetBox {
+            x0: target.x1,
+            y0: target.y1,
+            x1: target.x0,
+            y1: target.y0,
+        };
+        assert_gimbal_write(&select_object(reversed), [0x84, 0x06], captured);
+        assert_gimbal_write(
+            &cancel_target(),
+            [0x84, 0x06],
+            "ffffffff0000feff00000000000000000000000000000000",
+        );
+        assert_eq!(
+            select_point(f32::NAN, 7.0).data[8..16],
+            hex("0000003f0000803f")
+        );
+        assert_gimbal_write(
+            &object_framing(ObjectFraming::CloseUp),
+            [0xc4, 0x06],
+            "0300000000000000",
+        );
+        assert_gimbal_write(
+            &object_framing(ObjectFraming::Normal),
+            [0xc4, 0x06],
+            "0000000000000000",
+        );
+
+        let status = |mode: u8, framing: u8| {
+            let mut block = hex(
+                "2e00000100000001000178000001010001000000017f000000004b030000553c00031000000000000800000003010100000000000000000000000000",
+            );
+            (block[24], block[28]) = (mode, framing);
+            block
+        };
+        assert_eq!(
+            read_object_framing(&status(2, 0x14)),
+            Some(ObjectFraming::Normal)
+        );
+        assert_eq!(
+            read_object_framing(&status(2, 0x17)),
+            Some(ObjectFraming::CloseUp)
+        );
+        assert_eq!(read_object_framing(&status(2, 0)), None);
+        assert_eq!(read_object_framing(&status(7, 0x14)), None);
+        assert_eq!(read_object_framing(&status(2, 0x14)[..20]), None);
+    }
+
+    #[test]
+    fn composition_matches_capture() {
+        let [x, y] = composition(-0.16, 0.16);
+        assert_gimbal_write(&x, [0x44, 0x54], "000000000f0000000ad723be");
+        assert_gimbal_write(&y, [0x44, 0x54], "00000000110000000ad7233e");
+        // Lines dragged past the thirds stopped at the same values.
+        let [x, y] = composition(-0.5, f32::INFINITY);
+        assert_gimbal_write(&x, [0x44, 0x54], "000000000f0000000ad723be");
+        assert_gimbal_write(&y, [0x44, 0x54], "000000001100000000000000");
+        assert_gimbal_write(&face_framing(true), [0x44, 0x54], "000000000e00000001");
+        assert_gimbal_write(&face_framing(false), [0x44, 0x54], "000000000e00000000");
+        assert_eq!(
+            read_setting_request(SETTING_FACE_FRAMING),
+            hex("000000000e000000")
+        );
+        assert_eq!(
+            read_setting_request(SETTING_COMPOSITION_Y),
+            hex("0000000011000000")
+        );
+        assert_eq!(
+            read_composition(&hex("f8ac8bbd")),
+            Some(f32::from_le_bytes(hex("f8ac8bbd").try_into().unwrap()))
+        );
+        assert_eq!(read_composition(&hex("0000c07f")), None);
+        assert_eq!(read_composition(&hex("00")), None);
+        assert_eq!(read_face_framing(&hex("01")), Some(true));
+        assert_eq!(read_face_framing(&hex("02")), None);
+    }
+
+    #[test]
+    fn target_stream_matches_capture() {
+        assert_eq!(target_keepalive().to_vec(), hex("aa0500000c0002b90a0242ae"));
+
+        // Report settings: read, then written back with field 2.4 = 1; the
+        // stream started 0.4 s after this write (2026-11-22, Gimbly test).
+        let read = read_report_settings();
+        assert_eq!(
+            (read.flags, read.destination, read.command),
+            (0x41, CAMERA, [0x82, 0xad])
+        );
+        assert_eq!(read.data, hex("0a0101"));
+        // The writes from the captures: stream on, then with the box while
+        // tracking, and back without it.
+        let write = target_report(&hex("0a0408011200"), false).unwrap();
+        assert_eq!(
+            (write.flags, write.destination, write.command),
+            (0x45, CAMERA, [0xc2, 0xad])
+        );
+        assert_eq!(write.data, hex("080112022001"));
+        let on = target_report(&hex("0a06080112022001"), true).unwrap();
+        assert_eq!(on.data, hex("0801120408012001"));
+        let off = target_report(&hex("0a080801120408012001"), false).unwrap();
+        assert_eq!(off.data, hex("080112022001"));
+        // Nothing to change, a missing field 2, damage.
+        assert!(target_report(&hex("0a080801120408012001"), true).is_none());
+        assert!(target_report(&hex("0a06080112022001"), false).is_none());
+        assert_eq!(
+            target_report(&hex("0a020801"), false).unwrap().data,
+            hex("080112022001")
+        );
+        assert!(target_report(&hex("0a0908"), true).is_none());
+        assert!(target_report(&[], true).is_none());
+
+        // CDC serial frames from the 2026-11-22 capture: a person, an object,
+        // a cancelled target and nothing tracked.
+        let person = "aa44d7dd0c0091c0020a02ae2600cdf40a22100118013525745d3e3dfa3c153e45c4d0293f4d0000803f5543a689425d0000803f2a00";
+        let object = "aa446ae50c0034ec020a02ae2500bc6d0a21100118012001280235cdcc043e3dc5a8e13d450000483e4d398ea33e5528b1ab422a00";
+        let cancel = "aa4407e90c00f3a8020a02ae0700d6290a0308ff012a00";
+        let empty = "aa4432e90c00e347020a02ae0200e1662a00";
+        let stream = hex(&format!("0011{person}aa{object}{cancel}{empty}"));
+        // Split anywhere, as USB packets do.
+        let mut buffer = Vec::new();
+        let mut messages = Vec::new();
+        for chunk in stream.chunks(7) {
+            messages.extend(split_serial(&mut buffer, chunk));
+        }
+        assert_eq!(messages.len(), 4);
+        assert!(buffer.is_empty());
+        let targets: Vec<_> = messages
+            .iter()
+            .map(|m| {
+                assert_eq!(
+                    (m.source, m.destination, m.command),
+                    (0x02, HOST, TARGET_STREAM)
+                );
+                read_targets(&m.data).unwrap()
+            })
+            .collect();
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        let p = targets[0][0];
+        assert!(
+            near(p.x0, 0.216) && near(p.y0, 0.146) && near(p.x1, 0.663) && p.y1 == 1.0,
+            "{p:?}"
+        );
+        let o = targets[1][0];
+        assert!(
+            near(o.x0, 0.13) && near(o.y0, 0.1102) && near(o.x1, 0.1953) && near(o.y1, 0.3194),
+            "{o:?}"
+        );
+        assert!(targets[2].is_empty());
+        assert!(targets[3].is_empty());
+        // A box without y0 (zero is left out) still counts.
+        let no_y0 = hex("0a1d1001180135c01b3b3c4539dd013f4d0000803f55f56795425d0000803f2a00");
+        let t = read_targets(&no_y0).unwrap()[0];
+        assert_eq!(t.y0, 0.0);
+        assert!(t.contains(0.3, 0.5) && !t.contains(0.6, 0.5));
+
+        // Damage: truncated or nonsense data, a bad CRC and a huge length.
+        assert_eq!(read_targets(&hex("0a22100118")), None);
+        assert_eq!(read_targets(&hex("0f")), None);
+        let mut bad = hex(person);
+        bad[20] ^= 1;
+        assert!(split_serial(&mut Vec::new(), &bad).is_empty());
+        let mut buffer = Vec::new();
+        let huge = hex("aa44d7dd0c0091c0020a02aeffff");
+        assert!(split_serial(&mut buffer, &huge).is_empty());
+        assert!(split_serial(&mut buffer, &vec![0x55; 70_000]).is_empty());
+        assert!(buffer.len() <= 4 * (HEADER_LEN + 1024));
     }
 }

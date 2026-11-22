@@ -7,6 +7,7 @@ mod control;
 mod frames;
 mod preview;
 mod queue;
+mod serial;
 mod sleep;
 mod standby;
 mod vendor;
@@ -227,6 +228,13 @@ pub struct SessionStatus {
     /// A return position outside the range, waiting for the user to widen
     /// the range to it (see [`HandRange::including_return`]).
     pub hand_range_proposal: Option<HandRange>,
+    /// Object tracking runs, framed like this; `None` when it does not.
+    pub object_framing: Option<ObjectFraming>,
+    /// The box of the tracked target, streamed by the camera; `None` when
+    /// nothing is tracked or the stream is unavailable.
+    pub target: Option<TargetBox>,
+    /// The AI Composition settings, read when the composition mode opens.
+    pub composition: Option<Composition>,
     /// Stored preset positions, in the camera's order. `None` until read.
     pub presets: Option<Vec<Preset>>,
     /// The virtual camera has received at least one frame in this session.
@@ -298,6 +306,25 @@ pub enum GimbalCommand {
     CloseHandRange {
         save: bool,
     },
+    /// Track the person at this point (fractions of the camera picture),
+    /// as a double-click in the preview does.
+    SelectPoint {
+        x: f32,
+        y: f32,
+    },
+    /// Start object tracking on this box.
+    SelectObject(TargetBox),
+    /// Stop tracking the current target.
+    CancelTarget,
+    SetObjectFraming(ObjectFraming),
+    /// Read the AI Composition settings into [`SessionStatus::composition`].
+    ReadComposition,
+    /// Move the subject's place in the picture; see [`Composition`].
+    SetComposition {
+        x: f32,
+        y: f32,
+    },
+    SetFaceFraming(bool),
     TriggerPreset(u8),
     /// Store the current position as a new preset in the first free slot.
     AddPreset,
@@ -369,6 +396,42 @@ pub enum TrackingSpeed {
 impl TrackingSpeed {
     pub const ALL: [TrackingSpeed; 3] = [Self::Slow, Self::Standard, Self::Fast];
 }
+
+/// How object tracking frames the object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObjectFraming {
+    Normal,
+    CloseUp,
+}
+
+/// A box in fractions of the camera picture, from its top left corner,
+/// before Gimbly's rotation, mirror and portrait crop.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TargetBox {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+}
+
+impl TargetBox {
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        (self.x0..=self.x1).contains(&x) && (self.y0..=self.y1).contains(&y)
+    }
+}
+
+/// Where Human Tracking places the person: the offset from the picture
+/// centre in fractions of the picture, within ±[`COMPOSITION_LIMIT`]
+/// (positive is right and down).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Composition {
+    pub x: f32,
+    pub y: f32,
+    /// Face Framing: the camera picks the horizontal place itself.
+    pub face_framing: bool,
+}
+
+pub use vendor::clamp_composition;
 
 /// The AI mode the camera runs; only one runs at a time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

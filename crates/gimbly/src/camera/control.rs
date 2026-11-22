@@ -4,9 +4,11 @@
 use super::queue::Receiver;
 use super::sleep::SleepReadback;
 use super::{
-    AiMode, AutoZoom, Command, GimbalCommand, Hand, HandRange, HandRangeField, PRESET_SLOTS,
-    Preset, Shared, TrackingSpeed, VoiceRange, vendor,
+    AiMode, AutoZoom, Command, Composition, GimbalCommand, Hand, HandRange, HandRangeField,
+    ObjectFraming, PRESET_SLOTS, Preset, Shared, TrackingMode, TrackingSpeed, VoiceRange, serial,
+    vendor,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 pub(super) const TINY_3_LITE: u16 = 0xff04;
@@ -44,6 +46,7 @@ impl<T: Transport> Channel<T> {
         status.ai_mode = view.and_then(|view| view.ai_mode);
         status.auto_zoom = view.and_then(|view| view.auto_zoom);
         status.voice_range = view.and_then(|view| view.voice_range);
+        status.object_framing = view.and_then(|view| view.object_framing);
         status.tracking_speed = tracking_speed;
         status.hand = hand;
         status.zoom_ratio = ratio;
@@ -85,7 +88,21 @@ impl<T: Transport> Channel<T> {
     }
 
     pub(super) fn request(&mut self, command: [u8; 2], data: Vec<u8>) -> Result<Vec<u8>, String> {
-        let mut request = vendor::Message::new(vendor::GIMBAL, command, data).requesting_reply();
+        self.request_from(vendor::GIMBAL, command, data)
+    }
+
+    fn request_from(
+        &mut self,
+        destination: u8,
+        command: [u8; 2],
+        data: Vec<u8>,
+    ) -> Result<Vec<u8>, String> {
+        self.exchange(vendor::Message::new(destination, command, data).requesting_reply())
+    }
+
+    /// Sends `request` and waits for its reply's data.
+    fn exchange(&mut self, mut request: vendor::Message) -> Result<Vec<u8>, String> {
+        let command = request.command;
         self.sender.number(&mut request);
         self.set(vendor::SELECTOR_COMMAND, &mut request.encode())?;
         // The XU may still return an older reply before this one is ready.
@@ -114,6 +131,39 @@ impl<T: Transport> Channel<T> {
             ai_mode: vendor::read_ai_mode(block),
             auto_zoom: vendor::read_auto_zoom(block),
             voice_range: vendor::read_voice_range(block),
+            object_framing: vendor::read_object_framing(block),
+        })
+    }
+
+    /// Sets the camera's target report for the serial port (see
+    /// [`serial`]) the way the official app does: once when it connects,
+    /// then after every tracking change. Best effort: the box is optional.
+    fn target_report(&mut self, tracking: bool, connecting: bool) {
+        if connecting {
+            let (destination, command) = vendor::TARGET_STREAM_START;
+            let _ = self.request_from(destination, command, Vec::new());
+        }
+        let Ok(reply) = self.exchange(vendor::read_report_settings()) else {
+            return;
+        };
+        if let Some(message) = vendor::target_report(&reply, tracking) {
+            let _ = self.send(message);
+        }
+    }
+
+    fn read_setting(&mut self, key: u32) -> Result<Vec<u8>, String> {
+        self.request(vendor::READ_SETTING, vendor::read_setting_request(key))
+    }
+
+    fn read_composition(&mut self) -> Result<Composition, String> {
+        let invalid = || "Camera returned an invalid composition setting".to_string();
+        let face = self.read_setting(vendor::SETTING_FACE_FRAMING)?;
+        let x = self.read_setting(vendor::SETTING_COMPOSITION_X)?;
+        let y = self.read_setting(vendor::SETTING_COMPOSITION_Y)?;
+        Ok(Composition {
+            x: vendor::read_composition(&x).ok_or_else(invalid)?,
+            y: vendor::read_composition(&y).ok_or_else(invalid)?,
+            face_framing: vendor::read_face_framing(&face).ok_or_else(invalid)?,
         })
     }
 
@@ -369,6 +419,56 @@ impl<T: Transport> Channel<T> {
                 self.send(vendor::hand(hand))?;
                 shared.status().hand = Some(hand);
             }
+            GimbalCommand::SelectPoint { x, y } => {
+                self.send(vendor::select_point(x, y))?;
+                // The official app showed Single Mode after a double-click.
+                let mut status = shared.status();
+                status.ai_mode = Some(AiMode::Human);
+                status.tracking_mode = Some(TrackingMode::Single);
+                status.object_framing = None;
+            }
+            GimbalCommand::SelectObject(target) => {
+                self.send(vendor::select_object(target))?;
+                let mut status = shared.status();
+                status.ai_mode = Some(AiMode::Human);
+                status.tracking_mode = None;
+                status.object_framing = Some(ObjectFraming::Normal);
+                *zoom_refresh = follow_zoom();
+            }
+            GimbalCommand::CancelTarget => {
+                self.send(vendor::cancel_target())?;
+                let mut status = shared.status();
+                status.ai_mode = Some(AiMode::Off);
+                status.tracking_mode = None;
+                status.object_framing = None;
+            }
+            GimbalCommand::SetObjectFraming(framing) => {
+                self.send(vendor::object_framing(framing))?;
+                shared.status().object_framing = Some(framing);
+                *zoom_refresh = follow_zoom();
+            }
+            GimbalCommand::ReadComposition => {
+                let composition = self.read_composition();
+                shared.status().composition = composition.as_ref().ok().copied();
+                composition?;
+            }
+            GimbalCommand::SetComposition { x, y } => {
+                for message in vendor::composition(x, y) {
+                    self.send(message)?;
+                }
+                let mut status = shared.status();
+                let composition = status.composition.get_or_insert_default();
+                composition.x = super::clamp_composition(x);
+                composition.y = super::clamp_composition(y);
+            }
+            GimbalCommand::SetFaceFraming(on) => {
+                self.send(vendor::face_framing(on))?;
+                shared
+                    .status()
+                    .composition
+                    .get_or_insert_default()
+                    .face_framing = on;
+            }
             GimbalCommand::OpenHandRange => self.open_hand_range(shared)?,
             GimbalCommand::UpdateHandRange(field) => self.update_hand_range(shared, field)?,
             GimbalCommand::ResetHandRange { limits } => Self::reset_hand_range(shared, limits),
@@ -442,7 +542,33 @@ fn follow_zoom() -> ZoomRefresh {
 /// Carries out vendor commands and polls the camera's state. Every vendor
 /// write and read waits for the camera, so this runs on its own thread and
 /// the frame loop never waits on it. Returns when `commands` disconnects.
+/// The tracked target's box is read from the camera's serial port on one
+/// more thread; `device_id` identifies the camera for it.
 pub(super) fn control_loop(
+    xu: Channel<impl Transport>,
+    commands: &Receiver,
+    shared: &Shared,
+    repaint: &(dyn Fn() + Send + Sync),
+    zoom_refresh: ZoomRefresh,
+    device_id: &str,
+) {
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let stop = &stop;
+        let started = std::thread::Builder::new()
+            .name("camera-target".into())
+            .spawn_scoped(scope, move || {
+                serial::target_stream(device_id, shared, repaint, stop)
+            });
+        if started.is_err() {
+            shared.status().error = Some("Could not start the tracking box reader".into());
+        }
+        commands_loop(xu, commands, shared, repaint, zoom_refresh);
+        stop.store(true, Ordering::Relaxed);
+    });
+}
+
+fn commands_loop(
     mut xu: Channel<impl Transport>,
     commands: &Receiver,
     shared: &Shared,
@@ -455,6 +581,9 @@ pub(super) fn control_loop(
     let mut preset_retries = 0;
     let mut dragging = false;
     let mut stopped = false;
+    // The tracking state last given to the target report; `None` until set
+    // and after a wake.
+    let mut report: Option<bool> = None;
     loop {
         let mut wake = sleep_polled + Duration::from_secs(1);
         if let Some((next, _)) = zoom_refresh {
@@ -500,6 +629,10 @@ pub(super) fn control_loop(
                             | GimbalCommand::SetAutoZoom(_)
                             | GimbalCommand::SetAiMode(_)
                             | GimbalCommand::SetVoiceRange(_)
+                            | GimbalCommand::SelectPoint { .. }
+                            | GimbalCommand::SelectObject(_)
+                            | GimbalCommand::CancelTarget
+                            | GimbalCommand::SetObjectFraming(_)
                     ) {
                         tracking_sent = Some(Instant::now());
                     }
@@ -522,7 +655,12 @@ pub(super) fn control_loop(
                 && tracking_sent.is_none_or(|sent| sent.elapsed() >= TRACKING_SETTLE)
             {
                 let mut status = shared.status();
-                let before = (status.ai_mode, status.auto_zoom, status.voice_range);
+                let before = (
+                    status.ai_mode,
+                    status.auto_zoom,
+                    status.voice_range,
+                    status.object_framing,
+                );
                 // Unknown values (such as the switching value 6) keep the old state.
                 status.ai_mode = view.ai_mode.or(status.ai_mode);
                 status.auto_zoom = view.auto_zoom.or(status.auto_zoom);
@@ -531,7 +669,19 @@ pub(super) fn control_loop(
                 if view.ai_mode.is_some_and(|mode| mode != AiMode::Human) {
                     status.tracking_mode = None;
                 }
-                let changed = before != (status.ai_mode, status.auto_zoom, status.voice_range);
+                if view.ai_mode.is_some() {
+                    status.object_framing = view.object_framing;
+                }
+                if status.object_framing.is_some() {
+                    status.tracking_mode = None;
+                }
+                let changed = before
+                    != (
+                        status.ai_mode,
+                        status.auto_zoom,
+                        status.voice_range,
+                        status.object_framing,
+                    );
                 drop(status);
                 if changed {
                     repaint();
@@ -542,6 +692,7 @@ pub(super) fn control_loop(
                 && shared.set_sleeping(sleeping)
             {
                 preset_retries = 0;
+                report = None;
                 zoom_refresh = if sleeping {
                     None
                 } else {
@@ -582,6 +733,14 @@ pub(super) fn control_loop(
                 repaint();
             }
         }
+        let (tracking, sleeping) = {
+            let status = shared.status();
+            (status.ai_mode == Some(AiMode::Human), status.sleeping)
+        };
+        if !sleeping && report != Some(tracking) {
+            xu.target_report(tracking, report.is_none());
+            report = Some(tracking);
+        }
         if let Some((next, until)) = zoom_refresh.filter(|(next, _)| Instant::now() >= *next) {
             zoom_refresh = (next < until).then(|| {
                 let again = Instant::now() + ZOOM_FOLLOW_EVERY;
@@ -613,6 +772,7 @@ pub(super) struct View {
     pub ai_mode: Option<AiMode>,
     pub auto_zoom: Option<AutoZoom>,
     pub voice_range: Option<VoiceRange>,
+    pub object_framing: Option<ObjectFraming>,
 }
 
 /// Finds the control interface and unit by GUID in a USB descriptor stream.

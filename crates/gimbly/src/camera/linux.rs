@@ -64,7 +64,7 @@ pub fn list_devices() -> Result<Vec<DeviceInfo>, String> {
     Ok(list)
 }
 
-fn usb_parent(path: &Path) -> Option<PathBuf> {
+pub(super) fn usb_parent(path: &Path) -> Option<PathBuf> {
     let sys = Path::new("/sys/class/video4linux")
         .join(path.file_name()?)
         .join("device");
@@ -422,7 +422,7 @@ pub fn run_capture(
                     Ok(mut xu) => {
                         let refresh = xu.initialize(shared);
                         repaint();
-                        control::control_loop(xu, &rx, shared, repaint, refresh);
+                        control::control_loop(xu, &rx, shared, repaint, refresh, &device.id);
                         return;
                     }
                     Err(e) => {

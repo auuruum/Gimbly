@@ -34,6 +34,11 @@ fn usb_id(id: &str) -> Option<(u32, u16, u16)> {
     Some(((id >> 32) as u32, (id >> 16) as u16, id as u16))
 }
 
+/// The USB location ID in an AVFoundation device ID.
+pub(super) fn usb_location(id: &str) -> Option<u32> {
+    usb_id(id).map(|(location, _, _)| location)
+}
+
 pub fn list_devices() -> Result<Vec<DeviceInfo>, String> {
     autoreleasepool(|_| {
         let usb = nusb::list_devices()
@@ -574,7 +579,7 @@ fn capture(info: &DeviceInfo, config: CaptureConfig, worker: &Worker) -> Result<
                     Ok(mut xu) => {
                         let refresh = xu.initialize(shared);
                         repaint();
-                        control::control_loop(xu, &control_rx, shared, repaint, refresh);
+                        control::control_loop(xu, &control_rx, shared, repaint, refresh, &info.id);
                         return;
                     }
                     Err(e) => {

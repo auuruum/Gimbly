@@ -233,6 +233,9 @@ pub struct SessionStatus {
     /// The box of the tracked target, streamed by the camera; `None` when
     /// nothing is tracked or the stream is unavailable.
     pub target: Option<TargetBox>,
+    /// The camera's serial port, which carries [`Self::target`], could not
+    /// be opened for lack of permission (Linux). Cleared once it opens.
+    pub serial_denied: Option<SerialDenied>,
     /// The AI Composition settings, read when the composition mode opens.
     pub composition: Option<Composition>,
     /// Stored preset positions, in the camera's order. `None` until read.
@@ -402,6 +405,13 @@ impl TrackingSpeed {
 pub enum ObjectFraming {
     Normal,
     CloseUp,
+}
+
+/// A serial port the user may not open: its path and owning group.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SerialDenied {
+    pub path: String,
+    pub group: Option<String>,
 }
 
 /// A box in fractions of the camera picture, from its top left corner,

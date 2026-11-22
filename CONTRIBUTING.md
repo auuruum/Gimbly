@@ -56,6 +56,22 @@ disabled in native Wayland windows.
 [GlobalShortcuts portal](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.GlobalShortcuts.html) ·
 [Hyprland global hotkeys](https://wiki.hypr.land/configuring/core/binds/globals/)
 
+The camera reports the tracked person's or object's box on its USB serial
+port (`/dev/ttyACM*`). Most distributions let only the `uucp` or `dialout`
+group open it, so without access the preview shows no tracking box. Install
+Gimbly's udev rule to give the signed-in user access, then unplug and
+replug the camera or run the trigger command:
+
+```bash
+sudo install -Dm644 packaging/linux/70-gimbly.rules /etc/udev/rules.d/70-gimbly.rules
+```
+
+```bash
+sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=tty
+```
+
+Adding your user to the port's group and signing in again also works.
+
 For Virtual Camera, install `v4l2loopback` for the running kernel if your
 distribution does not include it. Click **Virtual Camera** in Gimbly, then
 **Create virtual camera…** if the setup dialog opens. Approve the system

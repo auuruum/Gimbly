@@ -50,8 +50,9 @@ Linux and a signed Core Media I/O system extension on macOS.
 
 On Linux, click **Virtual Camera** and approve the first-time driver setup
 when prompted. Once the icon lights up, choose **Gimbly Virtual Camera** in
-your video app. See [Linux setup](CONTRIBUTING.md#linux) for the driver and
-terminal instructions.
+your video app. See [Linux setup](CONTRIBUTING.md#linux-wayland-and-x11) for the driver and
+terminal instructions. To see the tracking box in the preview, install the
+udev rule described there so Gimbly can read the camera's serial port.
 
 Live preview, rotate and mirror, snapshots, camera controls and Software
 Settings share the same app interface. AI tracking, image settings and

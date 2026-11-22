@@ -1,0 +1,8 @@
+# Gimbly reads the tracked target's box from the serial port (ttyACM) of
+# cameras with USB vendor ID 3564. Distributions give these ports to a group
+# such as uucp or dialout; the uaccess tag lets the signed-in user open the
+# port without joining that group. ModemManager is told not to probe it.
+#
+# Install: sudo install -Dm644 70-gimbly.rules /etc/udev/rules.d/70-gimbly.rules
+# then:    sudo udevadm control --reload && sudo udevadm trigger --subsystem-match=tty
+SUBSYSTEM=="tty", KERNEL=="ttyACM[0-9]*", ATTRS{idVendor}=="3564", TAG+="uaccess", ENV{ID_MM_DEVICE_IGNORE}="1"

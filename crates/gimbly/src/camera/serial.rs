@@ -123,6 +123,24 @@ fn set_target(shared: &Shared, repaint: &(dyn Fn() + Send + Sync), target: Optio
     }
 }
 
+/// The name of group `gid` in `/etc/group` text (`name:x:gid:members`).
+/// Only plain names are returned, as they end up in a message.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn group_name(groups: &str, gid: u32) -> Option<String> {
+    groups.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        let name = fields.next()?;
+        let id: u32 = fields.nth(1)?.trim().parse().ok()?;
+        (id == gid
+            && !name.is_empty()
+            && name.len() <= 64
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+        .then(|| name.to_owned())
+    })
+}
+
 #[cfg(windows)]
 mod platform {
     use super::READ_TIMEOUT;
@@ -359,9 +377,18 @@ mod platform {
 
     #[cfg(target_os = "linux")]
     pub(super) fn permission_hint(path: &str) -> String {
+        use std::os::unix::fs::MetadataExt;
+        let group = std::fs::metadata(path)
+            .ok()
+            .and_then(|meta| {
+                let groups = std::fs::read_to_string("/etc/group").ok()?;
+                super::group_name(&groups, meta.gid())
+            })
+            .unwrap_or_else(|| "that owns it (usually uucp or dialout)".into());
         format!(
-            "Gimbly cannot read the camera's serial port {path}, so the tracking box is hidden. \
-             Add your user to the group that owns it (usually dialout or uucp) and sign in again."
+            "Gimbly cannot open the camera's serial port {path}, so the tracking box is hidden. \
+             Install Gimbly's udev rule (packaging/linux/70-gimbly.rules, see the Linux setup), \
+             or add your user to the group {group} and sign in again."
         )
     }
 
@@ -504,6 +531,28 @@ mod platform {
         pub(super) fn write(&mut self, _: &[u8]) -> io::Result<()> {
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::group_name;
+
+    #[test]
+    fn finds_the_port_group() {
+        let groups = "root:x:0:root\nuucp:x:986:\ndialout:x:20:aurum\n";
+        assert_eq!(group_name(groups, 986).as_deref(), Some("uucp"));
+        assert_eq!(group_name(groups, 20).as_deref(), Some("dialout"));
+        assert_eq!(group_name(groups, 7), None);
+    }
+
+    #[test]
+    fn ignores_damaged_and_odd_lines() {
+        assert_eq!(group_name("", 0), None);
+        assert_eq!(group_name("garbage\n::\nname:x\n", 0), None);
+        assert_eq!(group_name("bad name:x:5:\n", 5), None);
+        assert_eq!(group_name(":x:5:\n", 5), None);
+        assert_eq!(group_name("a:x:99999999999:\n", 0), None);
     }
 }
 

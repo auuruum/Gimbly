@@ -23,6 +23,7 @@ code builds for that system but was not run there.
 | OBSBOT Tiny 3 Lite | `3564:ff04` | not reread | 6.5.11.1 | Windows 10 Pro 19045 | Tracking Speed (Slow, Standard, Fast) | probe readback across processes, OBSBOT Center showed the value Gimbly wrote, buttons in the running app | 2026-11-21 |
 | OBSBOT Tiny 3 Lite | `3564:ff04` | not reread | 6.5.11.1 | Windows 10 Pro 19045 | Human Tracking Single/Group Mode and Auto Zoom | buttons in the running app with a person in view; camera status agreed with each write | 2026-11-21 |
 | OBSBOT Tiny 3 Lite | `3564:ff04` | not reread | 6.5.11.1 | Windows 10 Pro 19045 | Preview Object Tracking (box, Normal, Close-up, stop), double-click target and cancel, AI Composition lines with Face Framing, tracked-target box from the CDC port | running app with a person in view; camera status, USB capture and the preview agreed with each action | 2026-11-22 |
+| OBSBOT Tiny 3 Lite | `3564:ff04` | 0x0510 | not reread | CachyOS Linux 7.3.5, native Wayland | Tracked-target box from `/dev/ttyACM0` in the preview (Human Tracking Single Mode, Object Tracking) | owner saw both boxes in the running app with `DISPLAY` unset. Needed `packaging/linux/70-gimbly.rules` (uaccess); without it the `root:uucp 0660` port gave permission denied and no box | 2026-11-22 |
 
 The 2026-11-08 Windows rows describe the earlier Windows build. The
 cross-platform change was checked by the compiler and Clippy for

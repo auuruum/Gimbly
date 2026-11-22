@@ -262,6 +262,21 @@ and in a USB capture.
 - First-run hint showed once and went away on click.
 
 Not checked: macOS and Linux (native Wayland and X11) builds were only
-compile-checked with Clippy; the Linux and macOS serial port code and the
-macOS port naming are untested. The virtual camera was not running during
+compile-checked with Clippy; the macOS serial port code and port naming
+are untested. The virtual camera was not running during
 these steps.
+
+## Linux result (Gimbly, 2026-11-22)
+
+CachyOS Linux 7.3.5, native Wayland (`DISPLAY` unset), same camera.
+
+- **Observed:** `/dev/ttyACM0` was `root:uucp`, mode `0660`, with no ACL
+  for the signed-in user. Gimbly found the port under the camera's USB
+  interface `:1.4` but opening it failed with permission denied, and the
+  preview drew no box.
+- **Observed:** with `packaging/linux/70-gimbly.rules` installed (udev
+  `uaccess` tag), the port got a user ACL, Gimbly held it open, and the
+  owner saw the box in Human Tracking Single Mode and around a selected
+  object. Gimbly only puts the port in raw mode (`cfmakeraw`) on Linux,
+  and that was enough.
+- **Unknown:** native X11 was not checked.

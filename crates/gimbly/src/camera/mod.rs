@@ -5,6 +5,7 @@
 
 mod control;
 mod frames;
+mod models;
 mod preview;
 mod queue;
 mod serial;
@@ -35,6 +36,7 @@ mod unsupported;
 use self::unsupported as backend;
 
 pub use gimbly_vcam_shm::Transform;
+pub use models::{Feature, Model};
 pub use preview::{PreviewFrame, YuvRange};
 
 use queue::{Receiver, Sender, channel};
@@ -57,6 +59,12 @@ pub struct DeviceInfo {
 impl DeviceInfo {
     pub fn is_obsbot(&self) -> bool {
         self.usb_vendor_id == Some(OBSBOT_USB_VENDOR_ID)
+    }
+
+    /// The model when Gimbly drives this camera's vendor controls; other
+    /// cameras get video only.
+    pub fn model(&self) -> Option<&'static Model> {
+        Model::find(self.usb_product_id?).filter(|_| self.is_obsbot())
     }
 }
 
@@ -198,6 +206,8 @@ pub struct SessionStatus {
     pub measured_fps: f32,
     pub zoom_range: Option<ZoomRange>,
     pub zoom: Option<i32>,
+    /// The OBSBOT model Gimbly drives; `None` for other cameras.
+    pub model: Option<&'static Model>,
     /// The camera accepts OBSBOT vendor commands such as sleep.
     pub vendor_control: bool,
     /// An OBSBOT camera whose vendor commands are not verified yet.
@@ -671,6 +681,7 @@ impl Session {
         repaint: impl Fn() + Send + Sync + 'static,
     ) -> Self {
         let shared = Arc::new(Shared::default());
+        shared.status().model = device.model();
         let (tx, rx) = channel();
         let stop = Arc::new(AtomicBool::new(false));
         if virtual_camera {
@@ -786,6 +797,30 @@ pub fn parse_usb_ids(path: &str) -> (Option<u16>, Option<u16>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vendor_controls_only_for_listed_obsbot_models() {
+        let device = |vendor, product| DeviceInfo {
+            name: String::new(),
+            id: String::new(),
+            usb_vendor_id: vendor,
+            usb_product_id: product,
+        };
+        assert_eq!(
+            device(Some(OBSBOT_USB_VENDOR_ID), Some(0xff04))
+                .model()
+                .map(|m| m.name),
+            Some("Tiny 3 Lite")
+        );
+        // Another OBSBOT model, a non-OBSBOT camera with the same product ID,
+        // and a camera without USB IDs get video only.
+        assert_eq!(
+            device(Some(OBSBOT_USB_VENDOR_ID), Some(0x0001)).model(),
+            None
+        );
+        assert_eq!(device(Some(0x046d), Some(0xff04)).model(), None);
+        assert_eq!(device(None, None).model(), None);
+    }
 
     #[test]
     fn return_outside_the_range_widens_only_the_crossed_limits() {

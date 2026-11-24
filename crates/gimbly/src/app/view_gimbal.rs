@@ -6,8 +6,8 @@
 
 use super::{GimblyApp, NOT_YET};
 use crate::camera::{
-    AiMode, Command, Fov, GimbalCommand, Hand, HandRangeField, PRESET_NAME_MAX, PRESET_SLOTS,
-    Preset, SessionState, VoiceRange, ZOOM_RATIO_MAX,
+    AiMode, Command, Feature, Fov, GimbalCommand, Hand, HandRangeField, PRESET_NAME_MAX,
+    PRESET_SLOTS, Preset, SessionState, VoiceRange, ZOOM_RATIO_MAX,
 };
 use crate::gimbal::{self, PanelPull, SpeedMode};
 use crate::joystick::{self, Drag, DragState};
@@ -140,17 +140,41 @@ impl GimblyApp {
         self.status.vendor_control && self.status.state == SessionState::Streaming
     }
 
-    pub(super) fn gimbal_tip(&self) -> &'static str {
-        if self.status.vendor_control_untested {
-            "Gimbal control is not verified on this camera model yet"
-        } else if self.status.state == SessionState::Streaming {
-            "This camera has no gimbal Gimbly can drive"
-        } else {
-            "Connect an OBSBOT camera first"
+    /// The camera is ready and `feature` was checked on its model.
+    pub(super) fn ready(&self, feature: Feature) -> bool {
+        self.gimbal_ready() && self.supports(feature)
+    }
+
+    pub(super) fn supports(&self, feature: Feature) -> bool {
+        self.status.model.is_some_and(|m| m.supports(feature))
+    }
+
+    /// Why `feature` is unavailable, for its disabled controls.
+    pub(super) fn gimbal_tip(&self, feature: Feature) -> String {
+        match self.status.model {
+            _ if self.status.vendor_control_untested => {
+                "Gimbal control is not verified on this camera model yet".into()
+            }
+            Some(model) if !model.supports(feature) => {
+                format!("{}: not verified on the {} yet", feature.name(), model.name)
+            }
+            _ if self.status.state == SessionState::Streaming => {
+                "This camera has no gimbal Gimbly can drive".into()
+            }
+            _ => "Connect an OBSBOT camera first".into(),
         }
     }
 
+    /// Sends `command` if its feature was checked on this camera's model;
+    /// hotkeys and the preview come through here too.
     pub(super) fn gimbal(&mut self, command: GimbalCommand) {
+        if let Some(model) = self.status.model
+            && !model.allows(&command)
+        {
+            let feature = command.features().first().map_or("This", |f| f.name());
+            self.notify(format!("{feature}: not verified on the {} yet", model.name));
+            return;
+        }
         if let Some(session) = &self.session {
             session.send(Command::Gimbal(command));
         }
@@ -177,8 +201,10 @@ impl GimblyApp {
             bottom: 20,
         };
         let mode = self.status.ai_mode;
-        let ready = self.gimbal_ready() && mode.is_some();
-        let tip = self.gimbal_tip();
+        let ready = self.gimbal_ready()
+            && mode.is_some()
+            && (self.supports(Feature::VoiceTracking) || self.supports(Feature::HandTracking));
+        let tip = self.gimbal_tip(Feature::VoiceTracking);
         let (voice_range, hand) = (self.status.voice_range, self.status.hand);
         let mut picked = None;
         let mut open_range = false;
@@ -189,7 +215,7 @@ impl GimblyApp {
                 let row = ui.add_enabled_ui(ready, |ui| {
                     pill_row(ui, &["Voice Tracking", "Hand Tracking"], selected, 16.0)
                 });
-                row.response.on_disabled_hover_text(tip);
+                row.response.on_disabled_hover_text(&tip);
                 if let Some(i) = row.inner {
                     let clicked = modes[i];
                     let next = if mode == Some(clicked) {
@@ -428,7 +454,7 @@ impl GimblyApp {
             top: 20,
             bottom: 20,
         };
-        let ready = self.gimbal_ready() && self.status.presets.is_some();
+        let ready = self.ready(Feature::Presets) && self.status.presets.is_some();
         let presets = self.status.presets.clone().unwrap_or_default();
         band(ui, SECTION, margin, |ui| {
             let gap = 16.0;
@@ -443,7 +469,7 @@ impl GimblyApp {
                             None if slot == presets.len() => {
                                 let add = pill(ui, "Add", false, vec2(width, BUTTON_HEIGHT))
                                     .on_hover_text("Add preset position")
-                                    .on_disabled_hover_text(self.gimbal_tip());
+                                    .on_disabled_hover_text(self.gimbal_tip(Feature::Presets));
                                 if add.clicked() {
                                     self.gimbal(GimbalCommand::AddPreset);
                                 }
@@ -645,9 +671,9 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
     // ---- view and gimbal --------------------------------------------------
 
     pub(super) fn view_gimbal_section(&mut self, ui: &mut Ui) {
-        let ready = self.gimbal_ready();
+        let ready = self.ready(Feature::Gimbal);
         let mut mode = self.gimbal_ui.mode;
-        let tip = self.gimbal_tip();
+        let tip = self.gimbal_tip(Feature::Gimbal);
         self.gimbal_ui.view_open = header(
             ui,
             "View and Gimbal",
@@ -661,7 +687,7 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
                 };
                 if small_button(ui, label, vec2(74.0, 25.0))
                     .on_hover_text("Joystick speed: Coarse moves at normal speed, Fine at a third of it for precise framing")
-                    .on_disabled_hover_text(tip)
+                    .on_disabled_hover_text(&tip)
                     .clicked()
                 {
                     mode = other;
@@ -678,8 +704,10 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
     /// The View and Gimbal body: joystick, zoom, field of view and the Reset
     /// button, which sends `reset`. The Hand Tracking range panel reuses it.
     fn gimbal_controls(&mut self, ui: &mut Ui, reset: GimbalCommand) {
-        let ready = self.gimbal_ready();
-        let tip = self.gimbal_tip();
+        let ready = self.ready(Feature::Gimbal);
+        let tip = self.gimbal_tip(Feature::Gimbal);
+        let fov_ready = self.ready(Feature::FieldOfView);
+        let fov_tip = self.gimbal_tip(Feature::FieldOfView);
         let width = ui.available_width();
         let height = 387.0;
         let (area, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
@@ -732,7 +760,7 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
 
         let pad = Rect::from_center_size(pos2(joystick_x, top + 108.0), joystick::PANEL_SIZE);
         let (response, drag) = joystick::panel(ui, pad, &mut self.gimbal_ui.joystick, ready);
-        response.on_disabled_hover_text(tip);
+        response.on_disabled_hover_text(&tip);
         self.joystick_drag(drag, false);
         if self.gimbal_ui.joystick.dragging() {
             ui.ctx().request_repaint_after(joystick::REPEAT_EVERY);
@@ -752,15 +780,16 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
             Layout::left_to_right(Align::Min),
             "fov",
             |ui| {
-                ui.add_enabled_ui(ready, |ui| {
+                let row = ui.add_enabled_ui(fov_ready, |ui| {
                     pill_row(
                         ui,
                         &["Wide", "Medium", "Narrow"],
                         current.and_then(|f| Fov::ALL.iter().position(|&x| x == f)),
                         16.0,
                     )
-                })
-                .inner
+                });
+                row.response.on_disabled_hover_text(&fov_tip);
+                row.inner
             },
         );
         if let Some(i) = picked {
@@ -782,7 +811,7 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
             ui.add_enabled_ui(ready, |ui| {
                 pill(ui, "Reset", false, vec2(320.0, BUTTON_HEIGHT))
                     .on_hover_text(hover)
-                    .on_disabled_hover_text(tip)
+                    .on_disabled_hover_text(&tip)
             })
             .inner
         });
@@ -867,9 +896,14 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
 
     // ---- zoom ---------------------------------------------------------------
 
+    /// Zoom goes through vendor control; otherwise through the UVC control.
+    fn vendor_zoom(&self) -> bool {
+        self.status.vendor_control && self.supports(Feature::Zoom)
+    }
+
     /// Ratio range the zoom controls cover for the current camera.
     fn zoom_ratio_max(&self) -> Option<f32> {
-        if self.status.vendor_control {
+        if self.vendor_zoom() {
             Some(ZOOM_RATIO_MAX)
         } else {
             self.status
@@ -887,7 +921,7 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
             .zoom_target
             .filter(|(_, since)| since.elapsed() < ZOOM_HOLD)
             .map(|(ratio, _)| ratio);
-        held.or(if self.status.vendor_control {
+        held.or(if self.vendor_zoom() {
             self.status.zoom_ratio
         } else {
             let range = self.status.zoom_range.filter(|r| r.min > 0)?;
@@ -908,7 +942,7 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
             return;
         }
         self.gimbal_ui.zoom_target = Some((ratio, Instant::now()));
-        if self.status.vendor_control {
+        if self.vendor_zoom() {
             self.gimbal(GimbalCommand::ZoomRatio(ratio));
         } else if let Some(range) = self.status.zoom_range {
             let value = (ratio * range.min as f32).round() as i32;

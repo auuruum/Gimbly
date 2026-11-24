@@ -1,7 +1,8 @@
 //! OBSBOT vendor messages, carried in the camera's UVC extension unit.
 //!
 //! Learned from USB captures of the official app talking to a Tiny 3 Lite;
-//! see `docs/clean-room/2026-11-08-vendor-messages.md`. Every message is
+//! see `docs/clean-room/2026-11-08-vendor-messages.md`, and
+//! `docs/protocol.md` for every message by feature. Every message is
 //! written with SET_CUR to [`SELECTOR_COMMAND`] as one [`MESSAGE_LEN`]-byte
 //! block; a reply, when the camera sends one, is read back with GET_CUR on
 //! the same selector.

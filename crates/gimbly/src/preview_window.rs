@@ -44,6 +44,10 @@ pub struct PreviewInput<'a> {
     pub toast: Option<&'a str>,
     /// Dragging the picture turns the gimbal.
     pub gimbal: bool,
+    /// The Object Tracking button and double-click tracking work.
+    pub object_tracking: bool,
+    /// The AI Composition lines button works.
+    pub composition_lines: bool,
     /// Human Tracking (or object tracking) runs.
     pub tracking: bool,
     /// The tracked target's box, when the camera streams it.
@@ -399,7 +403,7 @@ impl PreviewWindow {
                 }
                 let selecting = matches!(self.tool, Tool::Select(_));
                 let clicked = ui
-                    .add_enabled_ui(input.gimbal, |ui| {
+                    .add_enabled_ui(input.object_tracking, |ui| {
                         tracking::object_button(ui, BUTTON, selecting)
                             .on_hover_text("Object Tracking")
                             .on_disabled_hover_text("Object Tracking needs an OBSBOT camera")
@@ -414,7 +418,7 @@ impl PreviewWindow {
                     };
                 }
                 let clicked = ui
-                    .add_enabled_ui(input.gimbal, |ui| {
+                    .add_enabled_ui(input.composition_lines, |ui| {
                         icon_button(ui, icon::GRID_FOUR, BUTTON, GLYPH, false)
                             .on_hover_text("AI Composition lines")
                             .on_disabled_hover_text("AI Composition lines need an OBSBOT camera")
@@ -680,8 +684,10 @@ impl PreviewWindow {
         if matches!(self.tool, Tool::Compose(_)) && !input.tracking {
             self.tool = Tool::None;
         }
-        if !input.gimbal {
-            self.tool = Tool::None;
+        match self.tool {
+            Tool::Select(_) if !input.object_tracking => self.tool = Tool::None,
+            Tool::Compose(_) if !input.composition_lines => self.tool = Tool::None,
+            _ => {}
         }
         if let Some(target) = input.target
             && !matches!(self.tool, Tool::Select(_))
@@ -714,7 +720,7 @@ impl PreviewWindow {
                 }
             }
         }
-        if free && input.gimbal {
+        if free && input.object_tracking {
             let double = ui.input(|i| {
                 i.pointer
                     .button_double_clicked(egui::PointerButton::Primary)
@@ -848,6 +854,8 @@ mod tests {
                     transform: Default::default(),
                     toast: None,
                     gimbal: false,
+                    object_tracking: false,
+                    composition_lines: false,
                     tracking: false,
                     target: None,
                     composition: None,

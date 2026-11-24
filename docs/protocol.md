@@ -1,0 +1,223 @@
+# Vendor protocol reference
+
+One table of every vendor message Gimbly sends or reads, grouped by
+feature. The features match `Feature` in
+[models.rs](../crates/gimbly/src/camera/models.rs). Evidence and the
+observed / inferred / unknown split are in the linked
+[clean-room notes](clean-room/README.md). The code that builds and parses
+these messages is [vendor.rs](../crates/gimbly/src/camera/vendor.rs).
+
+Everything here was observed on the **Tiny 3 Lite** (`3564:ff04`). When a
+model differs, add a line under the feature that names the model and
+what it sends instead.
+
+## Transport
+
+The camera's UVC extension unit, GUID
+`{9a1e7291-6843-4683-6d92-39bc7906ee49}` (unit 2 on the Tiny 3 Lite).
+Every block is 60 bytes.
+
+| Selector | Use |
+| --- | --- |
+| 2 | Framed messages (below): `SET_CUR` sends one, `GET_CUR` reads the reply |
+| 6 | Plain blocks: `SET_CUR` for view and AI settings, `GET_CUR` for the status block |
+
+Framed message on selector 2 (little-endian):
+
+| Bytes | Field |
+| --- | --- |
+| 0 | `aa` |
+| 1 | flags: `01` always, `04` no reply wanted, `08` reply, `20` data, `40` protobuf data |
+| 2 | sequence number |
+| 3 | channel (Gimbly uses 1) |
+| 4-5 | header length, `0c 00` |
+| 6-7 | CRC-16 of bytes 0-11 with this field zero |
+| 8 | source: `0a` host |
+| 9 | destination: `04` gimbal, `02` camera |
+| 10-11 | command |
+| 12-13 | data length |
+| 14-15 | CRC-16 of the length, two zero bytes and the data |
+| 16.. | data, then zero padding |
+
+CRC-16: reflected polynomial `0x8005` (`0xa001`), initial value and final
+XOR `0xffff`. A read request is a message without flag `04`; the camera
+answers with the same sequence, channel and command and flag `08`.
+Source: [vendor messages](clean-room/2026-11-08-vendor-messages.md).
+
+In the tables, `44 02 → 04` means command `44 02` to destination `04` on
+selector 2. `sel 6: 04 01 v` means a selector 6 block starting with those
+bytes. `u32`, `i16` and `f32` are little-endian.
+
+## Status block
+
+`GET_CUR` on selector 6, read about once a second.
+
+| Offset | Meaning | Values |
+| --- | --- | --- |
+| 0-1 | block marker | `2e 00` |
+| 2 | asleep | 0 awake, 1 asleep |
+| 24 | AI mode | 0 off, 2 human, 3 hand, 7 voice, 6 switching (under 2 s) |
+| 28 | object framing, while AI mode is 2 | `14` Normal, `17` Close-up |
+| 42 | Auto Zoom | as in [Auto Zoom](#auto-zoom) |
+| 46 | voice bits | bit 1 Forward range, bit 0 Sound Source |
+
+## Gimbal
+
+| Action | Message | Data |
+| --- | --- | --- |
+| Start / end manual movement | `44 02 → 04` | u8: 0 start, 1 end |
+| Speed | `84 64 → 04` | 3 × f32: roll 0, pitch, yaw |
+| Turn to angles | `44 64 → 04` | 3 × f32: roll, pitch, yaw in degrees; -1000 keeps that axis |
+| Reset | `04 39 → 04` | none |
+| Read position | `04 66 → 04` | reply 24 bytes: pitch i16 at 8, yaw i16 at 10, tenths of a degree |
+
+Notes: [joystick](clean-room/2026-11-08-gimbal-joystick.md),
+[reset](clean-room/2026-11-08-gimbal-reset.md).
+
+## Zoom
+
+| Action | Message | Data |
+| --- | --- | --- |
+| Set ratio | `42 19 → 02` | u32 8, u32 ratio × 100 (100-400) |
+| Read ratio | `04 68 → 04` | reply f32 ratio |
+
+Note: [view and zoom](clean-room/2026-11-08-view-zoom.md).
+
+## Field of view
+
+| Action | Message | Data |
+| --- | --- | --- |
+| Wide / Medium / Narrow | `sel 6: 04 01 v` | v: 0 Wide, 1 Medium, 2 Narrow |
+
+No readback; the camera zooms to the view. Note:
+[view and zoom](clean-room/2026-11-08-view-zoom.md).
+
+## Presets
+
+| Action | Message | Data |
+| --- | --- | --- |
+| List | `04 3d → 04` | reply: one byte per stored slot id |
+| Read name | `c4 3c → 04` | u32 id; reply ASCII name |
+| Read position | `44 3a → 04` | u32 id, `00`; reply 24 bytes: id, yaw i16 at 4, pitch at 6, roll at 8, zoom at 10, hundredths |
+| Store position | `44 39 → 04` | u32 id, i16 yaw, pitch, 0, zoom × 100, -200, -200, 300, 300, 0, 0 |
+| Name | `84 3a → 04` | u32 id, ASCII name |
+| Recall | `c4 39 → 04` | u32 id, 4 × f32 1.0 |
+| Delete | `84 39 → 04` | u32 id |
+
+Note: [presets](clean-room/2026-11-08-presets.md).
+
+## Sleep
+
+| Action | Message | Data |
+| --- | --- | --- |
+| Sleep / wake | `c2 a0 → 02` | u32: 1 sleep, 0 wake |
+| Read | status block offset 2 | |
+
+Note: [sleep and wake](clean-room/2026-11-08-sleep-wake.md).
+
+## Human Tracking
+
+AI blocks on selector 6 are `16 02 sub value`.
+
+| Action | Message | Data |
+| --- | --- | --- |
+| Start | `sel 6: 16 02 02 z`, then `sel 6: 16 02 0e m` | z: Auto Zoom value; m: 0 Single, 1 Group |
+| Stop | `sel 6: 16 02 00 00` | |
+| Read | status block offset 24 | 2 while it runs |
+
+The camera reports the same state for Single and Group. Notes:
+[human tracking](clean-room/2026-11-20-human-tracking.md),
+[group mode](clean-room/2026-11-21-group-mode-auto-zoom.md).
+
+## Auto Zoom
+
+| Action | Message | Data |
+| --- | --- | --- |
+| Select | `sel 6: 16 02 0f z` | z: 0 Off, 1 Full Body, 2 Upper Body, 3 Close-up, 5 Headless, 6 Lower Body |
+| While tracking | also the Start blocks of Human Tracking with the new z | |
+| Read | status block offset 42 | |
+
+Note: [group mode and auto zoom](clean-room/2026-11-21-group-mode-auto-zoom.md).
+
+## Tracking Speed
+
+Gimbal settings are read with `84 54 → 04` (u32 0, u32 key) and written
+with `44 54 → 04` (u32 0, u32 key, value).
+
+| Action | Message | Data |
+| --- | --- | --- |
+| Set | write key 4 = u32 0, then key 5 = u32 speed | speed: 0 Slow, 2 Standard, 3 Fast |
+| Read | read key 5 | reply u32 speed |
+
+The meaning of key 4 is **unknown**; the official app writes it first.
+Note: [tracking speed](clean-room/2026-11-21-tracking-speed.md).
+
+## Sound Source Assisted Tracking
+
+| Action | Message | Data |
+| --- | --- | --- |
+| On / off | `sel 6: 25 01 v` | v: 1 on, 0 off |
+| Read | status block offset 46, bit 0 | |
+
+Note: [sound source tracking](clean-room/2026-11-24-sound-source-tracking.md).
+
+## Object Tracking
+
+| Action | Message | Data |
+| --- | --- | --- |
+| Track the person at a point | `84 06 → 04` | i16 2, 101, 99, -2; f32 x, y, 0, 0 |
+| Track an object box | `84 06 → 04` | i16 3, 2, 0, -2; f32 x0, y0, x1, y1 |
+| Cancel | `84 06 → 04` | i16 -1, -1, 0, -2; f32 0 × 4 |
+| Framing | `c4 06 → 04` | 8 bytes, byte 0: 0 Normal, 3 Close-up |
+| Read framing | status block offset 28 | |
+
+Coordinates are fractions of the picture. The meaning of the i16 values is
+**unknown**; they are copied from the capture.
+
+The tracked target's box arrives on the camera's USB serial port (CDC),
+in the same framed format: keepalive `42 ae → 02` every 500 ms, start
+`42 c4 → 02` once, report settings read `82 ad → 02` and write `c2 ad → 02`
+(protobuf), and the stream itself as `02 ae` (protobuf, box corners in
+fields 6-9). Note: [preview tracking](clean-room/2026-11-22-preview-tracking.md).
+
+## AI Composition
+
+Gimbal settings as in [Tracking Speed](#tracking-speed).
+
+| Action | Message | Data |
+| --- | --- | --- |
+| Face Framing | key `0e` | u8: 1 on, 0 off |
+| Horizontal offset | key `0f` | f32, -0.16 to 0.16 |
+| Vertical offset | key `11` | f32, -0.16 to 0.16 |
+
+Note: [preview tracking](clean-room/2026-11-22-preview-tracking.md).
+
+## Voice Tracking
+
+| Action | Message | Data |
+| --- | --- | --- |
+| Start | `sel 6: 16 02 07 00` | |
+| Stop any AI mode | `sel 6: 16 02 00 00` | |
+| Range | `sel 6: 24 01 v` | v: 0 Omnidirectional, 1 Forward |
+| Read | status block offsets 24 and 46 (bit 1) | |
+
+Note: [AI mode](clean-room/2026-11-22-ai-mode.md).
+
+## Hand Tracking
+
+Hand settings are read with `84 20 → 04` (u32 key) and written with
+`44 20 → 04` (u32 key, value).
+
+| Action | Message | Data |
+| --- | --- | --- |
+| Start | `sel 6: 16 02 03 00` | |
+| Hand | key 4 | u8: 1 left, 0 right |
+| Range limits | keys 0-3 | f32 degrees |
+| Read return position | `04 25 → 04` | reply 24-byte record |
+| Write return position | `c4 24 → 04` | 24-byte record |
+| Enter / leave range editing | `sel 6: 18 01 v`, then `c4 26 → 04` | v: 1 enter, 0 leave; `c4 26` data 0 enter, 1 leave |
+| Reset with zoom (range panel) | `04 39 → 04` | u8 1 |
+| Zoom back to 1.0x on close | `84 68 → 04` | u32 `1e`, f32 1.0 |
+
+Notes: [AI mode](clean-room/2026-11-22-ai-mode.md),
+[range panel](clean-room/2026-11-22-hand-range-panel.md).

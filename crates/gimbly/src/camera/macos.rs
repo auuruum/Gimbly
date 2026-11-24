@@ -316,7 +316,7 @@ impl AbsoluteZoom for Zoom {
 }
 
 pub fn probe_controls(device: &DeviceInfo, script: Vec<String>) -> Result<Vec<String>, String> {
-    if device.is_obsbot() && device.usb_product_id == Some(control::TINY_3_LITE) {
+    if device.is_obsbot() {
         let mut xu = Xu::open(device)?;
         let mut lines = vec![format!(
             "vendor zoom: {:?}, sleeping and tracking: {:?}, presets: {:?}",
@@ -561,7 +561,7 @@ fn capture(info: &DeviceInfo, config: CaptureConfig, worker: &Worker) -> Result<
         session.startRunning();
         (session, output)
     };
-    let tiny = info.is_obsbot() && info.usb_product_id == Some(control::TINY_3_LITE);
+    let model = info.model();
     {
         let mut status = worker.shared.status();
         status.modes = modes.into_iter().map(|m| m.video).collect();
@@ -574,7 +574,7 @@ fn capture(info: &DeviceInfo, config: CaptureConfig, worker: &Worker) -> Result<
         let shared = &*worker.shared;
         let repaint = &*worker.repaint;
         scope.spawn(move || {
-            if tiny {
+            if model.is_some() {
                 match Xu::open(info) {
                     Ok(mut xu) => {
                         let refresh = xu.initialize(shared);
@@ -598,7 +598,7 @@ fn capture(info: &DeviceInfo, config: CaptureConfig, worker: &Worker) -> Result<
                 control::zoom_loop(zoom, &control_rx, shared, repaint);
             }
         });
-        let mut frames = Frames::new(worker, config, tiny);
+        let mut frames = Frames::new(worker, config, model.is_some_and(|m| m.standby_picture));
         let mut last = Instant::now();
         while !worker.should_stop() {
             frames.commands(|command| super::forward_control(worker, Some(&commands), command));

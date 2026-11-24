@@ -173,6 +173,8 @@ camera behavior separately when your change affects them.
 
 Add a row to [docs/devices.md](docs/devices.md) with the camera, firmware,
 OS, what you tried, and the result. Only list what you ran on real hardware.
+To make Gimbly control a model it does not support yet, follow
+[Adding support for another camera](docs/adding-a-camera.md).
 
 ## License
 

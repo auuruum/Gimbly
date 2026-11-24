@@ -5,8 +5,8 @@ use gimbly_vcam_shm::Nv12View;
 /// The camera can keep sending its standby picture after reporting that it
 /// is awake. Decide from the frame itself so the handoff to live video does
 /// not depend on how long waking takes.
-pub(super) fn use_placeholder(sleeping: bool, tiny_3_lite: bool, view: &Nv12View<'_>) -> bool {
-    sleeping || (tiny_3_lite && is_standby_picture(view))
+pub(super) fn use_placeholder(sleeping: bool, standby_picture: bool, view: &Nv12View<'_>) -> bool {
+    sleeping || (standby_picture && is_standby_picture(view))
 }
 
 fn is_standby_picture(view: &Nv12View<'_>) -> bool {

@@ -4,8 +4,8 @@ mod view_gimbal;
 
 use crate::branding::Branding;
 use crate::camera::{
-    self, AiMode, AutoZoom, Command, DeviceInfo, GimbalCommand, ObjectFraming, PreviewFrame,
-    Session, SessionState, SessionStatus, TrackingMode, TrackingSpeed,
+    self, AiMode, AutoZoom, Command, DeviceInfo, Feature, GimbalCommand, ObjectFraming,
+    PreviewFrame, Session, SessionState, SessionStatus, TrackingMode, TrackingSpeed,
 };
 use crate::hotkeys::GlobalHotkeys;
 use crate::os;
@@ -452,16 +452,22 @@ impl GimblyApp {
         }
     }
 
-    fn sleep_tip(&self) -> &'static str {
+    fn sleep_tip(&self) -> String {
         if self.status.vendor_control {
-            "Sleep/Resume"
-        } else if self.status.vendor_control_untested {
+            return if self.supports(Feature::Sleep) {
+                "Sleep/Resume".into()
+            } else {
+                self.gimbal_tip(Feature::Sleep)
+            };
+        }
+        if self.status.vendor_control_untested {
             "Sleep/Resume: not verified on this camera model yet"
         } else if self.status.state == SessionState::Streaming {
             "Sleep/Resume: this camera does not support it"
         } else {
             "Sleep/Resume: connect an OBSBOT camera first"
         }
+        .into()
     }
 
     fn set_zoom(&mut self, value: i32) {
@@ -703,12 +709,15 @@ impl GimblyApp {
         self.sleep_button = slot(1);
         let sleep_tip = self.sleep_tip();
         let clicked = place(ui, slot(1), Layout::default(), ("toolbar", 1), |ui| {
-            ui.add_enabled_ui(self.status.vendor_control, |ui| {
-                icon_button(ui, icon::POWER, 36.0, 20.0, false)
-                    .on_hover_text(sleep_tip)
-                    .on_disabled_hover_text(sleep_tip)
-                    .clicked()
-            })
+            ui.add_enabled_ui(
+                self.status.vendor_control && self.supports(Feature::Sleep),
+                |ui| {
+                    icon_button(ui, icon::POWER, 36.0, 20.0, false)
+                        .on_hover_text(&sleep_tip)
+                        .on_disabled_hover_text(&sleep_tip)
+                        .clicked()
+                },
+            )
             .inner
         });
         if clicked {
@@ -870,7 +879,7 @@ impl GimblyApp {
                 bottom: 26,
             };
             let ai_mode = self.status.ai_mode;
-            let ready = self.gimbal_ready() && ai_mode.is_some();
+            let ready = self.ready(Feature::HumanTracking) && ai_mode.is_some();
             // The camera reports on/off only; highlight the mode Gimbly set.
             let mode = self
                 .status
@@ -879,10 +888,15 @@ impl GimblyApp {
             let hand_running = ai_mode == Some(AiMode::Hand);
             let object = self.status.object_framing;
             let zoom = self.status.auto_zoom;
-            let zoom_ready = self.gimbal_ready() && zoom.is_some();
+            let zoom_ready = self.ready(Feature::AutoZoom) && zoom.is_some();
             let speed = self.status.tracking_speed;
-            let speed_ready = self.gimbal_ready() && speed.is_some();
-            let tip = self.gimbal_tip();
+            let speed_ready = self.ready(Feature::TrackingSpeed) && speed.is_some();
+            let tip = self.gimbal_tip(Feature::HumanTracking);
+            let zoom_tip = self.gimbal_tip(Feature::AutoZoom);
+            let speed_tip = self.gimbal_tip(Feature::TrackingSpeed);
+            let sound_tip = self.gimbal_tip(Feature::SoundSource);
+            let object_ready = self.ready(Feature::ObjectTracking);
+            let object_tip = self.gimbal_tip(Feature::ObjectTracking);
             let mut picked_mode = None;
             let mut picked_zoom = None;
             let mut picked_speed = None;
@@ -912,7 +926,7 @@ impl GimblyApp {
                             .add_enabled_ui(ready, |ui| {
                                 pill(ui, label, mode == Some(m), size)
                                     .on_hover_text(hint)
-                                    .on_disabled_hover_text(tip)
+                                    .on_disabled_hover_text(&tip)
                             })
                             .inner
                             .clicked();
@@ -947,7 +961,7 @@ impl GimblyApp {
                                         if zoom_ready {
                                             "Not available in Group Mode"
                                         } else {
-                                            tip
+                                            zoom_tip.as_str()
                                         },
                                     )
                                 })
@@ -962,13 +976,13 @@ impl GimblyApp {
                 }
                 ui.add_space(10.0);
                 let sound = self.status.sound_source;
-                let sound_ready = self.gimbal_ready() && sound.is_some();
+                let sound_ready = self.ready(Feature::SoundSource) && sound.is_some();
                 if ai_tracking(
                     ui,
                     hand_running || object.is_some(),
                     sound,
                     sound_ready,
-                    tip,
+                    &sound_tip,
                 ) {
                     picked_sound = sound.map(|on| !on);
                 }
@@ -985,7 +999,7 @@ impl GimblyApp {
                 });
                 ui.add_space(12.0);
                 let framings = [ObjectFraming::Normal, ObjectFraming::CloseUp];
-                let row = ui.add_enabled_ui(self.gimbal_ready() && object.is_some(), |ui| {
+                let row = ui.add_enabled_ui(object_ready && object.is_some(), |ui| {
                     pill_row(
                         ui,
                         &["Normal", "Close-up"],
@@ -993,9 +1007,11 @@ impl GimblyApp {
                         16.0,
                     )
                 });
-                row.response.on_disabled_hover_text(
-                    "Select an object with the Object Tracking button in the preview",
-                );
+                row.response.on_disabled_hover_text(if object_ready {
+                    "Select an object with the Object Tracking button in the preview"
+                } else {
+                    object_tip.as_str()
+                });
                 if let Some(i) = row.inner {
                     picked_object = framings.get(i).copied();
                 }
@@ -1010,7 +1026,7 @@ impl GimblyApp {
                         16.0,
                     )
                 });
-                row.response.on_disabled_hover_text(tip);
+                row.response.on_disabled_hover_text(&speed_tip);
                 picked_speed = row.inner;
             });
             if let Some(mode) = picked_mode {
@@ -1164,7 +1180,9 @@ impl GimblyApp {
             virtual_camera_tip: self.virtual_camera_tip(),
             transform: self.settings.transform,
             toast: toast.as_deref(),
-            gimbal: self.status.vendor_control,
+            gimbal: self.status.vendor_control && self.supports(Feature::Gimbal),
+            object_tracking: self.status.vendor_control && self.supports(Feature::ObjectTracking),
+            composition_lines: self.status.vendor_control && self.supports(Feature::Composition),
             tracking: self.status.ai_mode == Some(AiMode::Human),
             target: self.status.target,
             composition: self.status.composition,

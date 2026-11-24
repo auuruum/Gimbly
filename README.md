@@ -39,7 +39,8 @@ Tech.
 ✅ tested on real hardware · 🚧 in progress · 🗓️ planned · ❔ not tested yet
 
 Full test results are in [docs/devices.md](docs/devices.md). Tried another
-camera? See [CONTRIBUTING.md](CONTRIBUTING.md#tested-a-camera).
+camera? See [CONTRIBUTING.md](CONTRIBUTING.md#tested-a-camera). To add
+support for your model, follow [docs/adding-a-camera.md](docs/adding-a-camera.md).
 
 ## Status
 

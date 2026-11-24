@@ -4,14 +4,12 @@
 use super::queue::Receiver;
 use super::sleep::SleepReadback;
 use super::{
-    AiMode, AutoZoom, Command, Composition, GimbalCommand, Hand, HandRange, HandRangeField,
-    ObjectFraming, PRESET_SLOTS, Preset, Shared, TrackingMode, TrackingSpeed, VoiceRange, serial,
-    vendor,
+    AiMode, AutoZoom, Command, Composition, Feature, GimbalCommand, Hand, HandRange,
+    HandRangeField, ObjectFraming, PRESET_SLOTS, Preset, Shared, TrackingMode, TrackingSpeed,
+    VoiceRange, serial, vendor,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-
-pub(super) const TINY_3_LITE: u16 = 0xff04;
 
 pub(super) trait Transport {
     fn read(&self, selector: u32, block: &mut [u8; vendor::MESSAGE_LEN]) -> Result<usize, String>;
@@ -878,6 +876,46 @@ pub(super) fn zoom_loop(
     }
 }
 
+/// What the camera answers for each feature, using reads only. Run it with
+/// `gimbly --probe --controls report` when adding a model.
+pub(super) fn report(xu: &mut Channel<impl Transport>) -> Vec<String> {
+    let view = xu.read_view();
+    let mut lines = vec![format!(
+        "status block (selector 6): {}",
+        if view.is_some() {
+            "recognized"
+        } else {
+            "not recognized"
+        }
+    )];
+    for feature in Feature::ALL {
+        let answer = match feature {
+            Feature::Gimbal => format!(
+                "{:?}",
+                xu.request(vendor::READ_POSITION, Vec::new())
+                    .map(|data| vendor::current_angles(&data))
+            ),
+            Feature::Zoom => format!("{:?}", xu.read_zoom()),
+            Feature::FieldOfView => "no readback; try Wide, Medium and Narrow".into(),
+            Feature::Presets => format!("{:?}", xu.presets().map(|p| p.len())),
+            Feature::Sleep => format!("sleeping {:?}", view.map(|v| v.sleeping)),
+            Feature::HumanTracking => format!("{:?}", view.map(|v| v.ai_mode)),
+            Feature::AutoZoom => format!("{:?}", view.map(|v| v.auto_zoom)),
+            Feature::TrackingSpeed => format!("{:?}", xu.read_tracking_speed()),
+            Feature::SoundSource => format!("{:?}", view.map(|v| v.sound_source)),
+            Feature::ObjectTracking => format!(
+                "{:?} (None unless an object is tracked)",
+                view.map(|v| v.object_framing)
+            ),
+            Feature::Composition => format!("{:?}", xu.read_composition()),
+            Feature::VoiceTracking => format!("{:?}", view.map(|v| v.voice_range)),
+            Feature::HandTracking => format!("{:?}", xu.read_hand()),
+        };
+        lines.push(format!("{}: {answer}", feature.name()));
+    }
+    lines
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn probe(
     xu: &mut Channel<impl Transport>,
@@ -893,6 +931,7 @@ pub(super) fn probe(
                 xu.read_zoom(),
                 xu.presets()
             )),
+            ["report"] => lines.extend(report(xu)),
             ["ptz"] => lines.push(format!(
                 "current position bytes: {:?}",
                 xu.request(vendor::READ_POSITION, Vec::new())?

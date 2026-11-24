@@ -5,6 +5,7 @@
 
 mod control;
 mod frames;
+mod models;
 mod preview;
 mod queue;
 mod serial;
@@ -35,6 +36,7 @@ mod unsupported;
 use self::unsupported as backend;
 
 pub use gimbly_vcam_shm::Transform;
+pub use models::{Feature, Model};
 pub use preview::{PreviewFrame, YuvRange};
 
 use queue::{Receiver, Sender, channel};
@@ -43,12 +45,6 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 /// USB vendor ID used by OBSBOT (Remo Tech) cameras.
 pub const OBSBOT_USB_VENDOR_ID: u16 = 0x3564;
-
-/// OBSBOT cameras whose vendor controls were checked on real hardware, by USB
-/// product ID. Only these get gimbal, zoom, tracking, sleep and presets; any
-/// other camera gets video only. To add a model, follow
-/// `docs/adding-a-camera.md`.
-pub const SUPPORTED_MODELS: &[(u16, &str)] = &[(0xff04, "Tiny 3 Lite")];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceInfo {
@@ -65,13 +61,10 @@ impl DeviceInfo {
         self.usb_vendor_id == Some(OBSBOT_USB_VENDOR_ID)
     }
 
-    /// The model name when Gimbly drives this camera's vendor controls.
-    pub fn supported_model(&self) -> Option<&'static str> {
-        let product = self.usb_product_id?;
-        self.is_obsbot()
-            .then(|| SUPPORTED_MODELS.iter().find(|(id, _)| *id == product))
-            .flatten()
-            .map(|(_, name)| *name)
+    /// The model when Gimbly drives this camera's vendor controls; other
+    /// cameras get video only.
+    pub fn model(&self) -> Option<&'static Model> {
+        Model::find(self.usb_product_id?).filter(|_| self.is_obsbot())
     }
 }
 
@@ -213,6 +206,8 @@ pub struct SessionStatus {
     pub measured_fps: f32,
     pub zoom_range: Option<ZoomRange>,
     pub zoom: Option<i32>,
+    /// The OBSBOT model Gimbly drives; `None` for other cameras.
+    pub model: Option<&'static Model>,
     /// The camera accepts OBSBOT vendor commands such as sleep.
     pub vendor_control: bool,
     /// An OBSBOT camera whose vendor commands are not verified yet.
@@ -686,6 +681,7 @@ impl Session {
         repaint: impl Fn() + Send + Sync + 'static,
     ) -> Self {
         let shared = Arc::new(Shared::default());
+        shared.status().model = device.model();
         let (tx, rx) = channel();
         let stop = Arc::new(AtomicBool::new(false));
         if virtual_camera {
@@ -811,17 +807,19 @@ mod tests {
             usb_product_id: product,
         };
         assert_eq!(
-            device(Some(OBSBOT_USB_VENDOR_ID), Some(0xff04)).supported_model(),
+            device(Some(OBSBOT_USB_VENDOR_ID), Some(0xff04))
+                .model()
+                .map(|m| m.name),
             Some("Tiny 3 Lite")
         );
         // Another OBSBOT model, a non-OBSBOT camera with the same product ID,
         // and a camera without USB IDs get video only.
         assert_eq!(
-            device(Some(OBSBOT_USB_VENDOR_ID), Some(0x0001)).supported_model(),
+            device(Some(OBSBOT_USB_VENDOR_ID), Some(0x0001)).model(),
             None
         );
-        assert_eq!(device(Some(0x046d), Some(0xff04)).supported_model(), None);
-        assert_eq!(device(None, None).supported_model(), None);
+        assert_eq!(device(Some(0x046d), Some(0xff04)).model(), None);
+        assert_eq!(device(None, None).model(), None);
     }
 
     #[test]

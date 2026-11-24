@@ -10,7 +10,7 @@ type Placeholder = ((usize, usize, YuvRange), Vec<u8>);
 pub(super) struct Frames<'a> {
     worker: &'a Worker,
     config: CaptureConfig,
-    tiny_3_lite: bool,
+    standby_picture: bool,
     virtual_camera: Option<crate::vcam::Output>,
     snapshot: bool,
     turned: Vec<u8>,
@@ -19,11 +19,11 @@ pub(super) struct Frames<'a> {
 }
 
 impl<'a> Frames<'a> {
-    pub(super) fn new(worker: &'a Worker, config: CaptureConfig, tiny_3_lite: bool) -> Self {
+    pub(super) fn new(worker: &'a Worker, config: CaptureConfig, standby_picture: bool) -> Self {
         Self {
             worker,
             config,
-            tiny_3_lite,
+            standby_picture,
             virtual_camera: None,
             snapshot: false,
             turned: Vec::new(),
@@ -125,7 +125,7 @@ impl<'a> Frames<'a> {
         if !want_preview && !self.snapshot && self.virtual_camera.is_none() {
             return;
         }
-        let replace = standby::use_placeholder(asleep, self.tiny_3_lite, full);
+        let replace = standby::use_placeholder(asleep, self.standby_picture, full);
         let crop = self
             .config
             .portrait

@@ -322,6 +322,10 @@ pub fn probe_controls(device: &DeviceInfo, script: Vec<String>) -> Result<Vec<St
                             lines.push(format!("presets: {:?}", xu.presets()));
                             Some(Ok(()))
                         }
+                        (Some(xu), ["report"]) => {
+                            lines.extend(super::control::report(xu));
+                            Some(Ok(()))
+                        }
                         (Some(xu), ["ptz"]) => {
                             lines.push(format!(
                                 "current position bytes: {:?}",
@@ -700,8 +704,8 @@ fn capture_loop<'scope, 'env>(
     scope: &'scope std::thread::Scope<'scope, 'env>,
 ) -> Result<(), String> {
     // Read the initial controls before Media Foundation changes stream types.
-    let tiny_3_lite = device.supported_model().is_some();
-    let mut xu = tiny_3_lite.then(|| Xu::open(source)).flatten();
+    let model = device.model();
+    let mut xu = model.and_then(|_| Xu::open(source));
     let zoom_refresh = xu.as_mut().and_then(|xu| xu.initialize(&worker.shared));
 
     // SAFETY: plain Media Foundation setup calls with valid arguments.
@@ -780,7 +784,7 @@ fn capture_loop<'scope, 'env>(
         None
     };
 
-    let mut frames = Frames::new(worker, config, tiny_3_lite);
+    let mut frames = Frames::new(worker, config, model.is_some_and(|m| m.standby_picture));
     while !worker.should_stop() {
         frames.commands(|command| super::forward_control(worker, control.as_ref(), command));
         let epoch = worker.shared.status().video_epoch;

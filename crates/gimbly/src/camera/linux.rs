@@ -315,7 +315,7 @@ pub fn probe_controls(device: &DeviceInfo, script: Vec<String>) -> Result<Vec<St
             )
         })
         .collect();
-    if device.supported_model().is_some() {
+    if device.is_obsbot() {
         let mut xu = Xu::open(device)?;
         lines.push(format!(
             "vendor zoom: {:?}, sleeping and tracking: {:?}, presets: {:?}",
@@ -404,7 +404,7 @@ pub fn run_capture(
         .into_stream()
         .map_err(|e| format!("Could not start {}: {e}", device.name))?;
     set_nonblocking(stream.as_fd()).map_err(|e| format!("Could not configure capture I/O: {e}"))?;
-    let tiny = device.supported_model().is_some();
+    let model = device.model();
     {
         let mut status = worker.shared.status();
         status.modes = modes.into_iter().map(|mode| mode.video).collect();
@@ -417,7 +417,7 @@ pub fn run_capture(
         let shared = &*worker.shared;
         let repaint = &*worker.repaint;
         scope.spawn(move || {
-            if tiny {
+            if model.is_some() {
                 match Xu::open(device) {
                     Ok(mut xu) => {
                         let refresh = xu.initialize(shared);
@@ -442,7 +442,7 @@ pub fn run_capture(
             }
         });
         // The closure owns tx, so it disconnects before the scope joins.
-        let mut frames = Frames::new(worker, config, tiny);
+        let mut frames = Frames::new(worker, config, model.is_some_and(|m| m.standby_picture));
         let mut decoded = Vec::new();
         let mut packed = Vec::new();
         let mut last = Instant::now();

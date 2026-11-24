@@ -8,14 +8,29 @@ apply to everything here.
 Agents: follow the steps in order, stop at each **Ask the owner** point,
 and never skip the clean-room limits below.
 
-## What "supported" means
+## How support works
 
-Any camera gets live video, preview, snapshots and the virtual camera.
-Gimbly sends vendor commands (gimbal, zoom, field of view, presets,
-sleep/wake, tracking) only to models listed in `SUPPORTED_MODELS` in
-[crates/gimbly/src/camera/mod.rs](../crates/gimbly/src/camera/mod.rs).
-Each listed model was checked on real hardware. Adding a model means
-proving that it understands the same messages, then adding one line.
+- Any camera gets live video, preview, snapshots and the virtual camera.
+- Vendor features (gimbal, zoom, presets, sleep, tracking and the rest)
+  are switched on per model. Each model is one entry in `MODELS` in
+  [models.rs](../crates/gimbly/src/camera/models.rs) with the list of
+  features checked on it:
+
+  ```rust
+  Model {
+      product_id: 0xff04,
+      name: "Tiny 3 Lite",
+      features: &[Feature::Gimbal, Feature::Zoom, /* ... */],
+      standby_picture: true,
+  }
+  ```
+
+- The app shows only listed features. Unlisted ones stay disabled with a
+  "not verified on this model yet" tip. A model can start with two or
+  three features and grow later.
+- Every message is described once in [protocol.md](protocol.md). Models
+  share it; a difference is written there under the feature and handled
+  in the shared code.
 
 ## Hard limits
 
@@ -39,91 +54,87 @@ close every app that uses the camera, and run:
 cargo run --release -p gimbly -- --probe --formats
 ```
 
-Each `device:` line shows `vid`, `pid` and `supported_model`. OBSBOT uses
-`vid=3564`. Write down the `pid` and the camera's firmware version from
-the official app.
+Each `device:` line shows `vid`, `pid` and `model`. OBSBOT uses
+`vid=3564`. `model=None` means Gimbly does not know the camera yet. Write
+down the `pid` and the firmware version the official app shows.
 
-### 2. Check whether the existing protocol fits
-
-Gimbly talks to a UVC extension unit with GUID
-`{9a1e7291-6843-4683-6d92-39bc7906ee49}` using 60-byte messages, described
-in [the vendor message notes](clean-room/2026-11-08-vendor-messages.md).
-
-On a local branch, add your model to `SUPPORTED_MODELS`:
-
-```rust
-pub const SUPPORTED_MODELS: &[(u16, &str)] = &[(0xff04, "Tiny 3 Lite"), (0x1234, "Your Model")];
-```
-
-Then run the control probe. `status` only reads from the camera:
+### 2. Read what the camera answers
 
 ```sh
-cargo run --release -p gimbly -- --probe --controls status
+cargo run --release -p gimbly -- --probe --controls report
 ```
 
-- Lines with real values for `vendor zoom`, the status block (`selector 6`
-  on Windows, `sleeping and tracking` on Linux and macOS) and `presets`
-  mean the camera answers the same channel. Windows also prints
-  `vendor extension unit: true`. Go on to step 3.
-- `vendor extension unit: false`, `UVC vendor extension unit not found`
-  or control errors mean the camera uses a different channel. Gimbly needs
-  new research for it: go to step 4 and keep what the probe printed.
+`report` only reads. It prints one line per feature with what the camera
+answered, for example:
 
-**Ask the owner** before sending movement commands. Then try one at a time
-and watch the camera:
-
-```sh
-cargo run --release -p gimbly -- --probe --controls move turn:0:10:1000 stop
+```text
+status block (selector 6): recognized
+Gimbal control: Ok(Some((-30, 8500)))
+Zoom: Ok(1.0)
+Tracking Speed: Ok(Standard)
+Hand Tracking: Err("No matching camera reply for 84 20")
 ```
 
-### 3. Check each feature
+- `vendor extension unit: false` (Windows), `UVC vendor extension unit
+  not found` (Linux, macOS) or `status block: not recognized`: the camera
+  uses a different channel. Stop here and open an issue with the output;
+  this needs new research.
+- `Ok(...)` or `Some(...)` with sensible values: the camera reads that
+  feature like the Tiny 3 Lite. Wake the camera first; a sleeping camera
+  leaves some reads unanswered.
+- `Err(...)`: that read differs or the feature is missing. Check it in
+  step 4 before listing it.
 
-Run the app with the preview and virtual camera open, and try every
-feature listed for the Tiny 3 Lite in the [README](../README.md#supported-webcams).
-For each one note: works, works differently, or does nothing. Things that
-differ often between models:
+### 3. Add the model
 
-- zoom range and field of view steps,
-- which AI modes exist,
-- the standby picture shown while asleep. Gimbly recognises the Tiny 3
-  Lite's picture in [standby.rs](../crates/gimbly/src/camera/standby.rs);
-  another picture needs its own check.
+Add an entry to `MODELS` with the `pid`, the name, and only
+`Feature::Gimbal` at first. Keep `standby_picture: false` unless the
+camera shows the same standby picture as the Tiny 3 Lite (see
+[standby.rs](../crates/gimbly/src/camera/standby.rs)).
 
-If a feature behaves differently, capture what the official app sends for
-it (step 4) before changing code.
+**Ask the owner** before the first command that moves the camera. Then run
+the app with the preview and virtual camera open and try the joystick.
 
-### 4. Capture the official app (only where needed)
+### 4. Check one feature at a time
 
-Use the research loop in
-[the clean-room log](clean-room/README.md): close Gimbly, start a USB
-capture (USBPcap or Wireshark on Windows, `usbmon` on Linux), change
-exactly one setting in the official app at a time and note the time and
-value of each click. Stop the capture and match each click to the UVC
-`SET_CUR`/`GET_CUR` transfers it produced. Compare them with the existing
-notes in `docs/clean-room/`; for each difference write down the bytes
-that changed.
+For each feature in [protocol.md](protocol.md):
 
-### 5. Record the evidence
+1. Add it to the model's `features`.
+2. Use it in the app and watch the camera. Compare with the official app.
+3. Keep it if it behaves the same. Remove it if it does nothing or
+   something else, and go to step 5 for it.
+
+Frames must keep flowing in the preview and the virtual camera while you
+use the gimbal and the zoom.
+
+### 5. Capture where the camera differs
+
+Only for features that differ. Close Gimbly, start a USB capture
+(USBPcap or Wireshark on Windows, `usbmon` on Linux), change exactly one
+setting in the official app at a time, and note the time and value of
+each click. Stop the capture and match each click to the `SET_CUR` and
+`GET_CUR` transfers it produced. Compare them with the feature's table in
+[protocol.md](protocol.md) and write down the bytes that differ.
+
+To support the difference, add what the model sends to `protocol.md`
+under that feature, and pick the bytes by model in
+[vendor.rs](../crates/gimbly/src/camera/vendor.rs) or
+[control.rs](../crates/gimbly/src/camera/control.rs). Add a unit test
+with the bytes from your capture.
+
+### 6. Record the evidence
 
 - Add a dated note `docs/clean-room/YYYY-MM-DD-<model>-<topic>.md` in the
   format from [the clean-room README](clean-room/README.md): source and
   method, camera model and firmware, official app version, OS, observed /
-  inferred / unknown, and the test that checks it.
-- Add one row per verified feature to [devices.md](devices.md). List only
-  what you ran on real hardware.
+  inferred / unknown, and the test that checks it. Paste the `report`
+  output there.
+- Add one row per checked feature to [devices.md](devices.md). A test
+  fails if a model in `MODELS` has no row there.
 - Add the model to the README camera table.
 
-### 6. Implement and test
+### 7. Test and send it
 
-- Keep the line in `SUPPORTED_MODELS` only if step 2 succeeded and step 3
-  found no harmful behavior.
-- For each difference, branch on the model in the shared code in
-  `crates/gimbly/src/camera/`, not in a platform file. Add a unit test that
-  encodes or decodes the model's bytes from your note.
-- Run the checks from [CONTRIBUTING.md](../CONTRIBUTING.md#make-a-change).
-
-### 7. Send it
-
-Push a branch and open a pull request with the probe output, the list of
-tested features, the OS you tested on, and links to your notes. Say which
-operating systems you could not test.
+Run the checks from [CONTRIBUTING.md](../CONTRIBUTING.md#make-a-change),
+push a branch and open a pull request. List the checked features, the OS
+you tested on, and the OS you could not test.

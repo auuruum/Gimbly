@@ -57,6 +57,8 @@ fn control_step(step: &str) -> Option<Command> {
         ["noai"] => GimbalCommand::SetAiMode(AiMode::Off),
         ["omni"] => GimbalCommand::SetVoiceRange(VoiceRange::Omni),
         ["forward"] => GimbalCommand::SetVoiceRange(VoiceRange::Forward),
+        ["sound", "on"] => GimbalCommand::SetSoundSource(true),
+        ["sound", "off"] => GimbalCommand::SetSoundSource(false),
         ["left"] => GimbalCommand::SetHand(Hand::Left),
         ["right"] => GimbalCommand::SetHand(Hand::Right),
         ["range"] => GimbalCommand::OpenHandRange,
@@ -104,7 +106,7 @@ fn gimbal(session: &camera::Session, args: &[String], virtual_camera: bool) -> i
             .and_then(|f| crate::snapshot::save(&f, Path::new(dir), [0, 0, 0, 0, 0, step as u16]));
         let status = session.status();
         println!(
-            "step {step}: {saved:?}, vendor control {}, sleeping {}, AI mode {:?} {:?}, auto zoom {:?}, speed {:?}, voice range {:?}, hand {:?} {:?}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
+            "step {step}: {saved:?}, vendor control {}, sleeping {}, AI mode {:?} {:?}, auto zoom {:?}, speed {:?}, voice range {:?}, sound source {:?}, hand {:?} {:?}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
             status.vendor_control,
             status.sleeping,
             status.ai_mode,
@@ -112,6 +114,7 @@ fn gimbal(session: &camera::Session, args: &[String], virtual_camera: bool) -> i
             status.auto_zoom,
             status.tracking_speed,
             status.voice_range,
+            status.sound_source,
             status.hand,
             status.hand_range,
             status.zoom_ratio,

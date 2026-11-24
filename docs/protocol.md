@@ -161,6 +161,29 @@ Note: [tracking speed](clean-room/2026-11-21-tracking-speed.md).
 
 Note: [sound source tracking](clean-room/2026-11-24-sound-source-tracking.md).
 
+## Zone Tracking
+
+Settings as in [Tracking Speed](#tracking-speed).
+
+| Action | Message | Data |
+| --- | --- | --- |
+| Switch | key 3 | u32: 1 on, 0 off |
+| Auto-tracking new target | key `12` | u8: 1 on, 0 off; written at once |
+| Range limits | keys `13`-`16` | f32 degrees: yaw min, yaw max, pitch min, pitch max |
+| Default limit | read with one more byte `01` | |
+| Enter / leave editing | `44 08 → 04`, then `44 04 → 04` | `44 08`: 0 enter, 1 leave; `44 04`: `01 01` enter, `01 00` after Done |
+| Read return position | `c4 4e → 04` | data `ff` the default, none the stored; reply 24-byte record |
+| Write return position | `84 4e → 04` | 24-byte record |
+| List Non-tracking Areas | `44 13 → 04` | reply u32 per stored id (0-2) |
+| Read area | `44 14 → 04` / `04 15 → 04` | u32 id; reply 24-byte record / ASCII name |
+| Write area | `84 13 → 04`, then `44 15 → 04` | 24-byte record; u32 id and ASCII name |
+| Delete area | `c4 13 → 04` | u32 id |
+| Read initial position | `84 38 → 04` | reply 38 bytes, f32 yaw at 5, pitch at 9 |
+
+Done writes the limits, every area slot (stored or deleted) and the return
+position, then leaves editing. Records use the preset layout; bytes 20-21
+are written as 0. Note: [zone tracking](clean-room/2026-11-24-zone-tracking.md).
+
 ## Object Tracking
 
 | Action | Message | Data |

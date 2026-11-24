@@ -1,13 +1,14 @@
 //! The Console sections that drive the gimbal: AI Mode, Preset and View and
-//! Gimbal, plus the preset rename dialog and the Hand Tracking range panel.
+//! Gimbal, plus the rename dialog and the Hand Tracking and Zone Tracking
+//! panels.
 //!
 //! Layout and behaviour follow OBSBOT Center's panel for the Tiny 3 Lite; the code is
 //! Gimbly's own.
 
 use super::{GimblyApp, NOT_YET};
 use crate::camera::{
-    AiMode, Command, Feature, Fov, GimbalCommand, Hand, HandRangeField, PRESET_NAME_MAX,
-    PRESET_SLOTS, Preset, SessionState, VoiceRange, ZOOM_RATIO_MAX,
+    AiMode, Command, Feature, Fov, GimbalCommand, Hand, PRESET_NAME_MAX, PRESET_SLOTS, Preset,
+    RangeField, SessionState, TrackingRange, VoiceRange, ZONE_AREAS, ZOOM_RATIO_MAX,
 };
 use crate::gimbal::{self, PanelPull, SpeedMode};
 use crate::joystick::{self, Drag, DragState};
@@ -47,10 +48,14 @@ pub struct GimbalUi {
     pull: PanelPull,
     /// Zoom ratio the user picked and when, shown until the camera catches up.
     zoom_target: Option<(f32, Instant)>,
-    /// Preset being renamed and the text typed so far.
-    rename: Option<(u8, String)>,
+    /// Preset or area being renamed and the text typed so far.
+    rename: Option<(Renaming, String)>,
     /// The Hand Tracking range panel replaces the console.
     pub hand_range_open: bool,
+    /// The Zone Tracking panel replaces the console.
+    pub zone_open: bool,
+    /// The Zone Tracking panel shows its Non-tracking Area tab.
+    zone_areas: bool,
 }
 
 impl Default for GimbalUi {
@@ -67,6 +72,8 @@ impl Default for GimbalUi {
             zoom_target: None,
             rename: None,
             hand_range_open: false,
+            zone_open: false,
+            zone_areas: false,
         }
     }
 }
@@ -77,6 +84,7 @@ impl GimbalUi {
         self.zoom_target = None;
         self.rename = None;
         self.hand_range_open = false;
+        self.zone_open = false;
     }
 }
 
@@ -287,153 +295,193 @@ impl GimblyApp {
     pub(super) fn hand_range_panel(&mut self, ui: &mut Ui) {
         let range = self.status.hand_range;
         let mut close = None;
-        let mut update = None;
-        let mut reset = None;
-        let mut go = None;
-        let margin = egui::Margin {
-            left: PADDING as i8,
-            right: PADDING as i8,
-            top: 14,
-            bottom: 20,
-        };
-        band(ui, SECTION, margin, |ui| {
-            ui.horizontal(|ui| {
-                ui.set_height(28.0);
-                if small_button(ui, "Cancel", vec2(74.0, 25.0)).clicked() {
-                    close = Some(false);
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let done = ui
-                        .add_enabled_ui(range.is_some(), |ui| {
-                            small_button(ui, "Done", vec2(74.0, 25.0))
-                        })
-                        .inner
-                        .on_disabled_hover_text("Reading the range from the camera");
-                    if done.clicked() {
-                        close = Some(true);
-                    }
-                });
-            });
+        let mut edits = RangeEdits::default();
+        band(ui, SECTION, panel_margin(), |ui| {
+            close = cancel_done(ui, range.is_some());
             ui.add_space(12.0);
-            if note_with_reset(
+            edits = range_body(
                 ui,
+                range,
                 "Aim the gimbal, then right-click a limit and choose Update. Hand \
                  Tracking only follows within this range. Click a limit to turn there.",
                 "Put the four limits back to 45°, -45°, 30° and -30°",
-            ) {
-                reset = Some(true);
-            }
-            ui.add_space(14.0);
-
-            let (rect, _) =
-                ui.allocate_exact_size(vec2(ui.available_width(), 170.0), Sense::hover());
-            let frame = rect.shrink2(vec2(52.0, 26.0));
-            let corners = [
-                frame.left_top(),
-                frame.right_top(),
-                frame.right_bottom(),
-                frame.left_bottom(),
-                frame.left_top(),
-            ];
-            ui.painter().extend(egui::Shape::dashed_line(
-                &corners,
-                Stroke::new(1.0, TEXT_FAINT),
-                4.0,
-                3.0,
-            ));
-            let limits = range.map(|r| r.limits);
-            // Shown as the official app does: pan as is, tilt negated
-            // (`+ 0.0` turns -0.0 into 0.0).
-            let shown = |key: usize, sign: f32| limits.map(|l| sign * l[key] + 0.0);
-            let labels = [
-                (2, pos2(frame.center().x, rect.top() + 12.0), shown(2, -1.0)),
-                (
-                    3,
-                    pos2(frame.center().x, rect.bottom() - 12.0),
-                    shown(3, -1.0),
-                ),
-                (1, pos2(rect.left() + 26.0, frame.center().y), shown(1, 1.0)),
-                (
-                    0,
-                    pos2(rect.right() - 26.0, frame.center().y),
-                    shown(0, 1.0),
-                ),
-            ];
-            for (key, at, value) in labels {
-                let text = value.map_or("--".to_owned(), |v| format!("{v:.1}°"));
-                let field = HandRangeField::Limit(key);
-                let (clicked, chosen) = value_with_update(
-                    ui,
-                    Rect::from_center_size(at, vec2(62.0, 30.0)),
-                    &text,
-                    field,
-                );
-                if chosen {
-                    update = Some(field);
-                }
-                // Limits are kept in the camera's sign, as the gimbal takes them.
-                let limit = limits.and_then(|l| l.get(key).copied());
-                if let Some(limit) = limit.filter(|_| clicked) {
-                    let (pitch, yaw) = if key < 2 {
-                        (None, Some(limit))
-                    } else {
-                        (Some(limit), None)
-                    };
-                    go = Some((GimbalCommand::MoveTo { pitch, yaw }, None));
-                }
-            }
-
-            ui.add_space(10.0);
-            if note_with_reset(
-                ui,
-                "After exceeding the tracking range, the gimbal returns to the set position.",
-                "Put the return position back to P 0°, T 0°, Z 1.0x",
-            ) {
-                reset = Some(false);
-            }
-            ui.add_space(8.0);
-            let (line, _) =
-                ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
-            let text = range.map_or("P: --° | T: --° | Z: --".to_owned(), |r| {
-                let (yaw, pitch, zoom) = r.return_position();
-                format!(
-                    "P: {:.2}° | T: {:.2}° | Z: {zoom:.2}",
-                    yaw + 0.0,
-                    -pitch + 0.0
-                )
-            });
-            let (clicked, chosen) = value_with_update(ui, line, &text, HandRangeField::Return);
-            if chosen {
-                update = Some(HandRangeField::Return);
-            }
-            if let Some((yaw, pitch, zoom)) = range.filter(|_| clicked).map(|r| r.return_position())
-            {
-                let to = GimbalCommand::MoveTo {
-                    pitch: Some(pitch),
-                    yaw: Some(yaw),
-                };
-                go = Some((to, Some(zoom)));
-            }
+            );
         });
         self.gimbal_controls(ui, GimbalCommand::ResetWithZoom);
         if range.is_some() {
-            if let Some(field) = update {
+            if let Some(field) = edits.update {
                 self.gimbal(GimbalCommand::UpdateHandRange(field));
             }
-            if let Some(limits) = reset {
+            if let Some(limits) = edits.reset {
                 self.gimbal(GimbalCommand::ResetHandRange { limits });
             }
-            if let Some((to, zoom)) = go.filter(|_| self.gimbal_ready()) {
-                if let Some(ratio) = zoom {
-                    self.zoom_target_clear();
-                    self.gimbal(GimbalCommand::ZoomRatio(ratio));
-                }
-                self.gimbal(to);
-            }
+            self.go_to(edits.go);
         }
         if let Some(save) = close {
             self.gimbal_ui.hand_range_open = false;
             self.gimbal(GimbalCommand::CloseHandRange { save });
+        }
+    }
+
+    /// Replaces the console while the Zone Tracking settings are open: the
+    /// Tracking Range tab (as in the Hand Tracking panel, plus auto-tracking)
+    /// and the Non-tracking Area tab.
+    pub(super) fn zone_panel(&mut self, ui: &mut Ui) {
+        let zone = self.status.zone.clone();
+        let areas_tab = self.gimbal_ui.zone_areas;
+        let mut close = None;
+        let mut tab = None;
+        let mut edits = RangeEdits::default();
+        let mut command = None;
+        let mut rename = None;
+        band(ui, SECTION, panel_margin(), |ui| {
+            close = cancel_done(ui, zone.is_some());
+            ui.add_space(10.0);
+            tab = tabs(
+                ui,
+                &["Tracking Range", "Non-tracking Area"],
+                areas_tab.into(),
+            );
+            ui.add_space(14.0);
+            if !areas_tab {
+                edits = range_body(
+                    ui,
+                    zone.as_ref().map(|zone| zone.range),
+                    "Aim the gimbal, then right-click a limit and choose Update. Tracking \
+                     stays within this range. Click a limit to turn there.",
+                    "Put the four limits back to the camera's defaults",
+                );
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    ui.set_height(26.0);
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.label(egui::RichText::new("Auto-tracking new target").size(15.0));
+                    help(
+                        ui,
+                        "When the tracked person leaves the range, follow the next person \
+                         who enters it",
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let on = zone.as_ref().is_some_and(|zone| zone.auto_target);
+                        let clicked = ui
+                            .add_enabled_ui(zone.is_some(), |ui| toggle(ui, on))
+                            .inner
+                            .clicked();
+                        if clicked {
+                            command = Some(GimbalCommand::SetZoneAutoTarget(!on));
+                        }
+                    });
+                });
+            } else {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(
+                            "Store up to three views. At a stored view the frame stays \
+                             fixed instead of following.",
+                        )
+                        .size(13.0)
+                        .color(TEXT_DIM),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(14.0);
+                let areas = zone.as_ref().map_or(&[][..], |zone| &zone.areas[..]);
+                let gap = 12.0;
+                let width =
+                    (ui.available_width() - gap * (ZONE_AREAS as f32 - 1.0)) / ZONE_AREAS as f32;
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    ui.add_enabled_ui(zone.is_some(), |ui| {
+                        for slot in 0..ZONE_AREAS as u8 {
+                            let Some(area) = areas.iter().find(|area| area.id == slot) else {
+                                let add = pill(ui, "Add", false, vec2(width, BUTTON_HEIGHT))
+                                    .on_hover_text("Store the current view as an area");
+                                if add.clicked() {
+                                    command = Some(GimbalCommand::AddArea);
+                                }
+                                continue;
+                            };
+                            let (yaw, pitch, zoom) = area.position();
+                            let tip = format!(
+                                "Go to {}\npan {yaw:.1}°, tilt {:.1}°, zoom {zoom:.2}x",
+                                area.name,
+                                -pitch + 0.0
+                            );
+                            let entries =
+                                [("Update PTZ", true), ("Delete", true), ("Rename", true)];
+                            let (clicked, chosen) = slot_button(
+                                ui,
+                                ("area", area.id),
+                                width,
+                                &area.name,
+                                &tip,
+                                &entries,
+                            );
+                            if clicked {
+                                let to = GimbalCommand::MoveTo {
+                                    pitch: Some(pitch),
+                                    yaw: Some(yaw),
+                                };
+                                edits.go = Some((to, Some(zoom)));
+                            }
+                            match chosen {
+                                Some("Update PTZ") => {
+                                    command = Some(GimbalCommand::UpdateArea(area.id))
+                                }
+                                Some("Delete") => {
+                                    command = Some(GimbalCommand::DeleteArea(area.id))
+                                }
+                                Some("Rename") => rename = Some((area.id, area.name.clone())),
+                                _ => {}
+                            }
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+            }
+        });
+        // The Non-tracking Area Reset turns to the camera's initial position.
+        let reset = match zone.as_ref().and_then(|zone| zone.initial) {
+            Some((yaw, pitch)) if areas_tab => GimbalCommand::MoveTo {
+                pitch: Some(pitch),
+                yaw: Some(yaw),
+            },
+            _ if areas_tab => GimbalCommand::Reset,
+            _ => GimbalCommand::ResetWithZoom,
+        };
+        self.gimbal_controls(ui, reset);
+        if let Some(i) = tab {
+            self.gimbal_ui.zone_areas = i == 1;
+        }
+        if zone.is_some() {
+            if let Some(field) = edits.update {
+                self.gimbal(GimbalCommand::UpdateZone(field));
+            }
+            if let Some(limits) = edits.reset {
+                self.gimbal(GimbalCommand::ResetZone { limits });
+            }
+            if let Some(command) = command {
+                self.gimbal(command);
+            }
+            if let Some((id, name)) = rename {
+                self.gimbal_ui.rename = Some((Renaming::Area(id), name));
+            }
+            self.go_to(edits.go);
+        }
+        if let Some(save) = close {
+            self.gimbal_ui.zone_open = false;
+            self.gimbal(GimbalCommand::CloseZone { save });
+        }
+    }
+
+    /// Turns the gimbal (and zooms) to a range value or area that was clicked.
+    fn go_to(&mut self, go: Option<(GimbalCommand, Option<f32>)>) {
+        if let Some((to, zoom)) = go.filter(|_| self.gimbal_ready()) {
+            if let Some(ratio) = zoom {
+                self.zoom_target_clear();
+                self.gimbal(GimbalCommand::ZoomRatio(ratio));
+            }
+            self.gimbal(to);
         }
     }
 
@@ -486,38 +534,6 @@ impl GimblyApp {
 
     /// One preset: its name triggers it, the caret opens its menu.
     fn preset_button(&mut self, ui: &mut Ui, preset: &Preset, width: f32) {
-        let (rect, _) = ui.allocate_exact_size(vec2(width, BUTTON_HEIGHT), Sense::hover());
-        let caret = Rect::from_min_max(pos2(rect.right() - 25.0, rect.top()), rect.max);
-        let name = Rect::from_min_max(rect.min, pos2(caret.left(), rect.bottom()));
-        let name_response = ui.interact(name, ui.id().with(("preset", preset.id)), Sense::click());
-        let caret_response = ui.interact(
-            caret,
-            ui.id().with(("preset-menu", preset.id)),
-            Sense::click(),
-        );
-        let hover = ui.is_enabled() && (name_response.hovered() || caret_response.hovered());
-        let painter = ui.painter();
-        painter.rect_filled(
-            rect,
-            CornerRadius::same(6),
-            if hover { BUTTON_HOVER } else { BUTTON },
-        );
-        let galley = painter.layout(preset.name.clone(), font(14.0), TEXT, name.width() - 8.0);
-        painter.galley(
-            pos2(
-                name.center().x - galley.size().x / 2.0 + 2.0,
-                name.center().y - galley.size().y / 2.0,
-            ),
-            galley,
-            TEXT,
-        );
-        painter.text(
-            caret.center() - vec2(4.0, 0.0),
-            Align2::CENTER_CENTER,
-            icon::CARET_DOWN,
-            font(15.0),
-            TEXT,
-        );
         let tip = match preset.position {
             Some(at) => format!(
                 "Go to {}
@@ -526,45 +542,37 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
             ),
             None => format!("Go to {}", preset.name),
         };
-        if name_response.on_hover_text(tip).clicked() {
+        let entries = [
+            ("Update PTZ", true),
+            ("Delete", true),
+            ("Rename", true),
+            ("More Settings", false),
+            ("As Initial State", false),
+        ];
+        let (clicked, chosen) = slot_button(
+            ui,
+            ("preset", preset.id),
+            width,
+            &preset.name,
+            &tip,
+            &entries,
+        );
+        if clicked {
             self.gimbal(GimbalCommand::TriggerPreset(preset.id));
         }
-        let mut chosen = None;
-        egui::Popup::menu(&caret_response)
-            .id(ui.id().with(("preset-popup", preset.id)))
-            .width(134.0)
-            .gap(2.0)
-            .frame(menu_frame())
-            .show(|ui| {
-                ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-                for (label, enabled) in [
-                    ("Update PTZ", true),
-                    ("Delete", true),
-                    ("Rename", true),
-                    ("More Settings", false),
-                    ("As Initial State", false),
-                ] {
-                    let item = ui
-                        .add_enabled_ui(enabled, |ui| menu_entry(ui, label))
-                        .inner
-                        .on_disabled_hover_text(NOT_YET);
-                    if item.clicked() {
-                        chosen = Some(label);
-                        ui.close();
-                    }
-                }
-            });
         match chosen {
             Some("Update PTZ") => self.gimbal(GimbalCommand::UpdatePreset { id: preset.id }),
             Some("Delete") => self.gimbal(GimbalCommand::DeletePreset(preset.id)),
-            Some("Rename") => self.gimbal_ui.rename = Some((preset.id, preset.name.clone())),
+            Some("Rename") => {
+                self.gimbal_ui.rename = Some((Renaming::Preset(preset.id), preset.name.clone()))
+            }
             _ => {}
         }
     }
 
     /// The small Rename dialog, centred over the panel.
     pub(super) fn rename_dialog(&mut self, ctx: &egui::Context) {
-        let Some((id, mut text)) = self.gimbal_ui.rename.take() else {
+        let Some((target, mut text)) = self.gimbal_ui.rename.take() else {
             return;
         };
         let mut done = None;
@@ -611,13 +619,16 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
                 let name = text.trim().to_string();
                 if name.is_empty() {
                     self.notify("Please input name");
-                    self.gimbal_ui.rename = Some((id, text));
+                    self.gimbal_ui.rename = Some((target, text));
                 } else {
-                    self.gimbal(GimbalCommand::RenamePreset { id, name });
+                    self.gimbal(match target {
+                        Renaming::Preset(id) => GimbalCommand::RenamePreset { id, name },
+                        Renaming::Area(id) => GimbalCommand::RenameArea { id, name },
+                    });
                 }
             }
             Some(false) => {}
-            None => self.gimbal_ui.rename = Some((id, text)),
+            None => self.gimbal_ui.rename = Some((target, text)),
         }
     }
 
@@ -627,44 +638,32 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
         if self.status.hand_range_proposal.is_none() || !self.gimbal_ui.hand_range_open {
             return;
         }
-        let mut answer = None;
-        let modal = egui::Modal::new(egui::Id::new("hand-range-widen"))
-            .backdrop_color(Color32::from_black_alpha(120))
-            .frame(
-                egui::Frame::new()
-                    .fill(CARD)
-                    .stroke(Stroke::new(1.0, FIELD_STROKE))
-                    .corner_radius(CornerRadius::same(8))
-                    .inner_margin(egui::Margin::same(14)),
-            )
-            .show(ctx, |ui| {
-                ui.set_width(240.0);
-                ui.spacing_mut().item_spacing = vec2(8.0, 12.0);
-                ui.label(
-                    egui::RichText::new(
-                        "The return position lies outside the tracking range. \
-                         Widen the range to include it?",
-                    )
-                    .size(13.0)
-                    .color(TEXT),
-                );
-                ui.horizontal(|ui| {
-                    ui.add_space(30.0);
-                    if pill(ui, "No", false, vec2(85.0, 31.0)).clicked() {
-                        answer = Some(false);
-                    }
-                    if pill(ui, "OK", true, vec2(85.0, 31.0)).clicked() {
-                        answer = Some(true);
-                    }
-                });
-            });
-        if modal.should_close() && answer.is_none() {
-            answer = Some(false);
-        }
-        if let Some(widen) = answer {
+        if let Some(widen) = question(ctx, "hand-range-widen", WIDEN_QUESTION) {
             // Hide it at once; the camera thread clears the proposal shortly.
             self.status.hand_range_proposal = None;
             self.gimbal(GimbalCommand::ConfirmHandRange(widen));
+        }
+    }
+
+    /// The Zone Tracking panel's questions: widen the range to a new return
+    /// position, or move the return position inside new limits (No keeps
+    /// the old limit).
+    pub(super) fn zone_dialog(&mut self, ctx: &egui::Context) {
+        let Some((_, widen)) = self
+            .status
+            .zone_proposal
+            .filter(|_| self.gimbal_ui.zone_open)
+        else {
+            return;
+        };
+        let text = if widen {
+            WIDEN_QUESTION
+        } else {
+            "The return position lies outside the new range. Move it inside?"
+        };
+        if let Some(accept) = question(ctx, "zone-range-question", text) {
+            self.status.zone_proposal = None;
+            self.gimbal(GimbalCommand::ConfirmZone(accept));
         }
     }
 
@@ -1115,7 +1114,7 @@ fn menu_frame() -> egui::Frame {
 
 /// A Hand Tracking range value: a click turns the gimbal to it and its
 /// right-click menu holds Update. Returns (clicked, Update chosen).
-fn value_with_update(ui: &mut Ui, rect: Rect, text: &str, field: HandRangeField) -> (bool, bool) {
+fn value_with_update(ui: &mut Ui, rect: Rect, text: &str, field: RangeField) -> (bool, bool) {
     let response = ui.interact(rect, ui.id().with(("hand-range", field)), Sense::click());
     let fill = if response.hovered() {
         BUTTON_HOVER
@@ -1173,4 +1172,290 @@ fn menu_entry(ui: &mut Ui, text: &str) -> egui::Response {
         if ui.is_enabled() { TEXT } else { TEXT_FAINT },
     );
     response
+}
+
+/// What a stored-view name is being renamed for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Renaming {
+    Preset(u8),
+    /// A Non-tracking Area in the open Zone Tracking panel.
+    Area(u8),
+}
+
+const WIDEN_QUESTION: &str =
+    "The return position lies outside the tracking range. Widen the range to include it?";
+
+/// A small modal with No and OK; `Some(true)` for OK.
+fn question(ctx: &egui::Context, id: &str, text: &str) -> Option<bool> {
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::new(id))
+        .backdrop_color(Color32::from_black_alpha(120))
+        .frame(
+            egui::Frame::new()
+                .fill(CARD)
+                .stroke(Stroke::new(1.0, FIELD_STROKE))
+                .corner_radius(CornerRadius::same(8))
+                .inner_margin(egui::Margin::same(14)),
+        )
+        .show(ctx, |ui| {
+            ui.set_width(240.0);
+            ui.spacing_mut().item_spacing = vec2(8.0, 12.0);
+            ui.label(egui::RichText::new(text).size(13.0).color(TEXT));
+            ui.horizontal(|ui| {
+                ui.add_space(30.0);
+                if pill(ui, "No", false, vec2(85.0, 31.0)).clicked() {
+                    answer = Some(false);
+                }
+                if pill(ui, "OK", true, vec2(85.0, 31.0)).clicked() {
+                    answer = Some(true);
+                }
+            });
+        });
+    if modal.should_close() && answer.is_none() {
+        answer = Some(false);
+    }
+    answer
+}
+
+fn panel_margin() -> egui::Margin {
+    egui::Margin {
+        left: PADDING as i8,
+        right: PADDING as i8,
+        top: 14,
+        bottom: 20,
+    }
+}
+
+/// The Cancel and Done row of a settings panel; `Some(true)` for Done,
+/// which waits until the panel's values are `ready`.
+fn cancel_done(ui: &mut Ui, ready: bool) -> Option<bool> {
+    let mut close = None;
+    ui.horizontal(|ui| {
+        ui.set_height(28.0);
+        if small_button(ui, "Cancel", vec2(74.0, 25.0)).clicked() {
+            close = Some(false);
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let done = ui
+                .add_enabled_ui(ready, |ui| small_button(ui, "Done", vec2(74.0, 25.0)))
+                .inner
+                .on_disabled_hover_text("Reading the settings from the camera");
+            if done.clicked() {
+                close = Some(true);
+            }
+        });
+    });
+    close
+}
+
+/// Text tabs with an accent bar under the selected one; returns a clicked
+/// tab.
+fn tabs(ui: &mut Ui, labels: &[&str], selected: usize) -> Option<usize> {
+    let width = ui.available_width() / labels.len().max(1) as f32;
+    let mut clicked = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for (i, label) in labels.iter().enumerate() {
+            let (rect, response) = ui.allocate_exact_size(vec2(width, 30.0), Sense::click());
+            let color = if i == selected || response.hovered() {
+                TEXT
+            } else {
+                TEXT_DIM
+            };
+            ui.painter().text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                *label,
+                font(14.0),
+                color,
+            );
+            if i == selected {
+                let bar = Rect::from_center_size(
+                    pos2(rect.center().x, rect.bottom() - 2.0),
+                    vec2(20.0, 3.0),
+                );
+                ui.painter().rect_filled(bar, CornerRadius::same(1), ACCENT);
+            }
+            if response.clicked() && i != selected {
+                clicked = Some(i);
+            }
+        }
+    });
+    clicked
+}
+
+/// What the user did in [`range_body`].
+#[derive(Default)]
+struct RangeEdits {
+    /// Update chosen on a value.
+    update: Option<RangeField>,
+    /// A reset icon: `true` for the limits, `false` for the return position.
+    reset: Option<bool>,
+    /// A clicked value to turn (and zoom) to.
+    go: Option<(GimbalCommand, Option<f32>)>,
+}
+
+/// The range box with its four limits and the return position line, shared
+/// by the Hand Tracking and Zone Tracking panels. `range` is `None` while
+/// it is read.
+fn range_body(
+    ui: &mut Ui,
+    range: Option<TrackingRange>,
+    note: &str,
+    limits_tip: &str,
+) -> RangeEdits {
+    let mut edits = RangeEdits::default();
+    if note_with_reset(ui, note, limits_tip) {
+        edits.reset = Some(true);
+    }
+    ui.add_space(14.0);
+
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 170.0), Sense::hover());
+    let frame = rect.shrink2(vec2(52.0, 26.0));
+    let corners = [
+        frame.left_top(),
+        frame.right_top(),
+        frame.right_bottom(),
+        frame.left_bottom(),
+        frame.left_top(),
+    ];
+    ui.painter().extend(egui::Shape::dashed_line(
+        &corners,
+        Stroke::new(1.0, TEXT_FAINT),
+        4.0,
+        3.0,
+    ));
+    let limits = range.map(|r| r.limits);
+    // Shown as the official app does: pan as is, tilt negated
+    // (`+ 0.0` turns -0.0 into 0.0).
+    let shown = |key: usize, sign: f32| limits.map(|l| sign * l[key] + 0.0);
+    let labels = [
+        (2, pos2(frame.center().x, rect.top() + 12.0), shown(2, -1.0)),
+        (
+            3,
+            pos2(frame.center().x, rect.bottom() - 12.0),
+            shown(3, -1.0),
+        ),
+        (1, pos2(rect.left() + 26.0, frame.center().y), shown(1, 1.0)),
+        (
+            0,
+            pos2(rect.right() - 26.0, frame.center().y),
+            shown(0, 1.0),
+        ),
+    ];
+    for (key, at, value) in labels {
+        let text = value.map_or("--".to_owned(), |v| format!("{v:.1}°"));
+        let field = RangeField::Limit(key);
+        let (clicked, chosen) = value_with_update(
+            ui,
+            Rect::from_center_size(at, vec2(62.0, 30.0)),
+            &text,
+            field,
+        );
+        if chosen {
+            edits.update = Some(field);
+        }
+        // Limits are kept in the camera's sign, as the gimbal takes them.
+        let limit = limits.and_then(|l| l.get(key).copied());
+        if let Some(limit) = limit.filter(|_| clicked) {
+            let (pitch, yaw) = if key < 2 {
+                (None, Some(limit))
+            } else {
+                (Some(limit), None)
+            };
+            edits.go = Some((GimbalCommand::MoveTo { pitch, yaw }, None));
+        }
+    }
+
+    ui.add_space(10.0);
+    if note_with_reset(
+        ui,
+        "After exceeding the tracking range, the gimbal returns to the set position.",
+        "Put the return position back to P 0°, T 0°, Z 1.0x",
+    ) {
+        edits.reset = Some(false);
+    }
+    ui.add_space(8.0);
+    let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
+    let text = range.map_or("P: --° | T: --° | Z: --".to_owned(), |r| {
+        let (yaw, pitch, zoom) = r.return_position();
+        format!(
+            "P: {:.2}° | T: {:.2}° | Z: {zoom:.2}",
+            yaw + 0.0,
+            -pitch + 0.0
+        )
+    });
+    let (clicked, chosen) = value_with_update(ui, line, &text, RangeField::Return);
+    if chosen {
+        edits.update = Some(RangeField::Return);
+    }
+    if let Some((yaw, pitch, zoom)) = range.filter(|_| clicked).map(|r| r.return_position()) {
+        let to = GimbalCommand::MoveTo {
+            pitch: Some(pitch),
+            yaw: Some(yaw),
+        };
+        edits.go = Some((to, Some(zoom)));
+    }
+    edits
+}
+
+/// A stored view (preset or area): its name recalls it, the caret opens a
+/// menu of `entries` (label, enabled). Returns (name clicked, entry chosen).
+fn slot_button(
+    ui: &mut Ui,
+    salt: impl std::hash::Hash + std::fmt::Debug + Copy,
+    width: f32,
+    name: &str,
+    tip: &str,
+    entries: &[(&'static str, bool)],
+) -> (bool, Option<&'static str>) {
+    let (rect, _) = ui.allocate_exact_size(vec2(width, BUTTON_HEIGHT), Sense::hover());
+    let caret = Rect::from_min_max(pos2(rect.right() - 25.0, rect.top()), rect.max);
+    let name_rect = Rect::from_min_max(rect.min, pos2(caret.left(), rect.bottom()));
+    let name_response = ui.interact(name_rect, ui.id().with(("slot", salt)), Sense::click());
+    let caret_response = ui.interact(caret, ui.id().with(("slot-menu", salt)), Sense::click());
+    let hover = ui.is_enabled() && (name_response.hovered() || caret_response.hovered());
+    let painter = ui.painter();
+    painter.rect_filled(
+        rect,
+        CornerRadius::same(6),
+        if hover { BUTTON_HOVER } else { BUTTON },
+    );
+    let galley = painter.layout(name.to_owned(), font(14.0), TEXT, name_rect.width() - 8.0);
+    painter.galley(
+        pos2(
+            name_rect.center().x - galley.size().x / 2.0 + 2.0,
+            name_rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        TEXT,
+    );
+    painter.text(
+        caret.center() - vec2(4.0, 0.0),
+        Align2::CENTER_CENTER,
+        icon::CARET_DOWN,
+        font(15.0),
+        TEXT,
+    );
+    let clicked = name_response.on_hover_text(tip).clicked();
+    let mut chosen = None;
+    egui::Popup::menu(&caret_response)
+        .id(ui.id().with(("slot-popup", salt)))
+        .width(134.0)
+        .gap(2.0)
+        .frame(menu_frame())
+        .show(|ui| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+            for &(label, enabled) in entries {
+                let item = ui
+                    .add_enabled_ui(enabled, |ui| menu_entry(ui, label))
+                    .inner
+                    .on_disabled_hover_text(NOT_YET);
+                if item.clicked() {
+                    chosen = Some(label);
+                    ui.close();
+                }
+            }
+        });
+    (clicked, chosen)
 }

@@ -236,10 +236,19 @@ pub struct SessionStatus {
     pub hand: Option<Hand>,
     /// The Hand Tracking range being edited. `Some` exactly while the camera
     /// is in its range-edit state.
-    pub hand_range: Option<HandRange>,
+    pub hand_range: Option<TrackingRange>,
     /// A return position outside the range, waiting for the user to widen
-    /// the range to it (see [`HandRange::including_return`]).
-    pub hand_range_proposal: Option<HandRange>,
+    /// the range to it (see [`TrackingRange::including_return`]).
+    pub hand_range_proposal: Option<TrackingRange>,
+    /// The Zone Tracking switch the camera reports; `None` until read.
+    pub zone_tracking: Option<bool>,
+    /// The Zone Tracking settings being edited. `Some` exactly while the
+    /// camera is in its zone-edit state.
+    pub zone: Option<Zone>,
+    /// A change to the zone range waiting for the user's OK: `true` widens
+    /// the range to a new return position, `false` moves the return
+    /// position inside new limits.
+    pub zone_proposal: Option<(TrackingRange, bool)>,
     /// Object tracking runs, framed like this; `None` when it does not.
     pub object_framing: Option<ObjectFraming>,
     /// The box of the tracked target, streamed by the camera; `None` when
@@ -309,7 +318,7 @@ pub enum GimbalCommand {
     /// Read the Hand Tracking range and put the camera in its edit state.
     OpenHandRange,
     /// Take one range value from the current gimbal position (and zoom).
-    UpdateHandRange(HandRangeField),
+    UpdateHandRange(RangeField),
     /// Put the four limits (`limits`) or the return position back to the
     /// defaults in the panel; nothing is written until Done.
     ResetHandRange {
@@ -320,6 +329,32 @@ pub enum GimbalCommand {
     ConfirmHandRange(bool),
     /// Leave the edit state, writing the edited range when `save` is set.
     CloseHandRange {
+        save: bool,
+    },
+    SetZoneTracking(bool),
+    /// Read the Zone Tracking settings and put the camera in its edit state.
+    OpenZone,
+    /// Take one zone range value from the current gimbal position (and zoom).
+    UpdateZone(RangeField),
+    /// Put the limits (`limits`, the camera's defaults) or the return
+    /// position back in the panel; nothing is written until Done.
+    ResetZone {
+        limits: bool,
+    },
+    /// Answer the question in [`SessionStatus::zone_proposal`].
+    ConfirmZone(bool),
+    SetZoneAutoTarget(bool),
+    /// Store the current view as a Non-tracking Area in the first free slot.
+    AddArea,
+    /// Replace an area's view with the current one.
+    UpdateArea(u8),
+    RenameArea {
+        id: u8,
+        name: String,
+    },
+    DeleteArea(u8),
+    /// Leave the edit state, writing the edited settings when `save` is set.
+    CloseZone {
         save: bool,
     },
     /// Track the person at this point (fractions of the camera picture),
@@ -478,9 +513,9 @@ pub enum Hand {
     Right,
 }
 
-/// The Hand Tracking range as the camera stores it.
+/// The Hand Tracking or Zone Tracking range as the camera stores it.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct HandRange {
+pub struct TrackingRange {
     /// Degrees in the camera's sign: yaw min, yaw max, pitch min, pitch max.
     pub limits: [f32; 4],
     /// Where the gimbal returns when the target leaves the range, in the
@@ -488,13 +523,33 @@ pub struct HandRange {
     pub record: [u8; 24],
 }
 
-impl HandRange {
-    /// The panel's defaults; the camera reported these before any edit.
+impl TrackingRange {
+    /// The Hand Tracking panel's defaults; the camera reported these before
+    /// any edit.
     pub const DEFAULT_LIMITS: [f32; 4] = [-45.0, 45.0, -30.0, 30.0];
+
+    /// This range with its return position moved just inside the limits,
+    /// or `None` when it already lies within them. The zoom is kept.
+    pub fn return_within(&self) -> Option<TrackingRange> {
+        let (yaw, pitch, ratio) = self.return_position();
+        let [yaw_min, yaw_max, pitch_min, pitch_max] = self.limits;
+        // max then min, not clamp: limits read from the camera may be crossed.
+        let inside = (
+            yaw.max(yaw_min).min(yaw_max),
+            pitch.max(pitch_min).min(pitch_max),
+        );
+        if inside == (yaw, pitch) {
+            return None;
+        }
+        let hundredths = |degrees: f32| (degrees * 100.0).round() as i16;
+        let angles = (hundredths(inside.0), hundredths(inside.1));
+        let record = vendor::set_return_position(&self.record, angles, ratio)?;
+        Some(TrackingRange { record, ..*self })
+    }
 
     /// This range widened just enough to hold its return position, or
     /// `None` when the position already lies within it.
-    pub fn including_return(&self) -> Option<HandRange> {
+    pub fn including_return(&self) -> Option<TrackingRange> {
         let (yaw, pitch, _) = self.return_position();
         let [yaw_min, yaw_max, pitch_min, pitch_max] = self.limits;
         let limits = [
@@ -503,7 +558,7 @@ impl HandRange {
             pitch_min.min(pitch),
             pitch_max.max(pitch),
         ];
-        (limits != self.limits).then_some(HandRange { limits, ..*self })
+        (limits != self.limits).then_some(TrackingRange { limits, ..*self })
     }
 
     /// Yaw and pitch in degrees and the zoom ratio of the return position.
@@ -512,13 +567,49 @@ impl HandRange {
     }
 }
 
-/// A value of the Hand Tracking range that Update can set.
+/// A value of a tracking range that Update can set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum HandRangeField {
-    /// Index into [`HandRange::limits`].
+pub enum RangeField {
+    /// Index into [`TrackingRange::limits`].
     Limit(usize),
     Return,
 }
+
+/// The Zone Tracking settings, read when its panel opens and written by
+/// Done.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Zone {
+    pub range: TrackingRange,
+    /// The return record the camera gives as its default; the return
+    /// position's reset icon puts it back.
+    pub default_record: [u8; 24],
+    /// "Auto-tracking new target"; written as soon as it changes.
+    pub auto_target: bool,
+    /// Non-tracking areas, by id.
+    pub areas: Vec<Area>,
+    /// Yaw and pitch of the camera's initial position, where the
+    /// Non-tracking Area Reset turns; `None` when it could not be read.
+    pub initial: Option<(f32, f32)>,
+}
+
+/// A Non-tracking Area: a stored view the frame stays fixed at.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Area {
+    pub id: u8,
+    pub name: String,
+    /// The 24-byte preset record layout, like [`TrackingRange::record`].
+    pub record: [u8; 24],
+}
+
+impl Area {
+    /// Yaw and pitch in degrees and the zoom ratio.
+    pub fn position(&self) -> (f32, f32, f32) {
+        vendor::return_position(&self.record)
+    }
+}
+
+/// Number of Non-tracking Area slots on the Tiny 3 Lite.
+pub const ZONE_AREAS: usize = 3;
 
 /// Largest zoom ratio of the Tiny 3 Lite.
 pub const ZOOM_RATIO_MAX: f32 = 4.0;
@@ -828,8 +919,8 @@ mod tests {
         // range turned the right limit into -55.6° and the top into 30.2°.
         let inside =
             vendor::set_return_position(&vendor::RETURN_RECORD_NONE, (4490, 3000), 1.42).unwrap();
-        let mut range = HandRange {
-            limits: HandRange::DEFAULT_LIMITS,
+        let mut range = TrackingRange {
+            limits: TrackingRange::DEFAULT_LIMITS,
             record: inside,
         };
         assert_eq!(range.including_return(), None);
@@ -838,6 +929,27 @@ mod tests {
         assert_eq!(wider.limits, [-55.6, 45.0, -30.2, 30.0]);
         assert_eq!(wider.record, range.record);
         assert_eq!(wider.including_return(), None);
+    }
+
+    #[test]
+    fn zone_limit_moves_the_return_position_inside() {
+        // Observed 2026-11-24: the right limit updated to 13.4° with return
+        // P 0.58° T 0° Z 1.00 gave return P 13.40°, T and Z unchanged.
+        let record = vendor::set_return_position(&[0; 24], (58, 0), 1.0).unwrap();
+        let range = TrackingRange {
+            limits: [13.4, 100.0, -30.0, 30.0],
+            record,
+        };
+        let moved = range.return_within().unwrap();
+        assert_eq!(moved.return_position(), (13.4, 0.0, 1.0));
+        assert_eq!(moved.limits, range.limits);
+        assert_eq!(moved.return_within(), None);
+        // Crossed limits from a bad read must not panic.
+        let crossed = TrackingRange {
+            limits: [10.0, -10.0, 5.0, -5.0],
+            record,
+        };
+        assert!(crossed.return_within().is_some());
     }
 
     #[test]

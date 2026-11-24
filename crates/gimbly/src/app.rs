@@ -796,8 +796,12 @@ impl GimblyApp {
                     Tab::Console if self.gimbal_ui.hand_range_open && self.gimbal_ready() => {
                         self.hand_range_panel(ui)
                     }
+                    Tab::Console if self.gimbal_ui.zone_open && self.gimbal_ready() => {
+                        self.zone_panel(ui)
+                    }
                     Tab::Console => {
                         self.gimbal_ui.hand_range_open = false;
+                        self.gimbal_ui.zone_open = false;
                         self.console(ui)
                     }
                     Tab::Image | Tab::More => {
@@ -895,6 +899,13 @@ impl GimblyApp {
             let zoom_tip = self.gimbal_tip(Feature::AutoZoom);
             let speed_tip = self.gimbal_tip(Feature::TrackingSpeed);
             let sound_tip = self.gimbal_tip(Feature::SoundSource);
+            let zone_tip = if hand_running || object.is_some() {
+                "Not available during Hand Tracking or object tracking".to_owned()
+            } else {
+                self.gimbal_tip(Feature::ZoneTracking)
+            };
+            let mut picked_zone = None;
+            let mut open_zone = false;
             let object_ready = self.ready(Feature::ObjectTracking);
             let object_tip = self.gimbal_tip(Feature::ObjectTracking);
             let mut picked_mode = None;
@@ -977,15 +988,23 @@ impl GimblyApp {
                 ui.add_space(10.0);
                 let sound = self.status.sound_source;
                 let sound_ready = self.ready(Feature::SoundSource) && sound.is_some();
-                if ai_tracking(
+                // The official app shows Zone Tracking off and disabled during
+                // Hand and object tracking.
+                let zone_off = hand_running || object.is_some();
+                let zone = self.status.zone_tracking.filter(|_| !zone_off);
+                let zone_ready = self.ready(Feature::ZoneTracking) && zone.is_some();
+                let clicks = ai_tracking(
                     ui,
-                    hand_running || object.is_some(),
-                    sound,
-                    sound_ready,
-                    &sound_tip,
-                ) {
+                    (zone, zone_ready, &zone_tip),
+                    (sound, sound_ready, &sound_tip),
+                );
+                if clicks.sound {
                     picked_sound = sound.map(|on| !on);
                 }
+                if clicks.zone {
+                    picked_zone = zone.map(|on| !on);
+                }
+                open_zone = clicks.zone_settings;
                 ui.add_space(22.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
@@ -1040,6 +1059,13 @@ impl GimblyApp {
             }
             if let Some(on) = picked_sound {
                 self.gimbal(GimbalCommand::SetSoundSource(on));
+            }
+            if let Some(on) = picked_zone {
+                self.gimbal(GimbalCommand::SetZoneTracking(on));
+            }
+            if open_zone {
+                self.gimbal_ui.zone_open = true;
+                self.gimbal(GimbalCommand::OpenZone);
             }
             if let Some(framing) = picked_object {
                 // Clicking the highlighted framing stops object tracking.
@@ -1247,44 +1273,74 @@ fn auto_zoom_label(zoom: AutoZoom) -> &'static str {
     }
 }
 
-/// The Zone Tracking (not implemented yet) and Sound Source Assisted
-/// Tracking switches; returns whether the sound switch was clicked.
-/// `zone_off`: the official app shows Zone Tracking off during Hand and
-/// object tracking.
-fn ai_tracking(ui: &mut Ui, zone_off: bool, sound: Option<bool>, ready: bool, tip: &str) -> bool {
-    ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
-    ui.add_enabled_ui(false, |ui| {
-        switch_row(ui, "Zone Tracking", NOT_YET, true, !zone_off)
-    });
-    ui.add_space(18.0);
-    ui.add_enabled_ui(ready, |ui| {
-        switch_row(
-            ui,
-            "Sound Source Assisted Tracking",
-            "Use the microphones to help find who is speaking",
-            false,
-            sound.unwrap_or(false),
-        )
-        .on_disabled_hover_text(tip)
-    })
-    .inner
-    .clicked()
+/// What was clicked in [`ai_tracking`].
+struct AiTrackingClicks {
+    zone: bool,
+    zone_settings: bool,
+    sound: bool,
 }
 
-fn switch_row(ui: &mut Ui, label: &str, hint: &str, settings: bool, on: bool) -> Response {
+/// The Zone Tracking and Sound Source Assisted Tracking rows; each takes
+/// (state, ready, why it is disabled).
+fn ai_tracking(
+    ui: &mut Ui,
+    (zone, zone_ready, zone_tip): (Option<bool>, bool, &str),
+    (sound, sound_ready, sound_tip): (Option<bool>, bool, &str),
+) -> AiTrackingClicks {
+    ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+    let (zone_switch, zone_settings) = ui
+        .add_enabled_ui(zone_ready, |ui| {
+            let (switch, settings) = switch_row(
+                ui,
+                "Zone Tracking",
+                "Track only within a set range; the gimbal returns to a set position when                  the person leaves it. The gear opens its settings.",
+                Some("Zone Tracking settings"),
+                zone.unwrap_or(false),
+            );
+            (switch.on_disabled_hover_text(zone_tip), settings)
+        })
+        .inner;
+    ui.add_space(18.0);
+    let (sound_switch, _) = ui
+        .add_enabled_ui(sound_ready, |ui| {
+            switch_row(
+                ui,
+                "Sound Source Assisted Tracking",
+                "Use the microphones to help find who is speaking",
+                None,
+                sound.unwrap_or(false),
+            )
+        })
+        .inner;
+    AiTrackingClicks {
+        zone: zone_switch.clicked(),
+        zone_settings,
+        sound: sound_switch.on_disabled_hover_text(sound_tip).clicked(),
+    }
+}
+
+/// A labelled switch, with a gear button when `settings` names its tooltip.
+/// Returns the switch and whether the gear was clicked.
+fn switch_row(
+    ui: &mut Ui,
+    label: &str,
+    hint: &str,
+    settings: Option<&str>,
+    on: bool,
+) -> (Response, bool) {
     ui.horizontal(|ui| {
         ui.set_height(24.0);
         ui.label(egui::RichText::new(label).size(15.0));
         help(ui, hint);
-        if settings {
-            ui.label(
-                egui::RichText::new(icon::GEAR_SIX)
-                    .size(14.0)
-                    .color(TEXT_DIM),
-            );
-        }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| toggle(ui, on))
-            .inner
+        let gear = settings.is_some_and(|tip| {
+            icon_button(ui, icon::GEAR_SIX, 20.0, 14.0, false)
+                .on_hover_text(tip)
+                .clicked()
+        });
+        let switch = ui
+            .with_layout(Layout::right_to_left(Align::Center), |ui| toggle(ui, on))
+            .inner;
+        (switch, gear)
     })
     .inner
 }
@@ -1323,17 +1379,22 @@ impl eframe::App for GimblyApp {
     }
 
     /// The process ends right after this, before the camera thread could
-    /// clean up, so leave the Hand Tracking range-edit state here.
+    /// clean up, so leave the Hand and Zone Tracking edit states here.
     fn on_exit(&mut self) {
         let Some(session) = &self.session else { return };
-        if session.status().hand_range.is_none() {
+        let editing =
+            |status: &camera::SessionStatus| status.hand_range.is_some() || status.zone.is_some();
+        if !editing(&session.status()) {
             return;
         }
-        session.send(Command::Gimbal(GimbalCommand::CloseHandRange {
-            save: false,
-        }));
+        for command in [
+            GimbalCommand::CloseHandRange { save: false },
+            GimbalCommand::CloseZone { save: false },
+        ] {
+            session.send(Command::Gimbal(command));
+        }
         let until = Instant::now() + Duration::from_secs(1);
-        while session.status().hand_range.is_some() && Instant::now() < until {
+        while editing(&session.status()) && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -1365,6 +1426,7 @@ impl eframe::App for GimblyApp {
 
         self.rename_dialog(&ctx);
         self.hand_range_dialog(&ctx);
+        self.zone_dialog(&ctx);
         self.preview_window(&ctx);
         self.settings_window(&ctx);
         #[cfg(target_os = "linux")]

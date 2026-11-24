@@ -274,8 +274,20 @@ mod platform {
 
     pub(super) fn report_denied(shared: &super::Shared, path: &str) {
         shared.status().error = Some(format!(
-            "Gimbly could not open the camera's serial port {path}, so the tracking box is hidden"
+            "Gimbly could not open the camera's serial port {path}, so the tracking box is hidden.              Close other apps that use the camera, such as OBSBOT Center, and restart Gimbly"
         ));
+    }
+
+    /// Keeps the Win32 code so a port held by another app reads as
+    /// `PermissionDenied`; `io::Error::other` turned it into `Other` and the
+    /// hidden box went unreported.
+    pub(super) fn os_error(error: windows::core::Error) -> io::Error {
+        let code = error.code().0 as u32;
+        if code & 0xFFFF_0000 == 0x8007_0000 {
+            io::Error::from_raw_os_error((code & 0xFFFF) as i32)
+        } else {
+            io::Error::other(error)
+        }
     }
 
     pub(super) struct Port(HANDLE);
@@ -297,7 +309,7 @@ mod platform {
                     FILE_FLAGS_AND_ATTRIBUTES(0),
                     None,
                 )
-                .map_err(io::Error::other)?;
+                .map_err(os_error)?;
                 let port = Self(handle);
                 let timeouts = COMMTIMEOUTS {
                     ReadIntervalTimeout: 10,
@@ -564,5 +576,14 @@ mod tests {
     fn rejects_ids_without_an_instance() {
         assert!(super::platform::candidates(r"\\?\root#camera").is_empty());
         assert!(super::platform::candidates("").is_empty());
+    }
+
+    #[test]
+    fn port_held_by_another_app_reads_as_denied() {
+        use std::io::ErrorKind;
+        use windows::Win32::Foundation::{E_ACCESSDENIED, E_FAIL};
+        let kind = |code: windows::core::HRESULT| super::platform::os_error(code.into()).kind();
+        assert_eq!(kind(E_ACCESSDENIED), ErrorKind::PermissionDenied);
+        assert_eq!(kind(E_FAIL), ErrorKind::Other);
     }
 }

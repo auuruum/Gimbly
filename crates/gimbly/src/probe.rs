@@ -219,11 +219,12 @@ pub fn run() -> i32 {
     };
     for d in &devices {
         println!(
-            "device: {} vid={:04x?} pid={:04x?} obsbot={}",
+            "device: {} vid={:04x?} pid={:04x?} obsbot={} supported_model={:?}",
             d.name,
             d.usb_vendor_id,
             d.usb_product_id,
-            d.is_obsbot()
+            d.is_obsbot(),
+            d.supported_model()
         );
     }
     let Some(device) = devices

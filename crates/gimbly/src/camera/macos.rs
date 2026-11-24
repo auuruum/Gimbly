@@ -316,7 +316,7 @@ impl AbsoluteZoom for Zoom {
 }
 
 pub fn probe_controls(device: &DeviceInfo, script: Vec<String>) -> Result<Vec<String>, String> {
-    if device.is_obsbot() && device.usb_product_id == Some(control::TINY_3_LITE) {
+    if device.supported_model().is_some() {
         let mut xu = Xu::open(device)?;
         let mut lines = vec![format!(
             "vendor zoom: {:?}, sleeping and tracking: {:?}, presets: {:?}",
@@ -561,7 +561,7 @@ fn capture(info: &DeviceInfo, config: CaptureConfig, worker: &Worker) -> Result<
         session.startRunning();
         (session, output)
     };
-    let tiny = info.is_obsbot() && info.usb_product_id == Some(control::TINY_3_LITE);
+    let tiny = info.supported_model().is_some();
     {
         let mut status = worker.shared.status();
         status.modes = modes.into_iter().map(|m| m.video).collect();

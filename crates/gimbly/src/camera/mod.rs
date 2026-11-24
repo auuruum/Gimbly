@@ -44,6 +44,12 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 /// USB vendor ID used by OBSBOT (Remo Tech) cameras.
 pub const OBSBOT_USB_VENDOR_ID: u16 = 0x3564;
 
+/// OBSBOT cameras whose vendor controls were checked on real hardware, by USB
+/// product ID. Only these get gimbal, zoom, tracking, sleep and presets; any
+/// other camera gets video only. To add a model, follow
+/// `docs/adding-a-camera.md`.
+pub const SUPPORTED_MODELS: &[(u16, &str)] = &[(0xff04, "Tiny 3 Lite")];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceInfo {
     pub name: String,
@@ -57,6 +63,15 @@ pub struct DeviceInfo {
 impl DeviceInfo {
     pub fn is_obsbot(&self) -> bool {
         self.usb_vendor_id == Some(OBSBOT_USB_VENDOR_ID)
+    }
+
+    /// The model name when Gimbly drives this camera's vendor controls.
+    pub fn supported_model(&self) -> Option<&'static str> {
+        let product = self.usb_product_id?;
+        self.is_obsbot()
+            .then(|| SUPPORTED_MODELS.iter().find(|(id, _)| *id == product))
+            .flatten()
+            .map(|(_, name)| *name)
     }
 }
 
@@ -786,6 +801,28 @@ pub fn parse_usb_ids(path: &str) -> (Option<u16>, Option<u16>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vendor_controls_only_for_listed_obsbot_models() {
+        let device = |vendor, product| DeviceInfo {
+            name: String::new(),
+            id: String::new(),
+            usb_vendor_id: vendor,
+            usb_product_id: product,
+        };
+        assert_eq!(
+            device(Some(OBSBOT_USB_VENDOR_ID), Some(0xff04)).supported_model(),
+            Some("Tiny 3 Lite")
+        );
+        // Another OBSBOT model, a non-OBSBOT camera with the same product ID,
+        // and a camera without USB IDs get video only.
+        assert_eq!(
+            device(Some(OBSBOT_USB_VENDOR_ID), Some(0x0001)).supported_model(),
+            None
+        );
+        assert_eq!(device(Some(0x046d), Some(0xff04)).supported_model(), None);
+        assert_eq!(device(None, None).supported_model(), None);
+    }
 
     #[test]
     fn return_outside_the_range_widens_only_the_crossed_limits() {

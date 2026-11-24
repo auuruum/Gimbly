@@ -5,7 +5,7 @@
 //! Standard zoom uses `IAMCameraControl`. The Tiny 3 Lite uses vendor
 //! controls through the camera's UVC extension unit.
 
-use super::control::{AbsoluteZoom, Channel, TINY_3_LITE, Transport, control_loop, zoom_loop};
+use super::control::{AbsoluteZoom, Channel, Transport, control_loop, zoom_loop};
 use super::preview::YuvRange;
 use super::{CaptureConfig, DeviceInfo, Shared, VideoMode, Worker, ZoomRange, parse_usb_ids};
 use super::{frames::Frames, queue, vendor};
@@ -700,8 +700,7 @@ fn capture_loop<'scope, 'env>(
     scope: &'scope std::thread::Scope<'scope, 'env>,
 ) -> Result<(), String> {
     // Read the initial controls before Media Foundation changes stream types.
-    // Only the Tiny 3 Lite has been checked against the official app so far.
-    let tiny_3_lite = device.is_obsbot() && device.usb_product_id == Some(TINY_3_LITE);
+    let tiny_3_lite = device.supported_model().is_some();
     let mut xu = tiny_3_lite.then(|| Xu::open(source)).flatten();
     let zoom_refresh = xu.as_mut().and_then(|xu| xu.initialize(&worker.shared));
 

@@ -5,7 +5,7 @@
 //! Standard zoom uses `IAMCameraControl`. The Tiny 3 Lite uses vendor
 //! controls through the camera's UVC extension unit.
 
-use super::control::{AbsoluteZoom, Channel, TINY_3_LITE, Transport, control_loop, zoom_loop};
+use super::control::{AbsoluteZoom, Channel, Transport, control_loop, zoom_loop};
 use super::preview::YuvRange;
 use super::{CaptureConfig, DeviceInfo, Shared, VideoMode, Worker, ZoomRange, parse_usb_ids};
 use super::{frames::Frames, queue, vendor};
@@ -320,6 +320,10 @@ pub fn probe_controls(device: &DeviceInfo, script: Vec<String>) -> Result<Vec<St
                             lines.push(format!("selector 6: {:?}", xu.get(vendor::SELECTOR_VIEW)));
                             lines.push(format!("vendor zoom: {:?}", xu.read_zoom()));
                             lines.push(format!("presets: {:?}", xu.presets()));
+                            Some(Ok(()))
+                        }
+                        (Some(xu), ["report"]) => {
+                            lines.extend(super::control::report(xu));
                             Some(Ok(()))
                         }
                         (Some(xu), ["ptz"]) => {
@@ -700,9 +704,8 @@ fn capture_loop<'scope, 'env>(
     scope: &'scope std::thread::Scope<'scope, 'env>,
 ) -> Result<(), String> {
     // Read the initial controls before Media Foundation changes stream types.
-    // Only the Tiny 3 Lite has been checked against the official app so far.
-    let tiny_3_lite = device.is_obsbot() && device.usb_product_id == Some(TINY_3_LITE);
-    let mut xu = tiny_3_lite.then(|| Xu::open(source)).flatten();
+    let model = device.model();
+    let mut xu = model.and_then(|_| Xu::open(source));
     let zoom_refresh = xu.as_mut().and_then(|xu| xu.initialize(&worker.shared));
 
     // SAFETY: plain Media Foundation setup calls with valid arguments.
@@ -757,12 +760,13 @@ fn capture_loop<'scope, 'env>(
 
     let control = if xu.is_some() || zoom.is_some() {
         let (sender, receiver) = queue::channel();
+        let device_id = device.id.clone();
         let shared: &'env Shared = &worker.shared;
         let repaint: &'env (dyn Fn() + Send + Sync) = &*worker.repaint;
         scope.spawn(move || match MfThread::init() {
             Ok(_com) => {
                 if let Some(xu) = xu {
-                    control_loop(xu, &receiver, shared, repaint, zoom_refresh);
+                    control_loop(xu, &receiver, shared, repaint, zoom_refresh, &device_id);
                 } else if let Some(zoom) = zoom {
                     let value = zoom.get();
                     shared.status().zoom = value;
@@ -780,7 +784,7 @@ fn capture_loop<'scope, 'env>(
         None
     };
 
-    let mut frames = Frames::new(worker, config, tiny_3_lite);
+    let mut frames = Frames::new(worker, config, model.is_some_and(|m| m.standby_picture));
     while !worker.should_stop() {
         frames.commands(|command| super::forward_control(worker, control.as_ref(), command));
         let epoch = worker.shared.status().video_epoch;

@@ -65,7 +65,7 @@ impl Problem {
 
 type Check = Result<(), Problem>;
 
-fn system_tool(name: &str) -> Option<PathBuf> {
+pub(crate) fn system_tool(name: &str) -> Option<PathBuf> {
     // Never use a program found in an arbitrary PATH for privileged setup.
     [
         "/usr/bin",

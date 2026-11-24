@@ -16,11 +16,16 @@ The product name is written `Gimbly` in user-facing text; crates, binaries, and 
 
 - All first-party code is Rust. UI: egui on eframe with the wgpu renderer. No webview, Electron, or other languages in the app.
 - Prefer pure-Rust dependencies and keep the tree small. Use OS libraries or FFI only for camera access, the virtual camera, and desktop integration; isolate that code in small platform modules and explain why it is needed.
-- Windows, macOS, Linux Wayland, and Linux X11 are first-class targets. Gimbly runs as a native Wayland client in a Wayland session and as an X11 client in an X11 session. XWayland is a compatibility path and does not substitute for native Wayland support.
-- Implement each feature for all four targets in the same task. Keep shared behavior in platform-neutral code and put native camera, windowing, shortcut, and desktop APIs behind shared interfaces. Use the Wayland compositor or desktop portal for operations that require its permission. Register global hotkeys through the XDG Desktop Portal `org.freedesktop.portal.GlobalShortcuts` on Wayland and native key grabs on X11. Let the portal handle consent and compositor bindings. Use the FileChooser portal for native Linux folder selection when the desktop provides it.
-- Report features that the OS, compositor, or desktop portal cannot provide with a clear in-app message. Identify any setup or permission the feature needs. If a target could not be built or tested, record the gap and the verification that still needs to run.
 - Keep the MIT license. Do not change it without the owner's approval.
 - Icons: SVG or egui-phosphor. Never use Unicode characters or emoji as UI icons.
+
+### Platform support
+
+- Design and implement each feature for Windows, Linux, and macOS in the same change. Include the tests for that feature in the same change.
+- Account for native Wayland and native X11 from the start of any Linux work. Gimbly runs as a native Wayland client in a Wayland session and as an X11 client in an X11 session. XWayland is a compatibility path.
+- Keep shared behavior in platform-neutral code. Put native camera, windowing, shortcut, and desktop APIs behind shared interfaces.
+- On Wayland, use the compositor or desktop portal for operations that require its permission. Register global hotkeys through the XDG Desktop Portal `org.freedesktop.portal.GlobalShortcuts` and let the portal handle consent and compositor bindings. On X11, use native key grabs for global hotkeys. Use the FileChooser portal for native Linux folder selection when the desktop provides it.
+- Report features that the OS, compositor, or desktop portal cannot provide with a clear in-app message. Identify any setup or permission the feature needs.
 
 ## 3. Clean-room implementation
 
@@ -48,22 +53,64 @@ Gimbly is a clean-room reimplementation: study features and behavior, document f
 - Settings and camera state stay in plain serializable data; the UI is a view over it.
 - Every crash fix comes with a regression test.
 
-## 5. Workflow
+## 5. Implementation workflow
 
 ### Branches and human approval
 
-- `main` is the stable branch; `dev` is the integration branch.
-- Start each task on its own branch from the latest `origin/dev` after fetching: `git switch --no-track -c <kind>/<short-task-name> origin/dev`. Kinds: `feature/`, `fix/`, `docs/`, `refactor/`, `chore/`. Never put the name of an agent, tool, or model in a branch name.
-- Within the task, agents may edit, test, commit, and push the task branch without asking at each step. Push explicitly to the task branch, never `dev` or `main`.
-- When the task is done, report the changes and validation results, then ask whether to merge the task branch into `dev`. Merge and push `dev` only after explicit human approval.
-- Merge `dev` into `main` only when the owner asks for it. Approval to merge into `dev` is not approval to update `main`.
-- Without explicit approval for the specific operation, never change local or remote `dev` or `main`: no commits, merges, cherry-picks, rebases, resets, pushes, force-pushes, or deletions. Fetching and reading them, branching from `origin/dev`, and merging `origin/dev` into a task branch are allowed.
-- Pull requests may be prepared for review; never enable auto-merge.
+- `main` is the only long-lived branch. Start each new task on a separate branch based on the latest `origin/main`. Continue related work on that task branch.
+- After fetching, run `git switch --no-track -c <kind>/<short-task-name> origin/main`. Use `feature/`, `fix/`, `docs/`, `refactor/`, or `chore/`. Name the branch after the work, without agent, tool, or model names.
+- Within the task, agents may edit, test, commit, and push the task branch. Push explicitly to the task branch.
+- Report the changes, validation results, and any checks still needed. Ask the owner whether to merge the task branch into `main`.
+- After the owner approves that merge, update local `main` from `origin/main` with a fast-forward, merge the task branch with `git merge --no-ff`, and push `main`. Rerun the checks before pushing if `main` advanced since the task branch was cut.
+- Any change to local or remote `main` requires explicit approval for that operation. Fetching `origin/main`, branching from it, or merging it into a task branch is allowed.
+- Open a pull request only if the owner asks, and target `main`. Keep auto-merge disabled.
+
+### GitHub access for this repository
+
+Use the fine-grained GitHub token in `.env` at the root of the original Gimbly clone for GitHub operations in this repository. The clone and its linked worktrees share that file. Keep branch approvals in effect.
+
+Create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new) with resource owner `auuruum`. Under **Only select repositories**, choose **Gimbly**. Grant **Contents: Read and write** for Git and **Workflows: Read and write** to push changes to `.github/workflows/`. **Metadata: Read-only** is included automatically. Add **Actions: Read-only** if the agent needs to inspect CI runs and logs. Add **Pull requests: Read and write** only if the owner wants the agent to open or update PRs. Leave other permissions unset.
+
+Verify that `git check-ignore .env` lists the file, then put the token on a single line in `.env` as `GH_TOKEN=github_pat_...`. Keep `.env` out of commits, chat, and tool output. On Unix, set its permissions to `0600`.
+
+For Git over HTTPS, configure the credential helper once per clone.
+
+```sh
+credential_url=https://github.com/auuruum/Gimbly.git
+git config --local "credential.$credential_url.useHttpPath" true
+git config --local --replace-all "credential.$credential_url.helper" ''
+git config --local --add "credential.$credential_url.helper" '!gimbly_credential() {
+    test "$1" = get || return 0
+    common=$(git rev-parse --path-format=absolute --git-common-dir) || return 1
+    token=$(sed -n "/^GH_TOKEN=/{s/^GH_TOKEN=//;s/[[:space:]]*$//;p;q;}" "$common/../.env" 2>/dev/null)
+    case "$token" in
+      github_pat_*) printf "username=auuruum\npassword=%s\n" "$token" ;;
+    esac
+  }; gimbly_credential'
+```
+
+For GitHub CLI commands, load the token for that command and target Gimbly explicitly. Run credential commands with shell tracing disabled.
+
+```sh
+(
+  set +x
+  common=$(git rev-parse --path-format=absolute --git-common-dir) || exit 1
+  token=$(sed -n '/^GH_TOKEN=/{s/^GH_TOKEN=//;s/[[:space:]]*$//;p;q;}' "$common/../.env") || exit 1
+  case "$token" in
+    github_pat_*) GH_TOKEN="$token" gh run list --repo github.com/auuruum/Gimbly ;;
+    *) exit 1 ;;
+  esac
+)
+```
+
+To retire the token, revoke it in GitHub and clear its value in `.env`.
 
 ### Implementation and validation
 
 - Read the relevant code and clean-room notes before changing files. Keep changes small; no speculative architecture.
-- Add tests for logic that works without hardware (message encoding and decoding, checksums, settings round-trips).
-- Check visual UI changes in the running app. Validate Linux windowing and desktop integration separately with native Wayland and X11 sessions. An X11 test under XWayland exercises the X11 code path and must be reported as such.
-- Before finishing: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
-- Report compile checks separately from runtime and hardware tests for Windows, macOS, Linux Wayland, and Linux X11. Never claim a camera model, firmware, or OS works until it was tested and recorded in `docs/devices.md`.
+- Add tests for logic that works without hardware (message encoding and decoding, checksums, settings round-trips). Run shared tests on all three OSes and platform-specific tests on the applicable OS.
+- Before finishing, run the local checks in [CONTRIBUTING.md](CONTRIBUTING.md#make-a-change). GitHub Actions checks formatting and, on each of Windows, Linux, and macOS, runs Clippy, builds the full workspace including Gimbly and its platform binaries, and runs the workspace tests.
+- Check visual UI changes in the running app. For Linux windowing and desktop integration changes, verify the affected behavior in separate native Wayland and native X11 sessions. Report any XWayland run as X11 under XWayland.
+- To add a camera model, follow [docs/adding-a-camera.md](docs/adding-a-camera.md).
+- A new vendor feature gets a `Feature` in `crates/gimbly/src/camera/models.rs`, is listed only on the models it was checked on, and gets its messages in [docs/protocol.md](docs/protocol.md) in the same change.
+- Report compile checks separately from runtime and hardware tests for Windows, macOS, native Wayland, and native X11. Record any target or session you could not verify and the check it still needs. Never claim a camera model, firmware, or OS works until it was tested and recorded in `docs/devices.md`.

@@ -1,5 +1,6 @@
 //! How the preview window lays out the camera picture: fitting it into the
-//! video area and drawing composition lines. Rotation and mirroring happen
+//! video area, drawing composition lines and mapping points between the
+//! shown picture and the camera's own picture. Rotation and mirroring happen
 //! earlier, in the capture thread, so the virtual camera gets them too.
 
 use crate::camera::Transform;
@@ -54,6 +55,53 @@ pub fn composition_lines(rect: Rect) -> [[Pos2; 2]; 4] {
     ]
 }
 
+/// Where a point of the shown picture (fractions of its width and height)
+/// lies in the camera's picture, which the camera reports and expects
+/// targets in. `crop` is the shown part of the camera's width: 1.0, or less
+/// for the portrait crop. Mirrors the sampling in `transform_into`.
+pub fn to_camera(point: Pos2, t: Transform, crop: f32) -> Pos2 {
+    let (dx, dy) = (point.x, point.y);
+    let m = t.mirror;
+    let flip = |flip: bool, v: f32| if flip { 1.0 - v } else { v };
+    let (sx, sy) = match t.degrees() / 90 {
+        0 => (flip(m, dx), dy),
+        1 => (dy, flip(!m, dx)),
+        2 => (flip(!m, dx), 1.0 - dy),
+        _ => (1.0 - dy, flip(m, dx)),
+    };
+    pos2(0.5 + (sx - 0.5) * crop, sy)
+}
+
+/// The inverse of [`to_camera`].
+pub fn from_camera(point: Pos2, t: Transform, crop: f32) -> Pos2 {
+    let sx = if crop > 0.0 {
+        0.5 + (point.x - 0.5) / crop
+    } else {
+        0.5
+    };
+    let sy = point.y;
+    let m = t.mirror;
+    let flip = |flip: bool, v: f32| if flip { 1.0 - v } else { v };
+    let (dx, dy) = match t.degrees() / 90 {
+        0 => (flip(m, sx), sy),
+        1 => (flip(!m, sy), sx),
+        2 => (flip(!m, sx), 1.0 - sy),
+        _ => (flip(m, sy), 1.0 - sx),
+    };
+    pos2(dx, dy)
+}
+
+/// The shown part of the camera's width for an output of `width`x`height`;
+/// below 1.0 for the portrait crop.
+pub fn crop_fraction(width: u32, height: u32) -> f32 {
+    // shortcut: assumes the camera's picture is 16:9, as every mode Gimbly
+    // offers is; take the capture size from the session if that changes.
+    if width == 0 || height == 0 || width >= height {
+        return 1.0;
+    }
+    (width as f32 / height as f32 / (16.0 / 9.0)).min(1.0)
+}
+
 /// Aspect badge for a picture of `width`x`height`, e.g. "16:9".
 pub fn aspect_label(width: u32, height: u32) -> &'static str {
     if height > width { "9:16" } else { "16:9" }
@@ -91,6 +139,92 @@ mod tests {
         assert_eq!(lines[1][0].x, 210.0);
         assert_eq!(lines[2][0].y, 30.0);
         assert_eq!(lines[3][1], pos2(310.0, 60.0));
+    }
+
+    #[test]
+    fn camera_points_round_trip_through_every_transform() {
+        let points = [
+            pos2(0.1, 0.2),
+            pos2(0.9, 0.3),
+            pos2(0.5, 0.5),
+            pos2(0.0, 1.0),
+        ];
+        for degrees in [0, 90, 180, 270] {
+            for mirror in [false, true] {
+                let t = Transform::new(degrees, mirror);
+                for crop in [1.0, crop_fraction(608, 1080)] {
+                    for p in points {
+                        let back = from_camera(to_camera(p, t, crop), t, crop);
+                        assert!(
+                            (back - p).length() < 1e-5,
+                            "{degrees} {mirror} {crop} {p:?}"
+                        );
+                    }
+                }
+            }
+        }
+        let near = |a: Pos2, b: Pos2| (a - b).length() < 1e-5;
+        let identity = Transform::default();
+        assert!(near(
+            to_camera(pos2(0.2, 0.7), identity, 1.0),
+            pos2(0.2, 0.7)
+        ));
+        let mirrored = Transform::new(0, true);
+        assert!(near(
+            to_camera(pos2(0.2, 0.7), mirrored, 1.0),
+            pos2(0.8, 0.7)
+        ));
+        // Turned upside down: the shown top left is the camera's bottom right.
+        let turned = Transform::new(180, false);
+        assert!(near(to_camera(pos2(0.0, 0.0), turned, 1.0), pos2(1.0, 1.0)));
+        // The portrait crop shows the middle of the camera's width.
+        let crop = crop_fraction(608, 1080);
+        assert!((crop - 0.3167).abs() < 1e-3);
+        assert!(near(
+            to_camera(pos2(0.5, 0.5), identity, crop),
+            pos2(0.5, 0.5)
+        ));
+        assert!((to_camera(pos2(0.0, 0.5), identity, crop).x - 0.3417).abs() < 1e-3);
+        assert_eq!(crop_fraction(1920, 1080), 1.0);
+        assert_eq!(crop_fraction(0, 0), 1.0);
+    }
+
+    #[test]
+    fn camera_points_match_the_rotated_pixels() {
+        use gimbly_vcam_shm::pixel::{Nv12View, transform_into};
+        // A 4x4 picture whose luma is the pixel index; read back which source
+        // pixel lands at each shown corner (no bars for a square picture).
+        let (w, h) = (4usize, 4usize);
+        let y: Vec<u8> = (0..(w * h) as u8).collect();
+        let uv = vec![128u8; w * h / 2];
+        let src = Nv12View {
+            width: w,
+            height: h,
+            y: &y,
+            y_stride: w,
+            uv: &uv,
+            uv_stride: w,
+        };
+        for degrees in [0, 90, 180, 270] {
+            for mirror in [false, true] {
+                let t = Transform::new(degrees, mirror);
+                let mut out = Vec::new();
+                let view = transform_into(&src, t, &mut out);
+                for (col, row) in [(0usize, 0usize), (3, 0), (0, 3), (2, 1)] {
+                    let source = view.y[row * view.y_stride + col] as usize;
+                    let shown = pos2((col as f32 + 0.5) / 4.0, (row as f32 + 0.5) / 4.0);
+                    let camera = to_camera(shown, t, 1.0);
+                    let expected = pos2(
+                        ((source % w) as f32 + 0.5) / 4.0,
+                        ((source / w) as f32 + 0.5) / 4.0,
+                    );
+                    assert!(
+                        (camera - expected).length() < 1e-5,
+                        "{degrees} {mirror} {col},{row}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

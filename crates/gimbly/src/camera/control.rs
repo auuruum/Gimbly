@@ -3,10 +3,13 @@
 
 use super::queue::Receiver;
 use super::sleep::SleepReadback;
-use super::{Command, GimbalCommand, PRESET_SLOTS, Preset, Shared, vendor};
+use super::{
+    AiMode, AutoZoom, Command, Composition, Feature, GimbalCommand, Hand, HandRange,
+    HandRangeField, ObjectFraming, PRESET_SLOTS, Preset, Shared, TrackingMode, TrackingSpeed,
+    VoiceRange, serial, vendor,
+};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-
-pub(super) const TINY_3_LITE: u16 = 0xff04;
 
 pub(super) trait Transport {
     fn read(&self, selector: u32, block: &mut [u8; vendor::MESSAGE_LEN]) -> Result<usize, String>;
@@ -31,10 +34,20 @@ impl<T: Transport> Channel<T> {
     }
 
     pub(super) fn initialize(&mut self, shared: &Shared) -> ZoomRefresh {
-        shared.set_sleeping(self.read_sleep().unwrap_or(false));
+        let view = self.read_view();
+        shared.set_sleeping(view.is_some_and(|view| view.sleeping));
         let ratio = self.read_zoom().ok();
         let presets = self.presets().ok();
+        let tracking_speed = self.read_tracking_speed().ok();
+        let hand = self.read_hand().ok();
         let mut status = shared.status();
+        status.ai_mode = view.and_then(|view| view.ai_mode);
+        status.auto_zoom = view.and_then(|view| view.auto_zoom);
+        status.voice_range = view.and_then(|view| view.voice_range);
+        status.sound_source = view.and_then(|view| view.sound_source);
+        status.object_framing = view.and_then(|view| view.object_framing);
+        status.tracking_speed = tracking_speed;
+        status.hand = hand;
         status.zoom_ratio = ratio;
         status.presets = presets;
         status.vendor_control = true;
@@ -74,7 +87,21 @@ impl<T: Transport> Channel<T> {
     }
 
     pub(super) fn request(&mut self, command: [u8; 2], data: Vec<u8>) -> Result<Vec<u8>, String> {
-        let mut request = vendor::Message::new(vendor::GIMBAL, command, data).requesting_reply();
+        self.request_from(vendor::GIMBAL, command, data)
+    }
+
+    fn request_from(
+        &mut self,
+        destination: u8,
+        command: [u8; 2],
+        data: Vec<u8>,
+    ) -> Result<Vec<u8>, String> {
+        self.exchange(vendor::Message::new(destination, command, data).requesting_reply())
+    }
+
+    /// Sends `request` and waits for its reply's data.
+    fn exchange(&mut self, mut request: vendor::Message) -> Result<Vec<u8>, String> {
+        let command = request.command;
         self.sender.number(&mut request);
         self.set(vendor::SELECTOR_COMMAND, &mut request.encode())?;
         // The XU may still return an older reply before this one is ready.
@@ -94,14 +121,162 @@ impl<T: Transport> Channel<T> {
         ))
     }
 
-    pub(super) fn read_sleep(&self) -> Option<bool> {
+    /// Sleep and AI state from one read of the status block.
+    pub(super) fn read_view(&self) -> Option<View> {
         let (block, len) = self.get(vendor::SELECTOR_VIEW).ok()?;
-        vendor::sleeping(&block[..len])
+        let block = &block[..len];
+        Some(View {
+            sleeping: vendor::sleeping(block)?,
+            ai_mode: vendor::read_ai_mode(block),
+            auto_zoom: vendor::read_auto_zoom(block),
+            voice_range: vendor::read_voice_range(block),
+            sound_source: vendor::read_sound_source(block),
+            object_framing: vendor::read_object_framing(block),
+        })
+    }
+
+    /// Sets the camera's target report for the serial port (see
+    /// [`serial`]) the way the official app does: once when it connects,
+    /// then after every tracking change. Best effort: the box is optional.
+    fn target_report(&mut self, tracking: bool, connecting: bool) {
+        if connecting {
+            let (destination, command) = vendor::TARGET_STREAM_START;
+            let _ = self.request_from(destination, command, Vec::new());
+        }
+        let Ok(reply) = self.exchange(vendor::read_report_settings()) else {
+            return;
+        };
+        if let Some(message) = vendor::target_report(&reply, tracking) {
+            let _ = self.send(message);
+        }
+    }
+
+    fn read_setting(&mut self, key: u32) -> Result<Vec<u8>, String> {
+        self.request(vendor::READ_SETTING, vendor::read_setting_request(key))
+    }
+
+    fn read_composition(&mut self) -> Result<Composition, String> {
+        let invalid = || "Camera returned an invalid composition setting".to_string();
+        let face = self.read_setting(vendor::SETTING_FACE_FRAMING)?;
+        let x = self.read_setting(vendor::SETTING_COMPOSITION_X)?;
+        let y = self.read_setting(vendor::SETTING_COMPOSITION_Y)?;
+        Ok(Composition {
+            x: vendor::read_composition(&x).ok_or_else(invalid)?,
+            y: vendor::read_composition(&y).ok_or_else(invalid)?,
+            face_framing: vendor::read_face_framing(&face).ok_or_else(invalid)?,
+        })
+    }
+
+    fn read_hand(&mut self) -> Result<Hand, String> {
+        let data = self.request(
+            vendor::READ_HAND_SETTING,
+            vendor::hand_setting_key(vendor::HAND_SIDE),
+        )?;
+        vendor::read_hand(&data).ok_or_else(|| "Camera returned an unknown hand".into())
+    }
+
+    /// Reads the Hand Tracking range, then enters the range-edit state.
+    fn open_hand_range(&mut self, shared: &Shared) -> Result<(), String> {
+        // The official app reads twice, first with data `ff`; the replies matched.
+        let _ = self.request(vendor::READ_RETURN_POSITION, vec![0xff]);
+        let record =
+            vendor::read_return_record(&self.request(vendor::READ_RETURN_POSITION, Vec::new())?)
+                .ok_or("Camera returned an invalid return position")?;
+        let mut limits = [0.0; 4];
+        for (key, limit) in (0u32..).zip(&mut limits) {
+            let data = self.request(vendor::READ_HAND_SETTING, vendor::hand_setting_key(key))?;
+            *limit =
+                vendor::read_hand_limit(&data).ok_or("Camera returned an invalid range limit")?;
+        }
+        // The official app then reads keys 0-3 again with one more `00` byte
+        // and gets the same replies; Gimbly skips that.
+        self.set(vendor::SELECTOR_VIEW, &mut vendor::hand_range_edit(true))?;
+        shared.status().hand_range = Some(HandRange { limits, record });
+        self.send(vendor::hand_range_gimbal(true))
+    }
+
+    fn update_hand_range(&mut self, shared: &Shared, field: HandRangeField) -> Result<(), String> {
+        let mut range = shared
+            .status()
+            .hand_range
+            .ok_or("The Hand Tracking range is not open")?;
+        let current = self.request(vendor::READ_POSITION, Vec::new())?;
+        let angles =
+            vendor::current_angles(&current).ok_or("Camera returned an invalid gimbal position")?;
+        match field {
+            HandRangeField::Limit(key) => {
+                let (yaw, pitch) = angles;
+                let value = f32::from(if key < 2 { yaw } else { pitch }) / 100.0;
+                let mut limits = range.limits;
+                *limits.get_mut(key).ok_or("Unknown range limit")? = value;
+                if !vendor::hand_limits_valid(&limits) {
+                    return Err("Keep at least 10° between opposite limits".into());
+                }
+                range.limits = limits;
+            }
+            HandRangeField::Return => {
+                let ratio = self.read_zoom()?;
+                range.record = vendor::set_return_position(&range.record, angles, ratio)
+                    .ok_or("Camera returned an invalid zoom ratio")?;
+                // Like the official app, ask before widening the range to it.
+                if let Some(wider) = range.including_return() {
+                    shared.status().hand_range_proposal = Some(wider);
+                    return Ok(());
+                }
+            }
+        }
+        shared.status().hand_range = Some(range);
+        Ok(())
+    }
+
+    /// The panel's two reset icons; they only change the values on screen.
+    fn reset_hand_range(shared: &Shared, limits: bool) {
+        let mut status = shared.status();
+        if let Some(range) = &mut status.hand_range {
+            if limits {
+                range.limits = HandRange::DEFAULT_LIMITS;
+            } else {
+                range.record = vendor::RETURN_RECORD_NONE;
+            }
+        }
+    }
+
+    fn confirm_hand_range(shared: &Shared, widen: bool) {
+        let mut status = shared.status();
+        let proposal = status.hand_range_proposal.take();
+        if widen && status.hand_range.is_some() {
+            status.hand_range = proposal.or(status.hand_range);
+        }
+    }
+
+    /// Leaves the range-edit state, writing the range when `save` is set.
+    fn close_hand_range(&mut self, shared: &Shared, save: bool) -> Result<(), String> {
+        let Some(range) = shared.status().hand_range else {
+            return Ok(());
+        };
+        let mut close = || {
+            self.set(vendor::SELECTOR_VIEW, &mut vendor::hand_range_edit(false))?;
+            vendor::hand_range_close(save.then_some(&range))
+                .into_iter()
+                .try_for_each(|message| self.send(message))
+        };
+        let result = close();
+        // Cleared only now: exiting waits for this.
+        let mut status = shared.status();
+        status.hand_range = None;
+        status.hand_range_proposal = None;
+        result
     }
 
     pub(super) fn read_zoom(&mut self) -> Result<f32, String> {
         vendor::read_zoom(&self.request(vendor::READ_ZOOM, Vec::new())?)
             .ok_or_else(|| "Camera returned an invalid zoom ratio".into())
+    }
+
+    fn read_tracking_speed(&mut self) -> Result<TrackingSpeed, String> {
+        let data = self.request(vendor::READ_SETTING, vendor::read_tracking_speed_request())?;
+        vendor::read_tracking_speed(&data)
+            .ok_or_else(|| "Camera returned an unknown tracking speed".into())
     }
 
     fn preset_ids(&mut self) -> Result<Vec<u8>, String> {
@@ -188,6 +363,125 @@ impl<T: Transport> Channel<T> {
                 shared.status().fov = Some(fov);
                 *zoom_refresh = follow_zoom();
             }
+            GimbalCommand::SetHumanTracking(mode) => {
+                let zoom = shared.status().auto_zoom.unwrap_or(AutoZoom::Off);
+                for mut block in vendor::human_tracking(mode, zoom) {
+                    self.set(vendor::SELECTOR_VIEW, &mut block)?;
+                }
+                let mut status = shared.status();
+                status.ai_mode = Some(if mode.is_some() {
+                    AiMode::Human
+                } else {
+                    AiMode::Off
+                });
+                status.tracking_mode = mode;
+                // Auto Zoom moves the zoom once tracking starts.
+                *zoom_refresh = follow_zoom();
+            }
+            GimbalCommand::SetAutoZoom(zoom) => {
+                let tracking = {
+                    let status = shared.status();
+                    if status.auto_zoom == Some(zoom) {
+                        return Ok(());
+                    }
+                    (status.ai_mode == Some(AiMode::Human)).then_some(status.tracking_mode)
+                };
+                for mut block in vendor::auto_zoom(zoom, tracking) {
+                    self.set(vendor::SELECTOR_VIEW, &mut block)?;
+                }
+                shared.status().auto_zoom = Some(zoom);
+                *zoom_refresh = follow_zoom();
+            }
+            GimbalCommand::SetTrackingSpeed(speed) => {
+                if shared.status().tracking_speed == Some(speed) {
+                    return Ok(());
+                }
+                for message in vendor::tracking_speed(speed) {
+                    self.send(message)?;
+                }
+                shared.status().tracking_speed = Some(speed);
+            }
+            GimbalCommand::SetAiMode(mode) => {
+                self.set(vendor::SELECTOR_VIEW, &mut vendor::ai_mode(mode))?;
+                let hand = (mode == AiMode::Hand)
+                    .then(|| self.read_hand().ok())
+                    .flatten();
+                let mut status = shared.status();
+                status.ai_mode = Some(mode);
+                status.tracking_mode = None;
+                status.hand = hand.or(status.hand);
+            }
+            GimbalCommand::SetVoiceRange(range) => {
+                self.set(vendor::SELECTOR_VIEW, &mut vendor::voice_range(range))?;
+                shared.status().voice_range = Some(range);
+            }
+            GimbalCommand::SetSoundSource(on) => {
+                self.set(vendor::SELECTOR_VIEW, &mut vendor::sound_source(on))?;
+                shared.status().sound_source = Some(on);
+            }
+            GimbalCommand::SetHand(hand) => {
+                self.send(vendor::hand(hand))?;
+                shared.status().hand = Some(hand);
+            }
+            GimbalCommand::SelectPoint { x, y } => {
+                self.send(vendor::select_point(x, y))?;
+                // The official app showed Single Mode after a double-click.
+                let mut status = shared.status();
+                status.ai_mode = Some(AiMode::Human);
+                status.tracking_mode = Some(TrackingMode::Single);
+                status.object_framing = None;
+            }
+            GimbalCommand::SelectObject(target) => {
+                self.send(vendor::select_object(target))?;
+                let mut status = shared.status();
+                status.ai_mode = Some(AiMode::Human);
+                status.tracking_mode = None;
+                status.object_framing = Some(ObjectFraming::Normal);
+                *zoom_refresh = follow_zoom();
+            }
+            GimbalCommand::CancelTarget => {
+                self.send(vendor::cancel_target())?;
+                let mut status = shared.status();
+                status.ai_mode = Some(AiMode::Off);
+                status.tracking_mode = None;
+                status.object_framing = None;
+            }
+            GimbalCommand::SetObjectFraming(framing) => {
+                self.send(vendor::object_framing(framing))?;
+                shared.status().object_framing = Some(framing);
+                *zoom_refresh = follow_zoom();
+            }
+            GimbalCommand::ReadComposition => {
+                let composition = self.read_composition();
+                shared.status().composition = composition.as_ref().ok().copied();
+                composition?;
+            }
+            GimbalCommand::SetComposition { x, y } => {
+                for message in vendor::composition(x, y) {
+                    self.send(message)?;
+                }
+                let mut status = shared.status();
+                let composition = status.composition.get_or_insert_default();
+                composition.x = super::clamp_composition(x);
+                composition.y = super::clamp_composition(y);
+            }
+            GimbalCommand::SetFaceFraming(on) => {
+                self.send(vendor::face_framing(on))?;
+                shared
+                    .status()
+                    .composition
+                    .get_or_insert_default()
+                    .face_framing = on;
+            }
+            GimbalCommand::OpenHandRange => self.open_hand_range(shared)?,
+            GimbalCommand::UpdateHandRange(field) => self.update_hand_range(shared, field)?,
+            GimbalCommand::ResetHandRange { limits } => Self::reset_hand_range(shared, limits),
+            GimbalCommand::ConfirmHandRange(widen) => Self::confirm_hand_range(shared, widen),
+            GimbalCommand::CloseHandRange { save } => {
+                self.close_hand_range(shared, save)?;
+                // The close sequence zooms back to 1.0x.
+                *zoom_refresh = follow_zoom();
+            }
             GimbalCommand::ZoomRatio(ratio) => {
                 let (message, ratio) = vendor::zoom(ratio).ok_or("Zoom ratio is out of range")?;
                 if shared.status().zoom_ratio == Some(ratio) && shared.status().fov.is_none() {
@@ -211,8 +505,13 @@ impl<T: Transport> Channel<T> {
             }
             _ => {
                 self.send(vendor::for_gimbal(&command).ok_or("Unsupported gimbal command")?)?;
-                if matches!(command, GimbalCommand::TriggerPreset(_)) {
-                    shared.status().fov = None;
+                if matches!(
+                    command,
+                    GimbalCommand::TriggerPreset(_) | GimbalCommand::ResetWithZoom
+                ) {
+                    // The official app showed Wide after the 1.0x reset.
+                    shared.status().fov =
+                        (command == GimbalCommand::ResetWithZoom).then_some(super::Fov::Wide);
                     *zoom_refresh = follow_zoom();
                 }
             }
@@ -230,6 +529,10 @@ const ZOOM_FOLLOW_EVERY: Duration = Duration::from_millis(200);
 /// Long enough for the camera to settle after a field of view change.
 const ZOOM_FOLLOW_FOR: Duration = Duration::from_millis(2500);
 
+/// How long the status block may lag a tracking write (it showed the new
+/// state within 2 s in the 2026-11-21 capture).
+const TRACKING_SETTLE: Duration = Duration::from_millis(2500);
+
 pub(super) fn read_zoom_in(delay: Duration) -> ZoomRefresh {
     let at = Instant::now() + delay;
     Some((at, at))
@@ -243,7 +546,33 @@ fn follow_zoom() -> ZoomRefresh {
 /// Carries out vendor commands and polls the camera's state. Every vendor
 /// write and read waits for the camera, so this runs on its own thread and
 /// the frame loop never waits on it. Returns when `commands` disconnects.
+/// The tracked target's box is read from the camera's serial port on one
+/// more thread; `device_id` identifies the camera for it.
 pub(super) fn control_loop(
+    xu: Channel<impl Transport>,
+    commands: &Receiver,
+    shared: &Shared,
+    repaint: &(dyn Fn() + Send + Sync),
+    zoom_refresh: ZoomRefresh,
+    device_id: &str,
+) {
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let stop = &stop;
+        let started = std::thread::Builder::new()
+            .name("camera-target".into())
+            .spawn_scoped(scope, move || {
+                serial::target_stream(device_id, shared, repaint, stop)
+            });
+        if started.is_err() {
+            shared.status().error = Some("Could not start the tracking box reader".into());
+        }
+        commands_loop(xu, commands, shared, repaint, zoom_refresh);
+        stop.store(true, Ordering::Relaxed);
+    });
+}
+
+fn commands_loop(
     mut xu: Channel<impl Transport>,
     commands: &Receiver,
     shared: &Shared,
@@ -252,9 +581,13 @@ pub(super) fn control_loop(
 ) {
     let mut sleep_polled = Instant::now();
     let mut sleep_readback = SleepReadback::default();
+    let mut tracking_sent: Option<Instant> = None;
     let mut preset_retries = 0;
     let mut dragging = false;
     let mut stopped = false;
+    // The tracking state last given to the target report; `None` until set
+    // and after a wake.
+    let mut report: Option<bool> = None;
     loop {
         let mut wake = sleep_polled + Duration::from_secs(1);
         if let Some((next, _)) = zoom_refresh {
@@ -294,6 +627,20 @@ pub(super) fn control_loop(
                     if matches!(command, GimbalCommand::Drag(false)) && !stopped {
                         let _ = xu.send(vendor::speed(0.0, 0.0));
                     }
+                    if matches!(
+                        command,
+                        GimbalCommand::SetHumanTracking(_)
+                            | GimbalCommand::SetAutoZoom(_)
+                            | GimbalCommand::SetAiMode(_)
+                            | GimbalCommand::SetVoiceRange(_)
+                            | GimbalCommand::SetSoundSource(_)
+                            | GimbalCommand::SelectPoint { .. }
+                            | GimbalCommand::SelectObject(_)
+                            | GimbalCommand::CancelTarget
+                            | GimbalCommand::SetObjectFraming(_)
+                    ) {
+                        tracking_sent = Some(Instant::now());
+                    }
                     match xu.gimbal(command, shared, &mut zoom_refresh) {
                         Ok(()) => {
                             dragging = next_dragging;
@@ -307,12 +654,53 @@ pub(super) fn control_loop(
             }
         }
         if sleep_polled.elapsed() >= Duration::from_secs(1) {
-            if let Some(sleeping) = xu
-                .read_sleep()
-                .and_then(|sleeping| sleep_readback.observe(sleeping, Instant::now()))
+            let view = xu.read_view();
+            // The status block can still show the old state just after a write.
+            if let Some(view) = view
+                && tracking_sent.is_none_or(|sent| sent.elapsed() >= TRACKING_SETTLE)
+            {
+                let mut status = shared.status();
+                let before = (
+                    status.ai_mode,
+                    status.auto_zoom,
+                    status.voice_range,
+                    status.sound_source,
+                    status.object_framing,
+                );
+                // Unknown values (such as the switching value 6) keep the old state.
+                status.ai_mode = view.ai_mode.or(status.ai_mode);
+                status.auto_zoom = view.auto_zoom.or(status.auto_zoom);
+                status.voice_range = view.voice_range.or(status.voice_range);
+                status.sound_source = view.sound_source.or(status.sound_source);
+                // Another app may turn tracking on later in a mode we cannot read.
+                if view.ai_mode.is_some_and(|mode| mode != AiMode::Human) {
+                    status.tracking_mode = None;
+                }
+                if view.ai_mode.is_some() {
+                    status.object_framing = view.object_framing;
+                }
+                if status.object_framing.is_some() {
+                    status.tracking_mode = None;
+                }
+                let changed = before
+                    != (
+                        status.ai_mode,
+                        status.auto_zoom,
+                        status.voice_range,
+                        status.sound_source,
+                        status.object_framing,
+                    );
+                drop(status);
+                if changed {
+                    repaint();
+                }
+            }
+            if let Some(sleeping) =
+                view.and_then(|view| sleep_readback.observe(view.sleeping, Instant::now()))
                 && shared.set_sleeping(sleeping)
             {
                 preset_retries = 0;
+                report = None;
                 zoom_refresh = if sleeping {
                     None
                 } else {
@@ -322,20 +710,44 @@ pub(super) fn control_loop(
             }
             sleep_polled = Instant::now();
             // Opening or waking the stream can briefly interrupt replies.
-            let retry_presets = {
+            let (retry_presets, retry_speed, retry_hand) = {
                 let status = shared.status();
-                if status.presets.is_some() {
+                if status.presets.is_some()
+                    && status.tracking_speed.is_some()
+                    && status.hand.is_some()
+                {
                     preset_retries = 0;
                 }
-                !status.sleeping && status.presets.is_none() && preset_retries < 3
+                let retry = !status.sleeping && preset_retries < 3;
+                (
+                    retry && status.presets.is_none(),
+                    retry && status.tracking_speed.is_none(),
+                    retry && status.hand.is_none(),
+                )
             };
-            if retry_presets {
+            if retry_presets || retry_speed || retry_hand {
                 preset_retries += 1;
-                if let Ok(presets) = xu.presets() {
-                    shared.status().presets = Some(presets);
-                    repaint();
-                }
             }
+            if retry_hand && let Ok(hand) = xu.read_hand() {
+                shared.status().hand = Some(hand);
+                repaint();
+            }
+            if retry_presets && let Ok(presets) = xu.presets() {
+                shared.status().presets = Some(presets);
+                repaint();
+            }
+            if retry_speed && let Ok(speed) = xu.read_tracking_speed() {
+                shared.status().tracking_speed = Some(speed);
+                repaint();
+            }
+        }
+        let (tracking, sleeping) = {
+            let status = shared.status();
+            (status.ai_mode == Some(AiMode::Human), status.sleeping)
+        };
+        if !sleeping && report != Some(tracking) {
+            xu.target_report(tracking, report.is_none());
+            report = Some(tracking);
         }
         if let Some((next, until)) = zoom_refresh.filter(|(next, _)| Instant::now() >= *next) {
             zoom_refresh = (next < until).then(|| {
@@ -356,6 +768,20 @@ pub(super) fn control_loop(
         let _ = xu.send(vendor::speed(0.0, 0.0));
         let _ = xu.send(vendor::manual_move(false));
     }
+    // Never leave the camera in the range-edit state (best effort: it may
+    // be gone already).
+    let _ = xu.close_hand_range(shared, false);
+}
+
+/// The status block fields Gimbly reads.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct View {
+    pub sleeping: bool,
+    pub ai_mode: Option<AiMode>,
+    pub auto_zoom: Option<AutoZoom>,
+    pub voice_range: Option<VoiceRange>,
+    pub sound_source: Option<bool>,
+    pub object_framing: Option<ObjectFraming>,
 }
 
 /// Finds the control interface and unit by GUID in a USB descriptor stream.
@@ -450,6 +876,46 @@ pub(super) fn zoom_loop(
     }
 }
 
+/// What the camera answers for each feature, using reads only. Run it with
+/// `gimbly --probe --controls report` when adding a model.
+pub(super) fn report(xu: &mut Channel<impl Transport>) -> Vec<String> {
+    let view = xu.read_view();
+    let mut lines = vec![format!(
+        "status block (selector 6): {}",
+        if view.is_some() {
+            "recognized"
+        } else {
+            "not recognized"
+        }
+    )];
+    for feature in Feature::ALL {
+        let answer = match feature {
+            Feature::Gimbal => format!(
+                "{:?}",
+                xu.request(vendor::READ_POSITION, Vec::new())
+                    .map(|data| vendor::current_angles(&data))
+            ),
+            Feature::Zoom => format!("{:?}", xu.read_zoom()),
+            Feature::FieldOfView => "no readback; try Wide, Medium and Narrow".into(),
+            Feature::Presets => format!("{:?}", xu.presets().map(|p| p.len())),
+            Feature::Sleep => format!("sleeping {:?}", view.map(|v| v.sleeping)),
+            Feature::HumanTracking => format!("{:?}", view.map(|v| v.ai_mode)),
+            Feature::AutoZoom => format!("{:?}", view.map(|v| v.auto_zoom)),
+            Feature::TrackingSpeed => format!("{:?}", xu.read_tracking_speed()),
+            Feature::SoundSource => format!("{:?}", view.map(|v| v.sound_source)),
+            Feature::ObjectTracking => format!(
+                "{:?} (None unless an object is tracked)",
+                view.map(|v| v.object_framing)
+            ),
+            Feature::Composition => format!("{:?}", xu.read_composition()),
+            Feature::VoiceTracking => format!("{:?}", view.map(|v| v.voice_range)),
+            Feature::HandTracking => format!("{:?}", xu.read_hand()),
+        };
+        lines.push(format!("{}: {answer}", feature.name()));
+    }
+    lines
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn probe(
     xu: &mut Channel<impl Transport>,
@@ -465,6 +931,7 @@ pub(super) fn probe(
                 xu.read_zoom(),
                 xu.presets()
             )),
+            ["report"] => lines.extend(report(xu)),
             ["ptz"] => lines.push(format!(
                 "current position bytes: {:?}",
                 xu.request(vendor::READ_POSITION, Vec::new())?

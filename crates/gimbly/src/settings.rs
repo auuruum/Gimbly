@@ -429,6 +429,8 @@ pub struct Settings {
     pub osc_connection: OscConnection,
     pub osc_host: String,
     pub osc_port: u16,
+    /// The preview's first-run hint (drag and double-click) was dismissed.
+    pub preview_hint_seen: bool,
 }
 
 impl Default for Settings {
@@ -447,6 +449,7 @@ impl Default for Settings {
             osc_connection: OscConnection::UdpServer,
             osc_host: String::new(),
             osc_port: 16284,
+            preview_hint_seen: false,
         }
     }
 }
@@ -548,6 +551,7 @@ impl Settings {
         if let Some(v) = get("General", "CloseTheSoftware").and_then(|v| CloseAction::parse(v)) {
             s.close_action = v;
         }
+        s.preview_hint_seen = get("General", "PreviewHintSeen").is_some_and(|v| v == "true");
         if let Some(v) = get("Hotkeys", "Enabled") {
             s.hotkeys_enabled = v == "true";
         }
@@ -583,6 +587,7 @@ impl Settings {
         out += &format!("PreviewMirror={}\n", self.transform.mirror);
         out += "\n[General]\n";
         out += &format!("CloseTheSoftware={}\n", self.close_action.label());
+        out += &format!("PreviewHintSeen={}\n", self.preview_hint_seen);
         out += "\n[Hotkeys]\n";
         out += &format!("Enabled={}\n", self.hotkeys_enabled);
         out += "\n[Hotkeys.Bindings]\n";
@@ -627,6 +632,7 @@ mod tests {
             osc_connection: OscConnection::TcpServer,
             osc_host: "192.168.1.5".into(),
             osc_port: 9000,
+            preview_hint_seen: true,
             ..Settings::default()
         };
         s.hotkeys
@@ -649,12 +655,19 @@ mod tests {
             "Alt + X",
             "Ctrl + Alt + F12",
             "Alt + Up",
-            "Win + 4",
             "Alt + =",
         ] {
             let combo = KeyCombo::parse(text).unwrap();
             assert_eq!(combo.to_string(), text);
         }
+        let system_combo = KeyCombo::parse("Win + 4").unwrap();
+        assert_eq!(KeyCombo::parse("Cmd + 4"), Some(system_combo));
+        let system_label = if cfg!(target_os = "macos") {
+            "Cmd + 4"
+        } else {
+            "Win + 4"
+        };
+        assert_eq!(system_combo.to_string(), system_label);
         assert_eq!(KeyCombo::parse("Shift + A"), None, "needs Ctrl, Alt or Win");
         assert_eq!(KeyCombo::parse("Alt + Banana"), None);
     }

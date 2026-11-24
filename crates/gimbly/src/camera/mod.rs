@@ -5,8 +5,10 @@
 
 mod control;
 mod frames;
+mod models;
 mod preview;
 mod queue;
+mod serial;
 mod sleep;
 mod standby;
 mod vendor;
@@ -34,6 +36,7 @@ mod unsupported;
 use self::unsupported as backend;
 
 pub use gimbly_vcam_shm::Transform;
+pub use models::{Feature, Model};
 pub use preview::{PreviewFrame, YuvRange};
 
 use queue::{Receiver, Sender, channel};
@@ -56,6 +59,12 @@ pub struct DeviceInfo {
 impl DeviceInfo {
     pub fn is_obsbot(&self) -> bool {
         self.usb_vendor_id == Some(OBSBOT_USB_VENDOR_ID)
+    }
+
+    /// The model when Gimbly drives this camera's vendor controls; other
+    /// cameras get video only.
+    pub fn model(&self) -> Option<&'static Model> {
+        Model::find(self.usb_product_id?).filter(|_| self.is_obsbot())
     }
 }
 
@@ -197,6 +206,8 @@ pub struct SessionStatus {
     pub measured_fps: f32,
     pub zoom_range: Option<ZoomRange>,
     pub zoom: Option<i32>,
+    /// The OBSBOT model Gimbly drives; `None` for other cameras.
+    pub model: Option<&'static Model>,
     /// The camera accepts OBSBOT vendor commands such as sleep.
     pub vendor_control: bool,
     /// An OBSBOT camera whose vendor commands are not verified yet.
@@ -208,6 +219,37 @@ pub struct SessionStatus {
     pub zoom_ratio: Option<f32>,
     /// Field of view the camera reports; `None` after a manual zoom.
     pub fov: Option<Fov>,
+    /// AI mode the camera reports running; `None` until read.
+    pub ai_mode: Option<AiMode>,
+    /// Mode Gimbly last turned Human Tracking on in. The camera reports the
+    /// same state for both modes, so this is `None` when Gimbly did not set it.
+    pub tracking_mode: Option<TrackingMode>,
+    /// Auto Zoom framing the camera reports; `None` until read.
+    pub auto_zoom: Option<AutoZoom>,
+    /// Tracking speed the camera reports; `None` until read.
+    pub tracking_speed: Option<TrackingSpeed>,
+    /// Voice Tracking Range the camera reports; `None` until read.
+    pub voice_range: Option<VoiceRange>,
+    /// Sound Source Assisted Tracking the camera reports; `None` until read.
+    pub sound_source: Option<bool>,
+    /// The hand Hand Tracking follows; `None` until read.
+    pub hand: Option<Hand>,
+    /// The Hand Tracking range being edited. `Some` exactly while the camera
+    /// is in its range-edit state.
+    pub hand_range: Option<HandRange>,
+    /// A return position outside the range, waiting for the user to widen
+    /// the range to it (see [`HandRange::including_return`]).
+    pub hand_range_proposal: Option<HandRange>,
+    /// Object tracking runs, framed like this; `None` when it does not.
+    pub object_framing: Option<ObjectFraming>,
+    /// The box of the tracked target, streamed by the camera; `None` when
+    /// nothing is tracked or the stream is unavailable.
+    pub target: Option<TargetBox>,
+    /// The camera's serial port, which carries [`Self::target`], could not
+    /// be opened for lack of permission (Linux). Cleared once it opens.
+    pub serial_denied: Option<SerialDenied>,
+    /// The AI Composition settings, read when the composition mode opens.
+    pub composition: Option<Composition>,
     /// Stored preset positions, in the camera's order. `None` until read.
     pub presets: Option<Vec<Preset>>,
     /// The virtual camera has received at least one frame in this session.
@@ -243,9 +285,62 @@ pub enum GimbalCommand {
     },
     /// Return to the initial position.
     Reset,
+    /// Return to the initial position and zoom to 1.0x, as the Hand
+    /// Tracking range panel's Reset does.
+    ResetWithZoom,
+    /// Turn to absolute angles in degrees, in the camera's sign; `None`
+    /// keeps that axis.
+    MoveTo {
+        pitch: Option<f32>,
+        yaw: Option<f32>,
+    },
     /// Zoom to a ratio between 1.0 and [`ZOOM_RATIO_MAX`].
     ZoomRatio(f32),
     SetFov(Fov),
+    /// Turn Human Tracking on in a mode, or off with `None`.
+    SetHumanTracking(Option<TrackingMode>),
+    SetAutoZoom(AutoZoom),
+    SetTrackingSpeed(TrackingSpeed),
+    /// Start Voice or Hand Tracking, or stop the running AI mode with `Off`.
+    SetAiMode(AiMode),
+    SetVoiceRange(VoiceRange),
+    SetSoundSource(bool),
+    SetHand(Hand),
+    /// Read the Hand Tracking range and put the camera in its edit state.
+    OpenHandRange,
+    /// Take one range value from the current gimbal position (and zoom).
+    UpdateHandRange(HandRangeField),
+    /// Put the four limits (`limits`) or the return position back to the
+    /// defaults in the panel; nothing is written until Done.
+    ResetHandRange {
+        limits: bool,
+    },
+    /// Answer the question in [`Status::hand_range_proposal`]: `true`
+    /// widens the range to take the new return position.
+    ConfirmHandRange(bool),
+    /// Leave the edit state, writing the edited range when `save` is set.
+    CloseHandRange {
+        save: bool,
+    },
+    /// Track the person at this point (fractions of the camera picture),
+    /// as a double-click in the preview does.
+    SelectPoint {
+        x: f32,
+        y: f32,
+    },
+    /// Start object tracking on this box.
+    SelectObject(TargetBox),
+    /// Stop tracking the current target.
+    CancelTarget,
+    SetObjectFraming(ObjectFraming),
+    /// Read the AI Composition settings into [`SessionStatus::composition`].
+    ReadComposition,
+    /// Move the subject's place in the picture; see [`Composition`].
+    SetComposition {
+        x: f32,
+        y: f32,
+    },
+    SetFaceFraming(bool),
     TriggerPreset(u8),
     /// Store the current position as a new preset in the first free slot.
     AddPreset,
@@ -270,6 +365,159 @@ pub enum Fov {
 
 impl Fov {
     pub const ALL: [Fov; 3] = [Fov::Wide, Fov::Medium, Fov::Narrow];
+}
+
+/// The two Human Tracking buttons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrackingMode {
+    Single,
+    Group,
+}
+
+/// How Auto Zoom frames the tracked person (the Auto Zoom buttons).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AutoZoom {
+    Off,
+    FullBody,
+    UpperBody,
+    CloseUp,
+    Headless,
+    LowerBody,
+}
+
+impl AutoZoom {
+    pub const ALL: [AutoZoom; 6] = [
+        Self::Off,
+        Self::FullBody,
+        Self::UpperBody,
+        Self::CloseUp,
+        Self::Headless,
+        Self::LowerBody,
+    ];
+
+    /// The official app disables these in Group Mode.
+    pub fn single_only(self) -> bool {
+        matches!(self, Self::CloseUp | Self::Headless | Self::LowerBody)
+    }
+}
+
+/// How fast AI tracking turns the gimbal (the Tracking Speed row).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrackingSpeed {
+    Slow,
+    Standard,
+    Fast,
+}
+
+impl TrackingSpeed {
+    pub const ALL: [TrackingSpeed; 3] = [Self::Slow, Self::Standard, Self::Fast];
+}
+
+/// How object tracking frames the object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObjectFraming {
+    Normal,
+    CloseUp,
+}
+
+/// A serial port the user may not open: its path and owning group.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SerialDenied {
+    pub path: String,
+    pub group: Option<String>,
+}
+
+/// A box in fractions of the camera picture, from its top left corner,
+/// before Gimbly's rotation, mirror and portrait crop.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TargetBox {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+}
+
+impl TargetBox {
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        (self.x0..=self.x1).contains(&x) && (self.y0..=self.y1).contains(&y)
+    }
+}
+
+/// Where Human Tracking places the person: the offset from the picture
+/// centre in fractions of the picture, within ±[`COMPOSITION_LIMIT`]
+/// (positive is right and down).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Composition {
+    pub x: f32,
+    pub y: f32,
+    /// Face Framing: the camera picks the horizontal place itself.
+    pub face_framing: bool,
+}
+
+pub use vendor::clamp_composition;
+
+/// The AI mode the camera runs; only one runs at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AiMode {
+    Off,
+    Human,
+    Hand,
+    Voice,
+}
+
+/// Which directions Voice Tracking listens to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VoiceRange {
+    Omni,
+    Forward,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hand {
+    Left,
+    Right,
+}
+
+/// The Hand Tracking range as the camera stores it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HandRange {
+    /// Degrees in the camera's sign: yaw min, yaw max, pitch min, pitch max.
+    pub limits: [f32; 4],
+    /// Where the gimbal returns when the target leaves the range, in the
+    /// 24-byte preset record layout.
+    pub record: [u8; 24],
+}
+
+impl HandRange {
+    /// The panel's defaults; the camera reported these before any edit.
+    pub const DEFAULT_LIMITS: [f32; 4] = [-45.0, 45.0, -30.0, 30.0];
+
+    /// This range widened just enough to hold its return position, or
+    /// `None` when the position already lies within it.
+    pub fn including_return(&self) -> Option<HandRange> {
+        let (yaw, pitch, _) = self.return_position();
+        let [yaw_min, yaw_max, pitch_min, pitch_max] = self.limits;
+        let limits = [
+            yaw_min.min(yaw),
+            yaw_max.max(yaw),
+            pitch_min.min(pitch),
+            pitch_max.max(pitch),
+        ];
+        (limits != self.limits).then_some(HandRange { limits, ..*self })
+    }
+
+    /// Yaw and pitch in degrees and the zoom ratio of the return position.
+    pub fn return_position(&self) -> (f32, f32, f32) {
+        vendor::return_position(&self.record)
+    }
+}
+
+/// A value of the Hand Tracking range that Update can set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum HandRangeField {
+    /// Index into [`HandRange::limits`].
+    Limit(usize),
+    Return,
 }
 
 /// Largest zoom ratio of the Tiny 3 Lite.
@@ -433,6 +681,7 @@ impl Session {
         repaint: impl Fn() + Send + Sync + 'static,
     ) -> Self {
         let shared = Arc::new(Shared::default());
+        shared.status().model = device.model();
         let (tx, rx) = channel();
         let stop = Arc::new(AtomicBool::new(false));
         if virtual_camera {
@@ -548,6 +797,48 @@ pub fn parse_usb_ids(path: &str) -> (Option<u16>, Option<u16>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vendor_controls_only_for_listed_obsbot_models() {
+        let device = |vendor, product| DeviceInfo {
+            name: String::new(),
+            id: String::new(),
+            usb_vendor_id: vendor,
+            usb_product_id: product,
+        };
+        assert_eq!(
+            device(Some(OBSBOT_USB_VENDOR_ID), Some(0xff04))
+                .model()
+                .map(|m| m.name),
+            Some("Tiny 3 Lite")
+        );
+        // Another OBSBOT model, a non-OBSBOT camera with the same product ID,
+        // and a camera without USB IDs get video only.
+        assert_eq!(
+            device(Some(OBSBOT_USB_VENDOR_ID), Some(0x0001)).model(),
+            None
+        );
+        assert_eq!(device(Some(0x046d), Some(0xff04)).model(), None);
+        assert_eq!(device(None, None).model(), None);
+    }
+
+    #[test]
+    fn return_outside_the_range_widens_only_the_crossed_limits() {
+        // Observed 2026-11-22: return P -55.60° T 30.20° with the default
+        // range turned the right limit into -55.6° and the top into 30.2°.
+        let inside =
+            vendor::set_return_position(&vendor::RETURN_RECORD_NONE, (4490, 3000), 1.42).unwrap();
+        let mut range = HandRange {
+            limits: HandRange::DEFAULT_LIMITS,
+            record: inside,
+        };
+        assert_eq!(range.including_return(), None);
+        range.record = vendor::set_return_position(&range.record, (-5560, -3020), 1.42).unwrap();
+        let wider = range.including_return().unwrap();
+        assert_eq!(wider.limits, [-55.6, 45.0, -30.2, 30.0]);
+        assert_eq!(wider.record, range.record);
+        assert_eq!(wider.including_return(), None);
+    }
 
     #[test]
     fn sleep_and_resume_discard_queued_and_in_flight_preview_frames() {

@@ -1,13 +1,13 @@
-//! The Console sections that drive the gimbal: AI Mode (placeholder),
-//! Preset and View and Gimbal, plus the preset rename dialog.
+//! The Console sections that drive the gimbal: AI Mode, Preset and View and
+//! Gimbal, plus the preset rename dialog and the Hand Tracking range panel.
 //!
 //! Layout and behaviour follow OBSBOT Center's panel for the Tiny 3 Lite; the code is
 //! Gimbly's own.
 
 use super::{GimblyApp, NOT_YET};
 use crate::camera::{
-    Command, Fov, GimbalCommand, PRESET_NAME_MAX, PRESET_SLOTS, Preset, SessionState,
-    ZOOM_RATIO_MAX,
+    AiMode, Command, Feature, Fov, GimbalCommand, Hand, HandRangeField, PRESET_NAME_MAX,
+    PRESET_SLOTS, Preset, SessionState, VoiceRange, ZOOM_RATIO_MAX,
 };
 use crate::gimbal::{self, PanelPull, SpeedMode};
 use crate::joystick::{self, Drag, DragState};
@@ -49,6 +49,8 @@ pub struct GimbalUi {
     zoom_target: Option<(f32, Instant)>,
     /// Preset being renamed and the text typed so far.
     rename: Option<(u8, String)>,
+    /// The Hand Tracking range panel replaces the console.
+    pub hand_range_open: bool,
 }
 
 impl Default for GimbalUi {
@@ -64,6 +66,7 @@ impl Default for GimbalUi {
             pull: PanelPull::default(),
             zoom_target: None,
             rename: None,
+            hand_range_open: false,
         }
     }
 }
@@ -73,6 +76,7 @@ impl GimbalUi {
     pub fn reset_camera(&mut self) {
         self.zoom_target = None;
         self.rename = None;
+        self.hand_range_open = false;
     }
 }
 
@@ -132,31 +136,58 @@ fn header(
 }
 
 impl GimblyApp {
-    fn gimbal_ready(&self) -> bool {
+    pub(super) fn gimbal_ready(&self) -> bool {
         self.status.vendor_control && self.status.state == SessionState::Streaming
     }
 
-    fn gimbal_tip(&self) -> &'static str {
-        if self.status.vendor_control_untested {
-            "Gimbal control is not verified on this camera model yet"
-        } else if self.status.state == SessionState::Streaming {
-            "This camera has no gimbal Gimbly can drive"
-        } else {
-            "Connect an OBSBOT camera first"
+    /// The camera is ready and `feature` was checked on its model.
+    pub(super) fn ready(&self, feature: Feature) -> bool {
+        self.gimbal_ready() && self.supports(feature)
+    }
+
+    pub(super) fn supports(&self, feature: Feature) -> bool {
+        self.status.model.is_some_and(|m| m.supports(feature))
+    }
+
+    /// Why `feature` is unavailable, for its disabled controls.
+    pub(super) fn gimbal_tip(&self, feature: Feature) -> String {
+        match self.status.model {
+            _ if self.status.vendor_control_untested => {
+                "Gimbal control is not verified on this camera model yet".into()
+            }
+            Some(model) if !model.supports(feature) => {
+                format!("{}: not verified on the {} yet", feature.name(), model.name)
+            }
+            _ if self.status.state == SessionState::Streaming => {
+                "This camera has no gimbal Gimbly can drive".into()
+            }
+            _ => "Connect an OBSBOT camera first".into(),
         }
     }
 
+    /// Sends `command` if its feature was checked on this camera's model;
+    /// hotkeys and the preview come through here too.
     pub(super) fn gimbal(&mut self, command: GimbalCommand) {
+        if let Some(model) = self.status.model
+            && !model.allows(&command)
+        {
+            let feature = command.features().first().map_or("This", |f| f.name());
+            self.notify(format!("{feature}: not verified on the {} yet", model.name));
+            return;
+        }
         if let Some(session) = &self.session {
             session.send(Command::Gimbal(command));
         }
     }
 
     pub(super) fn ai_mode_section(&mut self, ui: &mut Ui) {
+        let tip = "Voice Tracking turns to the person speaking; Hand Tracking follows a \
+                   raised hand. Click the highlighted mode again to stop it. Only one AI \
+                   mode runs at a time.";
         self.gimbal_ui.ai_mode_open = header(
             ui,
             "AI Mode",
-            Some(NOT_YET),
+            Some(tip),
             self.gimbal_ui.ai_mode_open,
             |_| {},
         );
@@ -169,13 +200,241 @@ impl GimblyApp {
             top: 20,
             bottom: 20,
         };
+        let mode = self.status.ai_mode;
+        let ready = self.gimbal_ready()
+            && mode.is_some()
+            && (self.supports(Feature::VoiceTracking) || self.supports(Feature::HandTracking));
+        let tip = self.gimbal_tip(Feature::VoiceTracking);
+        let (voice_range, hand) = (self.status.voice_range, self.status.hand);
+        let mut picked = None;
+        let mut open_range = false;
         band(ui, SECTION, margin, |ui| {
-            ui.add_enabled_ui(false, |ui| {
-                pill_row(ui, &["Voice Tracking", "Hand Tracking"], None, 16.0);
-            })
-            .response
-            .on_disabled_hover_text(NOT_YET);
+            ui.add_enabled_ui(ready, |ui| {
+                let modes = [AiMode::Voice, AiMode::Hand];
+                let selected = modes.iter().position(|&m| Some(m) == mode);
+                let row = ui.add_enabled_ui(ready, |ui| {
+                    pill_row(ui, &["Voice Tracking", "Hand Tracking"], selected, 16.0)
+                });
+                row.response.on_disabled_hover_text(&tip);
+                if let Some(i) = row.inner {
+                    let clicked = modes[i];
+                    let next = if mode == Some(clicked) {
+                        AiMode::Off
+                    } else {
+                        clicked
+                    };
+                    picked = Some(GimbalCommand::SetAiMode(next));
+                }
+                ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+                if mode == Some(AiMode::Voice) {
+                    ui.add_space(20.0);
+                    ui.horizontal(|ui| {
+                        ui.set_height(26.0);
+                        ui.label(egui::RichText::new("Voice Tracking Range").size(15.0));
+                        help(
+                            ui,
+                            "Omnidirectional follows voices from all around the camera; \
+                             Forward only voices in front of it",
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            for (range, label, full) in [
+                                (VoiceRange::Forward, "Forward", "Forward"),
+                                (VoiceRange::Omni, "Omni", "Omnidirectional"),
+                            ] {
+                                let size = vec2(70.0, 26.0);
+                                if pill(ui, label, voice_range == Some(range), size)
+                                    .on_hover_text(full)
+                                    .clicked()
+                                {
+                                    picked = Some(GimbalCommand::SetVoiceRange(range));
+                                }
+                            }
+                        });
+                    });
+                }
+                if mode == Some(AiMode::Hand) {
+                    ui.add_space(20.0);
+                    ui.horizontal(|ui| {
+                        ui.set_height(26.0);
+                        ui.label(egui::RichText::new("Hand Tracking").size(15.0));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            open_range = small_button(ui, "Set", vec2(60.0, 25.0))
+                                .on_hover_text("Set the range Hand Tracking may turn within")
+                                .clicked();
+                        });
+                    });
+                    ui.add_space(12.0);
+                    let hands = [Hand::Left, Hand::Right];
+                    let selected = hands.iter().position(|&h| Some(h) == hand);
+                    if let Some(i) = pill_row(ui, &["Left Hand", "Right Hand"], selected, 16.0) {
+                        picked = Some(GimbalCommand::SetHand(hands[i]));
+                    }
+                }
+            });
         });
+        if let Some(command) = picked {
+            self.gimbal(command);
+        }
+        if open_range {
+            self.gimbal_ui.hand_range_open = true;
+            self.gimbal(GimbalCommand::OpenHandRange);
+        }
+    }
+
+    /// Replaces the console while Set is open: Cancel and Done, the four
+    /// limits, the return position and the gimbal controls to aim with.
+    pub(super) fn hand_range_panel(&mut self, ui: &mut Ui) {
+        let range = self.status.hand_range;
+        let mut close = None;
+        let mut update = None;
+        let mut reset = None;
+        let mut go = None;
+        let margin = egui::Margin {
+            left: PADDING as i8,
+            right: PADDING as i8,
+            top: 14,
+            bottom: 20,
+        };
+        band(ui, SECTION, margin, |ui| {
+            ui.horizontal(|ui| {
+                ui.set_height(28.0);
+                if small_button(ui, "Cancel", vec2(74.0, 25.0)).clicked() {
+                    close = Some(false);
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let done = ui
+                        .add_enabled_ui(range.is_some(), |ui| {
+                            small_button(ui, "Done", vec2(74.0, 25.0))
+                        })
+                        .inner
+                        .on_disabled_hover_text("Reading the range from the camera");
+                    if done.clicked() {
+                        close = Some(true);
+                    }
+                });
+            });
+            ui.add_space(12.0);
+            if note_with_reset(
+                ui,
+                "Aim the gimbal, then right-click a limit and choose Update. Hand \
+                 Tracking only follows within this range. Click a limit to turn there.",
+                "Put the four limits back to 45°, -45°, 30° and -30°",
+            ) {
+                reset = Some(true);
+            }
+            ui.add_space(14.0);
+
+            let (rect, _) =
+                ui.allocate_exact_size(vec2(ui.available_width(), 170.0), Sense::hover());
+            let frame = rect.shrink2(vec2(52.0, 26.0));
+            let corners = [
+                frame.left_top(),
+                frame.right_top(),
+                frame.right_bottom(),
+                frame.left_bottom(),
+                frame.left_top(),
+            ];
+            ui.painter().extend(egui::Shape::dashed_line(
+                &corners,
+                Stroke::new(1.0, TEXT_FAINT),
+                4.0,
+                3.0,
+            ));
+            let limits = range.map(|r| r.limits);
+            // Shown as the official app does: pan as is, tilt negated
+            // (`+ 0.0` turns -0.0 into 0.0).
+            let shown = |key: usize, sign: f32| limits.map(|l| sign * l[key] + 0.0);
+            let labels = [
+                (2, pos2(frame.center().x, rect.top() + 12.0), shown(2, -1.0)),
+                (
+                    3,
+                    pos2(frame.center().x, rect.bottom() - 12.0),
+                    shown(3, -1.0),
+                ),
+                (1, pos2(rect.left() + 26.0, frame.center().y), shown(1, 1.0)),
+                (
+                    0,
+                    pos2(rect.right() - 26.0, frame.center().y),
+                    shown(0, 1.0),
+                ),
+            ];
+            for (key, at, value) in labels {
+                let text = value.map_or("--".to_owned(), |v| format!("{v:.1}°"));
+                let field = HandRangeField::Limit(key);
+                let (clicked, chosen) = value_with_update(
+                    ui,
+                    Rect::from_center_size(at, vec2(62.0, 30.0)),
+                    &text,
+                    field,
+                );
+                if chosen {
+                    update = Some(field);
+                }
+                // Limits are kept in the camera's sign, as the gimbal takes them.
+                let limit = limits.and_then(|l| l.get(key).copied());
+                if let Some(limit) = limit.filter(|_| clicked) {
+                    let (pitch, yaw) = if key < 2 {
+                        (None, Some(limit))
+                    } else {
+                        (Some(limit), None)
+                    };
+                    go = Some((GimbalCommand::MoveTo { pitch, yaw }, None));
+                }
+            }
+
+            ui.add_space(10.0);
+            if note_with_reset(
+                ui,
+                "After exceeding the tracking range, the gimbal returns to the set position.",
+                "Put the return position back to P 0°, T 0°, Z 1.0x",
+            ) {
+                reset = Some(false);
+            }
+            ui.add_space(8.0);
+            let (line, _) =
+                ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
+            let text = range.map_or("P: --° | T: --° | Z: --".to_owned(), |r| {
+                let (yaw, pitch, zoom) = r.return_position();
+                format!(
+                    "P: {:.2}° | T: {:.2}° | Z: {zoom:.2}",
+                    yaw + 0.0,
+                    -pitch + 0.0
+                )
+            });
+            let (clicked, chosen) = value_with_update(ui, line, &text, HandRangeField::Return);
+            if chosen {
+                update = Some(HandRangeField::Return);
+            }
+            if let Some((yaw, pitch, zoom)) = range.filter(|_| clicked).map(|r| r.return_position())
+            {
+                let to = GimbalCommand::MoveTo {
+                    pitch: Some(pitch),
+                    yaw: Some(yaw),
+                };
+                go = Some((to, Some(zoom)));
+            }
+        });
+        self.gimbal_controls(ui, GimbalCommand::ResetWithZoom);
+        if range.is_some() {
+            if let Some(field) = update {
+                self.gimbal(GimbalCommand::UpdateHandRange(field));
+            }
+            if let Some(limits) = reset {
+                self.gimbal(GimbalCommand::ResetHandRange { limits });
+            }
+            if let Some((to, zoom)) = go.filter(|_| self.gimbal_ready()) {
+                if let Some(ratio) = zoom {
+                    self.zoom_target_clear();
+                    self.gimbal(GimbalCommand::ZoomRatio(ratio));
+                }
+                self.gimbal(to);
+            }
+        }
+        if let Some(save) = close {
+            self.gimbal_ui.hand_range_open = false;
+            self.gimbal(GimbalCommand::CloseHandRange { save });
+        }
     }
 
     // ---- presets ----------------------------------------------------------
@@ -195,7 +454,7 @@ impl GimblyApp {
             top: 20,
             bottom: 20,
         };
-        let ready = self.gimbal_ready() && self.status.presets.is_some();
+        let ready = self.ready(Feature::Presets) && self.status.presets.is_some();
         let presets = self.status.presets.clone().unwrap_or_default();
         band(ui, SECTION, margin, |ui| {
             let gap = 16.0;
@@ -210,7 +469,7 @@ impl GimblyApp {
                             None if slot == presets.len() => {
                                 let add = pill(ui, "Add", false, vec2(width, BUTTON_HEIGHT))
                                     .on_hover_text("Add preset position")
-                                    .on_disabled_hover_text(self.gimbal_tip());
+                                    .on_disabled_hover_text(self.gimbal_tip(Feature::Presets));
                                 if add.clicked() {
                                     self.gimbal(GimbalCommand::AddPreset);
                                 }
@@ -275,13 +534,7 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
             .id(ui.id().with(("preset-popup", preset.id)))
             .width(134.0)
             .gap(2.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(FIELD)
-                    .stroke(Stroke::new(1.0, FIELD_STROKE))
-                    .corner_radius(CornerRadius::same(6))
-                    .inner_margin(egui::Margin::symmetric(0, 2)),
-            )
+            .frame(menu_frame())
             .show(|ui| {
                 ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                 for (label, enabled) in [
@@ -368,12 +621,59 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
         }
     }
 
+    /// Asks, as the official app does, whether to widen the Hand Tracking
+    /// range to a return position that lies outside it.
+    pub(super) fn hand_range_dialog(&mut self, ctx: &egui::Context) {
+        if self.status.hand_range_proposal.is_none() || !self.gimbal_ui.hand_range_open {
+            return;
+        }
+        let mut answer = None;
+        let modal = egui::Modal::new(egui::Id::new("hand-range-widen"))
+            .backdrop_color(Color32::from_black_alpha(120))
+            .frame(
+                egui::Frame::new()
+                    .fill(CARD)
+                    .stroke(Stroke::new(1.0, FIELD_STROKE))
+                    .corner_radius(CornerRadius::same(8))
+                    .inner_margin(egui::Margin::same(14)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(240.0);
+                ui.spacing_mut().item_spacing = vec2(8.0, 12.0);
+                ui.label(
+                    egui::RichText::new(
+                        "The return position lies outside the tracking range. \
+                         Widen the range to include it?",
+                    )
+                    .size(13.0)
+                    .color(TEXT),
+                );
+                ui.horizontal(|ui| {
+                    ui.add_space(30.0);
+                    if pill(ui, "No", false, vec2(85.0, 31.0)).clicked() {
+                        answer = Some(false);
+                    }
+                    if pill(ui, "OK", true, vec2(85.0, 31.0)).clicked() {
+                        answer = Some(true);
+                    }
+                });
+            });
+        if modal.should_close() && answer.is_none() {
+            answer = Some(false);
+        }
+        if let Some(widen) = answer {
+            // Hide it at once; the camera thread clears the proposal shortly.
+            self.status.hand_range_proposal = None;
+            self.gimbal(GimbalCommand::ConfirmHandRange(widen));
+        }
+    }
+
     // ---- view and gimbal --------------------------------------------------
 
     pub(super) fn view_gimbal_section(&mut self, ui: &mut Ui) {
-        let ready = self.gimbal_ready();
+        let ready = self.ready(Feature::Gimbal);
         let mut mode = self.gimbal_ui.mode;
-        let tip = self.gimbal_tip();
+        let tip = self.gimbal_tip(Feature::Gimbal);
         self.gimbal_ui.view_open = header(
             ui,
             "View and Gimbal",
@@ -387,7 +687,7 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
                 };
                 if small_button(ui, label, vec2(74.0, 25.0))
                     .on_hover_text("Joystick speed: Coarse moves at normal speed, Fine at a third of it for precise framing")
-                    .on_disabled_hover_text(tip)
+                    .on_disabled_hover_text(&tip)
                     .clicked()
                 {
                     mode = other;
@@ -396,11 +696,21 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
             },
         );
         self.gimbal_ui.mode = mode;
-        if !self.gimbal_ui.view_open {
-            return;
+        if self.gimbal_ui.view_open {
+            self.gimbal_controls(ui, GimbalCommand::Reset);
         }
+    }
+
+    /// The View and Gimbal body: joystick, zoom, field of view and the Reset
+    /// button, which sends `reset`. The Hand Tracking range panel reuses it.
+    fn gimbal_controls(&mut self, ui: &mut Ui, reset: GimbalCommand) {
+        let ready = self.ready(Feature::Gimbal);
+        let tip = self.gimbal_tip(Feature::Gimbal);
+        let fov_ready = self.ready(Feature::FieldOfView);
+        let fov_tip = self.gimbal_tip(Feature::FieldOfView);
         let width = ui.available_width();
-        let (area, _) = ui.allocate_exact_size(vec2(width, 387.0), Sense::hover());
+        let height = 387.0;
+        let (area, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
         ui.painter().rect_filled(area, CornerRadius::ZERO, SECTION);
         let top = area.top();
         let left = area.left();
@@ -450,7 +760,7 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
 
         let pad = Rect::from_center_size(pos2(joystick_x, top + 108.0), joystick::PANEL_SIZE);
         let (response, drag) = joystick::panel(ui, pad, &mut self.gimbal_ui.joystick, ready);
-        response.on_disabled_hover_text(tip);
+        response.on_disabled_hover_text(&tip);
         self.joystick_drag(drag, false);
         if self.gimbal_ui.joystick.dragging() {
             ui.ctx().request_repaint_after(joystick::REPEAT_EVERY);
@@ -470,15 +780,16 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
             Layout::left_to_right(Align::Min),
             "fov",
             |ui| {
-                ui.add_enabled_ui(ready, |ui| {
+                let row = ui.add_enabled_ui(fov_ready, |ui| {
                     pill_row(
                         ui,
                         &["Wide", "Medium", "Narrow"],
                         current.and_then(|f| Fov::ALL.iter().position(|&x| x == f)),
                         16.0,
                     )
-                })
-                .inner
+                });
+                row.response.on_disabled_hover_text(&fov_tip);
+                row.inner
             },
         );
         if let Some(i) = picked {
@@ -490,16 +801,25 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
             pos2(left + PADDING, top + 317.0),
             vec2(320.0, BUTTON_HEIGHT),
         );
-        let reset = place(ui, reset_row, Layout::default(), "gimbal-reset", |ui| {
+        let with_zoom = reset == GimbalCommand::ResetWithZoom;
+        let hover = if with_zoom {
+            "Return the gimbal to its initial position and the zoom to 1.0x"
+        } else {
+            "Return the gimbal to its initial position"
+        };
+        let clicked = place(ui, reset_row, Layout::default(), "gimbal-reset", |ui| {
             ui.add_enabled_ui(ready, |ui| {
                 pill(ui, "Reset", false, vec2(320.0, BUTTON_HEIGHT))
-                    .on_hover_text("Return the gimbal to its initial position")
-                    .on_disabled_hover_text(tip)
+                    .on_hover_text(hover)
+                    .on_disabled_hover_text(&tip)
             })
             .inner
         });
-        if reset.clicked() {
-            self.gimbal(GimbalCommand::Reset);
+        if clicked.clicked() {
+            if with_zoom {
+                self.zoom_target_clear();
+            }
+            self.gimbal(reset);
         }
     }
 
@@ -576,9 +896,14 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
 
     // ---- zoom ---------------------------------------------------------------
 
+    /// Zoom goes through vendor control; otherwise through the UVC control.
+    fn vendor_zoom(&self) -> bool {
+        self.status.vendor_control && self.supports(Feature::Zoom)
+    }
+
     /// Ratio range the zoom controls cover for the current camera.
     fn zoom_ratio_max(&self) -> Option<f32> {
-        if self.status.vendor_control {
+        if self.vendor_zoom() {
             Some(ZOOM_RATIO_MAX)
         } else {
             self.status
@@ -596,7 +921,7 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
             .zoom_target
             .filter(|(_, since)| since.elapsed() < ZOOM_HOLD)
             .map(|(ratio, _)| ratio);
-        held.or(if self.status.vendor_control {
+        held.or(if self.vendor_zoom() {
             self.status.zoom_ratio
         } else {
             let range = self.status.zoom_range.filter(|r| r.min > 0)?;
@@ -617,7 +942,7 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
             return;
         }
         self.gimbal_ui.zoom_target = Some((ratio, Instant::now()));
-        if self.status.vendor_control {
+        if self.vendor_zoom() {
             self.gimbal(GimbalCommand::ZoomRatio(ratio));
         } else if let Some(range) = self.status.zoom_range {
             let value = (ratio * range.min as f32).round() as i32;
@@ -777,6 +1102,61 @@ fn small_button(ui: &mut Ui, text: &str, size: Vec2) -> egui::Response {
         if ui.is_enabled() { TEXT } else { TEXT_FAINT },
     );
     response
+}
+
+/// The popup frame of the preset and range menus.
+fn menu_frame() -> egui::Frame {
+    egui::Frame::new()
+        .fill(FIELD)
+        .stroke(Stroke::new(1.0, FIELD_STROKE))
+        .corner_radius(CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(0, 2))
+}
+
+/// A Hand Tracking range value: a click turns the gimbal to it and its
+/// right-click menu holds Update. Returns (clicked, Update chosen).
+fn value_with_update(ui: &mut Ui, rect: Rect, text: &str, field: HandRangeField) -> (bool, bool) {
+    let response = ui.interact(rect, ui.id().with(("hand-range", field)), Sense::click());
+    let fill = if response.hovered() {
+        BUTTON_HOVER
+    } else {
+        BUTTON
+    };
+    ui.painter().rect_filled(rect, CornerRadius::same(4), fill);
+    ui.painter()
+        .text(rect.center(), Align2::CENTER_CENTER, text, font(14.0), TEXT);
+    let response = response.on_hover_text(
+        "Click to turn the gimbal there. Right-click to take it from the gimbal position",
+    );
+    let clicked = response.clicked() && ui.is_enabled();
+    let mut chosen = false;
+    egui::Popup::context_menu(&response)
+        .width(134.0)
+        .frame(menu_frame())
+        .show(|ui| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+            if menu_entry(ui, "Update").clicked() {
+                chosen = true;
+                ui.close();
+            }
+        });
+    (clicked, chosen)
+}
+
+/// Dim explanatory text with a reset icon on its right. Returns true when the
+/// icon was clicked.
+fn note_with_reset(ui: &mut Ui, text: &str, tip: &str) -> bool {
+    ui.horizontal(|ui| {
+        let icon_size = 22.0;
+        ui.add_sized(
+            vec2(ui.available_width() - icon_size - 8.0, 0.0),
+            egui::Label::new(egui::RichText::new(text).size(13.0).color(TEXT_DIM)).wrap(),
+        );
+        icon_button(ui, icon::ARROW_COUNTER_CLOCKWISE, icon_size, 14.0, false)
+            .on_hover_text(tip)
+            .clicked()
+    })
+    .inner
 }
 
 fn menu_entry(ui: &mut Ui, text: &str) -> egui::Response {

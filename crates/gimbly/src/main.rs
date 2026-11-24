@@ -10,9 +10,12 @@ mod gimbal;
 mod hotkeys;
 mod joystick;
 mod os;
+mod preview_tracking;
 mod preview_view;
 mod preview_window;
 mod probe;
+#[cfg(target_os = "linux")]
+mod serial_access;
 mod settings;
 mod settings_ui;
 mod snapshot;

@@ -5,8 +5,13 @@
 //! is Gimbly's own.
 
 use crate::branding;
-use crate::camera::{SessionState, SessionStatus, Transform};
+use crate::camera::{
+    Composition, GimbalCommand, SessionState, SessionStatus, TargetBox, Transform,
+};
 use crate::joystick::{self, Drag, OverlayState};
+use crate::preview_tracking::{
+    self as tracking, ComposeBar, ComposeOutcome, Mapping, SelectOutcome,
+};
 use crate::preview_view;
 use crate::settings::{PreviewMode, Resolution};
 use crate::theme::*;
@@ -39,10 +44,21 @@ pub struct PreviewInput<'a> {
     pub toast: Option<&'a str>,
     /// Dragging the picture turns the gimbal.
     pub gimbal: bool,
+    /// The Object Tracking button and double-click tracking work.
+    pub object_tracking: bool,
+    /// The AI Composition lines button works.
+    pub composition_lines: bool,
+    /// Human Tracking (or object tracking) runs.
+    pub tracking: bool,
+    /// The tracked target's box, when the camera streams it.
+    pub target: Option<TargetBox>,
+    pub composition: Option<Composition>,
+    /// Show the first-run hint over the picture.
+    pub hint: bool,
 }
 
 /// Something the user asked for that the app has to carry out.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PreviewAction {
     Retry,
     ToggleVirtualCamera,
@@ -54,6 +70,20 @@ pub enum PreviewAction {
     SetTransform(Transform),
     /// The gimbal drag overlay moved.
     Gimbal(Drag),
+    /// A tracking command from the picture or the composition bar.
+    Command(GimbalCommand),
+    Notify(&'static str),
+    /// The first-run hint was clicked away.
+    HintSeen,
+}
+
+/// A tool that takes over the picture and the bar.
+enum Tool {
+    None,
+    /// Object Tracking: drawing a box around the object.
+    Select(tracking::Selection),
+    /// AI Composition lines.
+    Compose(tracking::Composer),
 }
 
 pub struct PreviewWindow {
@@ -62,7 +92,7 @@ pub struct PreviewWindow {
     icon: TextureHandle,
     /// Where the window first opens: beside the control panel.
     position: Option<Pos2>,
-    composition_lines: bool,
+    tool: Tool,
     on_top: bool,
     gimbal_drag: OverlayState,
 }
@@ -74,7 +104,7 @@ impl PreviewWindow {
             wayland: false,
             icon,
             position: None,
-            composition_lines: false,
+            tool: Tool::None,
             on_top: false,
             gimbal_drag: OverlayState::default(),
         }
@@ -311,6 +341,32 @@ impl PreviewWindow {
         input: &PreviewInput<'_>,
         actions: &mut Vec<PreviewAction>,
     ) {
+        if let Tool::Compose(composer) = &mut self.tool {
+            let current = composer.current(input.composition);
+            match tracking::compose_bar(ui, rect, current.face_framing) {
+                ComposeBar::None => {}
+                ComposeBar::FaceFraming(on) => {
+                    composer.set(Composition {
+                        face_framing: on,
+                        ..current
+                    });
+                    actions.push(PreviewAction::Command(GimbalCommand::SetFaceFraming(on)));
+                }
+                ComposeBar::Reset => {
+                    composer.set(Composition {
+                        x: 0.0,
+                        y: 0.0,
+                        ..current
+                    });
+                    actions.push(PreviewAction::Command(GimbalCommand::SetComposition {
+                        x: 0.0,
+                        y: 0.0,
+                    }));
+                }
+                ComposeBar::Done => self.tool = Tool::None,
+            }
+            return;
+        }
         let inner = rect.shrink2(vec2(10.0, 0.0));
         place(
             ui,
@@ -345,15 +401,37 @@ impl PreviewWindow {
                         !t.mirror,
                     )));
                 }
-                ui.add_enabled_ui(false, |ui| {
-                    icon_button(ui, icon::SCAN, BUTTON, GLYPH, false)
-                        .on_disabled_hover_text(format!("Object tracking: {NOT_YET}"));
-                });
-                if icon_button(ui, icon::GRID_NINE, BUTTON, GLYPH, self.composition_lines)
-                    .on_hover_text("Composition lines")
-                    .clicked()
-                {
-                    self.composition_lines = !self.composition_lines;
+                let selecting = matches!(self.tool, Tool::Select(_));
+                let clicked = ui
+                    .add_enabled_ui(input.object_tracking, |ui| {
+                        tracking::object_button(ui, BUTTON, selecting)
+                            .on_hover_text("Object Tracking")
+                            .on_disabled_hover_text("Object Tracking needs an OBSBOT camera")
+                            .clicked()
+                    })
+                    .inner;
+                if clicked {
+                    self.tool = if selecting {
+                        Tool::None
+                    } else {
+                        Tool::Select(tracking::Selection::default())
+                    };
+                }
+                let clicked = ui
+                    .add_enabled_ui(input.composition_lines, |ui| {
+                        icon_button(ui, icon::GRID_FOUR, BUTTON, GLYPH, false)
+                            .on_hover_text("AI Composition lines")
+                            .on_disabled_hover_text("AI Composition lines need an OBSBOT camera")
+                            .clicked()
+                    })
+                    .inner;
+                if clicked {
+                    if input.tracking {
+                        self.tool = Tool::Compose(tracking::Composer::default());
+                        actions.push(PreviewAction::Command(GimbalCommand::ReadComposition));
+                    } else {
+                        actions.push(PreviewAction::Notify("Enable Human Tracking first"));
+                    }
                 }
                 ui.add_enabled_ui(false, |ui| {
                     icon_button(ui, "ME", BUTTON, 12.0, false).on_disabled_hover_text(NOT_YET);
@@ -537,18 +615,14 @@ impl PreviewWindow {
                 Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
                 Color32::WHITE,
             );
-            if self.composition_lines {
-                let [w, h] = texture.size();
-                let picture = preview_view::picture_rect(shown, w, h, input.transform);
-                let stroke = Stroke::new(1.0, Color32::from_white_alpha(140));
-                for line in preview_view::composition_lines(picture) {
-                    ui.painter().line_segment(line, stroke);
-                }
-            }
-            let drag = joystick::overlay(ui, rect, &mut self.gimbal_drag, input.gimbal);
-            if drag != Drag::default() {
-                actions.push(PreviewAction::Gimbal(drag));
-            }
+            let [w, h] = texture.size();
+            let (out_w, out_h) = input.status.output.unwrap_or((w as u32, h as u32));
+            let map = Mapping {
+                picture: preview_view::picture_rect(shown, w, h, input.transform),
+                transform: input.transform,
+                crop: preview_view::crop_fraction(out_w, out_h),
+            };
+            self.tools(ui, rect, &map, input, actions);
             return;
         }
         let drag = self.gimbal_drag.cancel();
@@ -593,6 +667,77 @@ impl PreviewWindow {
                 }
             },
         );
+    }
+}
+
+impl PreviewWindow {
+    /// The tools on a live picture: the tracked box, object selection,
+    /// composition lines, the gimbal drag and double-click, and the hint.
+    fn tools(
+        &mut self,
+        ui: &mut Ui,
+        video: Rect,
+        map: &Mapping,
+        input: &PreviewInput<'_>,
+        actions: &mut Vec<PreviewAction>,
+    ) {
+        if matches!(self.tool, Tool::Compose(_)) && !input.tracking {
+            self.tool = Tool::None;
+        }
+        match self.tool {
+            Tool::Select(_) if !input.object_tracking => self.tool = Tool::None,
+            Tool::Compose(_) if !input.composition_lines => self.tool = Tool::None,
+            _ => {}
+        }
+        if let Some(target) = input.target
+            && !matches!(self.tool, Tool::Select(_))
+        {
+            tracking::target_box(ui.painter(), map, target);
+        }
+        let free = matches!(self.tool, Tool::None) && !input.hint;
+        let drag = joystick::overlay(ui, video, &mut self.gimbal_drag, input.gimbal && free);
+        if drag != Drag::default() {
+            actions.push(PreviewAction::Gimbal(drag));
+        }
+        match &mut self.tool {
+            Tool::None => {}
+            Tool::Select(selection) => match tracking::select(ui, map, selection) {
+                SelectOutcome::None => {}
+                SelectOutcome::Close => self.tool = Tool::None,
+                SelectOutcome::Track(target) => {
+                    actions.push(PreviewAction::Command(GimbalCommand::SelectObject(target)));
+                    self.tool = Tool::None;
+                }
+            },
+            Tool::Compose(composer) => {
+                if let ComposeOutcome::Moved(c) =
+                    tracking::compose(ui, map, composer, input.composition)
+                {
+                    actions.push(PreviewAction::Command(GimbalCommand::SetComposition {
+                        x: c.x,
+                        y: c.y,
+                    }));
+                }
+            }
+        }
+        if free && input.object_tracking {
+            let double = ui.input(|i| {
+                i.pointer
+                    .button_double_clicked(egui::PointerButton::Primary)
+                    .then(|| i.pointer.interact_pos())
+                    .flatten()
+            });
+            if let Some(at) =
+                double.filter(|at| map.picture.contains(*at) && ui.rect_contains_pointer(video))
+            {
+                let point = map.camera(at);
+                let command = tracking::double_click(point, input.tracking, input.target);
+                actions.push(PreviewAction::Command(command));
+            }
+        }
+        if input.hint && input.gimbal && tracking::hint(ui, video) {
+            actions.push(PreviewAction::HintSeen);
+        }
     }
 }
 
@@ -709,6 +854,12 @@ mod tests {
                     transform: Default::default(),
                     toast: None,
                     gimbal: false,
+                    object_tracking: false,
+                    composition_lines: false,
+                    tracking: false,
+                    target: None,
+                    composition: None,
+                    hint: false,
                 };
                 window.video(ui, ui.max_rect(), &input, &mut Vec::new());
             });

@@ -31,7 +31,7 @@ Tech.
 | 🖼️ Field of view (Wide / Medium / Narrow) | ✅ | ✅ | 🚧 |
 | 📌 Presets | ✅ | ✅ | 🚧 |
 | 💤 Sleep / wake | ✅ | ✅ | 🚧 |
-| 🎥 Virtual camera | ✅ | ❔ | 🚧 |
+| 🎥 Virtual camera | ✅ | ✅ | 🚧 |
 | 🤖 AI tracking | 🗓️ | 🗓️ | 🗓️ |
 | 🎨 Image settings | 🗓️ | 🗓️ | 🗓️ |
 | ⏺️ Recording | 🗓️ | 🗓️ | 🗓️ |
@@ -39,7 +39,8 @@ Tech.
 ✅ tested on real hardware · 🚧 in progress · 🗓️ planned · ❔ not tested yet
 
 Full test results are in [docs/devices.md](docs/devices.md). Tried another
-camera? See [CONTRIBUTING.md](CONTRIBUTING.md#tested-a-camera).
+camera? See [CONTRIBUTING.md](CONTRIBUTING.md#tested-a-camera). To add
+support for your model, follow [docs/adding-a-camera.md](docs/adding-a-camera.md).
 
 ## Status
 
@@ -50,8 +51,9 @@ Linux and a signed Core Media I/O system extension on macOS.
 
 On Linux, click **Virtual Camera** and approve the first-time driver setup
 when prompted. Once the icon lights up, choose **Gimbly Virtual Camera** in
-your video app. See [Linux setup](CONTRIBUTING.md#linux) for the driver and
-terminal instructions.
+your video app. See [Linux setup](CONTRIBUTING.md#linux-wayland-and-x11) for the driver and
+terminal instructions. To see the tracking box in the preview, install the
+udev rule described there so Gimbly can read the camera's serial port.
 
 Live preview, rotate and mirror, snapshots, camera controls and Software
 Settings share the same app interface. AI tracking, image settings and

@@ -8,7 +8,10 @@
 //! stepping the zoom; `--portrait` adds the 9:16 crop. Use
 //! `--virtual-camera` before `--gimbal` to exercise virtual output too.
 
-use crate::camera::{self, CaptureConfig, Command, Fov, GimbalCommand, SessionState};
+use crate::camera::{
+    self, AiMode, AutoZoom, CaptureConfig, Command, Fov, GimbalCommand, Hand, SessionState,
+    TrackingMode, TrackingSpeed, VoiceRange,
+};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -40,6 +43,27 @@ fn control_step(step: &str) -> Option<Command> {
         ["wide"] => GimbalCommand::SetFov(Fov::Wide),
         ["medium"] => GimbalCommand::SetFov(Fov::Medium),
         ["narrow"] => GimbalCommand::SetFov(Fov::Narrow),
+        ["track"] => GimbalCommand::SetHumanTracking(Some(TrackingMode::Single)),
+        ["group"] => GimbalCommand::SetHumanTracking(Some(TrackingMode::Group)),
+        ["untrack"] => GimbalCommand::SetHumanTracking(None),
+        ["autozoom", zoom] => {
+            GimbalCommand::SetAutoZoom(*AutoZoom::ALL.get(zoom.parse::<usize>().ok()?)?)
+        }
+        ["slow"] => GimbalCommand::SetTrackingSpeed(TrackingSpeed::Slow),
+        ["standard"] => GimbalCommand::SetTrackingSpeed(TrackingSpeed::Standard),
+        ["fast"] => GimbalCommand::SetTrackingSpeed(TrackingSpeed::Fast),
+        ["voice"] => GimbalCommand::SetAiMode(AiMode::Voice),
+        ["hand"] => GimbalCommand::SetAiMode(AiMode::Hand),
+        ["noai"] => GimbalCommand::SetAiMode(AiMode::Off),
+        ["omni"] => GimbalCommand::SetVoiceRange(VoiceRange::Omni),
+        ["forward"] => GimbalCommand::SetVoiceRange(VoiceRange::Forward),
+        ["sound", "on"] => GimbalCommand::SetSoundSource(true),
+        ["sound", "off"] => GimbalCommand::SetSoundSource(false),
+        ["left"] => GimbalCommand::SetHand(Hand::Left),
+        ["right"] => GimbalCommand::SetHand(Hand::Right),
+        ["range"] => GimbalCommand::OpenHandRange,
+        ["rangedone"] => GimbalCommand::CloseHandRange { save: true },
+        ["rangecancel"] => GimbalCommand::CloseHandRange { save: false },
         ["zoom", ratio] => GimbalCommand::ZoomRatio(ratio.parse().ok()?),
         ["go", id] => GimbalCommand::TriggerPreset(id.parse().ok()?),
         ["add"] => GimbalCommand::AddPreset,
@@ -82,9 +106,17 @@ fn gimbal(session: &camera::Session, args: &[String], virtual_camera: bool) -> i
             .and_then(|f| crate::snapshot::save(&f, Path::new(dir), [0, 0, 0, 0, 0, step as u16]));
         let status = session.status();
         println!(
-            "step {step}: {saved:?}, vendor control {}, sleeping {}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
+            "step {step}: {saved:?}, vendor control {}, sleeping {}, AI mode {:?} {:?}, auto zoom {:?}, speed {:?}, voice range {:?}, sound source {:?}, hand {:?} {:?}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
             status.vendor_control,
             status.sleeping,
+            status.ai_mode,
+            status.tracking_mode,
+            status.auto_zoom,
+            status.tracking_speed,
+            status.voice_range,
+            status.sound_source,
+            status.hand,
+            status.hand_range,
             status.zoom_ratio,
             status.fov,
             status.presets,
@@ -187,11 +219,12 @@ pub fn run() -> i32 {
     };
     for d in &devices {
         println!(
-            "device: {} vid={:04x?} pid={:04x?} obsbot={}",
+            "device: {} vid={:04x?} pid={:04x?} obsbot={} model={:?}",
             d.name,
             d.usb_vendor_id,
             d.usb_product_id,
-            d.is_obsbot()
+            d.is_obsbot(),
+            d.model().map(|m| m.name)
         );
     }
     let Some(device) = devices

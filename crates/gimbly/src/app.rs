@@ -4,7 +4,8 @@ mod view_gimbal;
 
 use crate::branding::Branding;
 use crate::camera::{
-    self, Command, DeviceInfo, GimbalCommand, PreviewFrame, Session, SessionState, SessionStatus,
+    self, AiMode, AutoZoom, Command, DeviceInfo, Feature, GimbalCommand, ObjectFraming,
+    PreviewFrame, Session, SessionState, SessionStatus, TrackingMode, TrackingSpeed,
 };
 use crate::hotkeys::GlobalHotkeys;
 use crate::os;
@@ -16,8 +17,8 @@ use crate::theme::{self, *};
 use crate::vcam;
 use crate::widgets::*;
 use eframe::egui::{
-    self, Align, Align2, Color32, CornerRadius, Layout, Rect, ResizeDirection, Sense, Stroke,
-    StrokeKind, Ui, Vec2, ViewportCommand, pos2, vec2,
+    self, Align, Align2, Color32, CornerRadius, Layout, Rect, ResizeDirection, Response, Sense,
+    Stroke, StrokeKind, Ui, Vec2, ViewportCommand, pos2, vec2,
 };
 use egui_phosphor::regular as icon;
 use std::path::PathBuf;
@@ -63,6 +64,8 @@ pub struct GimblyApp {
     virtual_camera_hint: Option<String>,
     #[cfg(target_os = "linux")]
     virtual_camera_setup: vcam::setup::Setup,
+    #[cfg(target_os = "linux")]
+    serial_access: crate::serial_access::SerialAccess,
     /// Where the toolbar's sleep button sits, so the sleep overlay can keep
     /// it reachable.
     sleep_button: Rect,
@@ -106,6 +109,8 @@ impl GimblyApp {
             virtual_camera_hint: None,
             #[cfg(target_os = "linux")]
             virtual_camera_setup: Default::default(),
+            #[cfg(target_os = "linux")]
+            serial_access: Default::default(),
             sleep_button: Rect::NOTHING,
             toast: None,
             settings,
@@ -447,16 +452,22 @@ impl GimblyApp {
         }
     }
 
-    fn sleep_tip(&self) -> &'static str {
+    fn sleep_tip(&self) -> String {
         if self.status.vendor_control {
-            "Sleep/Resume"
-        } else if self.status.vendor_control_untested {
+            return if self.supports(Feature::Sleep) {
+                "Sleep/Resume".into()
+            } else {
+                self.gimbal_tip(Feature::Sleep)
+            };
+        }
+        if self.status.vendor_control_untested {
             "Sleep/Resume: not verified on this camera model yet"
         } else if self.status.state == SessionState::Streaming {
             "Sleep/Resume: this camera does not support it"
         } else {
             "Sleep/Resume: connect an OBSBOT camera first"
         }
+        .into()
     }
 
     fn set_zoom(&mut self, value: i32) {
@@ -698,12 +709,15 @@ impl GimblyApp {
         self.sleep_button = slot(1);
         let sleep_tip = self.sleep_tip();
         let clicked = place(ui, slot(1), Layout::default(), ("toolbar", 1), |ui| {
-            ui.add_enabled_ui(self.status.vendor_control, |ui| {
-                icon_button(ui, icon::POWER, 36.0, 20.0, false)
-                    .on_hover_text(sleep_tip)
-                    .on_disabled_hover_text(sleep_tip)
-                    .clicked()
-            })
+            ui.add_enabled_ui(
+                self.status.vendor_control && self.supports(Feature::Sleep),
+                |ui| {
+                    icon_button(ui, icon::POWER, 36.0, 20.0, false)
+                        .on_hover_text(&sleep_tip)
+                        .on_disabled_hover_text(&sleep_tip)
+                        .clicked()
+                },
+            )
             .inner
         });
         if clicked {
@@ -777,7 +791,15 @@ impl GimblyApp {
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                 match self.tab {
-                    Tab::Console => self.console(ui),
+                    // Set replaces the console with the Hand Tracking range
+                    // panel; a camera that goes away closes it.
+                    Tab::Console if self.gimbal_ui.hand_range_open && self.gimbal_ready() => {
+                        self.hand_range_panel(ui)
+                    }
+                    Tab::Console => {
+                        self.gimbal_ui.hand_range_open = false;
+                        self.console(ui)
+                    }
                     Tab::Image | Tab::More => {
                         ui.add_space(40.0);
                         ui.vertical_centered(|ui| {
@@ -856,9 +878,177 @@ impl GimblyApp {
                 top: 18,
                 bottom: 26,
             };
+            let ai_mode = self.status.ai_mode;
+            let ready = self.ready(Feature::HumanTracking) && ai_mode.is_some();
+            // The camera reports on/off only; highlight the mode Gimbly set.
+            let mode = self
+                .status
+                .tracking_mode
+                .filter(|_| ai_mode == Some(AiMode::Human));
+            let hand_running = ai_mode == Some(AiMode::Hand);
+            let object = self.status.object_framing;
+            let zoom = self.status.auto_zoom;
+            let zoom_ready = self.ready(Feature::AutoZoom) && zoom.is_some();
+            let speed = self.status.tracking_speed;
+            let speed_ready = self.ready(Feature::TrackingSpeed) && speed.is_some();
+            let tip = self.gimbal_tip(Feature::HumanTracking);
+            let zoom_tip = self.gimbal_tip(Feature::AutoZoom);
+            let speed_tip = self.gimbal_tip(Feature::TrackingSpeed);
+            let sound_tip = self.gimbal_tip(Feature::SoundSource);
+            let object_ready = self.ready(Feature::ObjectTracking);
+            let object_tip = self.gimbal_tip(Feature::ObjectTracking);
+            let mut picked_mode = None;
+            let mut picked_zoom = None;
+            let mut picked_speed = None;
+            let mut picked_object = None;
+            let mut picked_sound = None;
             band(ui, SECTION, margin, |ui| {
-                ui.add_enabled_ui(false, ai_tracking);
+                ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+                group_label(ui, Some(icon::PERSON_SIMPLE), "Human Tracking");
+                ui.add_space(12.0);
+                let gap = 16.0;
+                let size = vec2((ui.available_width() - gap) / 2.0, BUTTON_HEIGHT);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    for (m, label, hint) in [
+                        (
+                            TrackingMode::Single,
+                            "Single Mode",
+                            "Follow one person; click again to stop",
+                        ),
+                        (
+                            TrackingMode::Group,
+                            "Group Mode",
+                            "Keep everyone in view; click again to stop",
+                        ),
+                    ] {
+                        let clicked = ui
+                            .add_enabled_ui(ready, |ui| {
+                                pill(ui, label, mode == Some(m), size)
+                                    .on_hover_text(hint)
+                                    .on_disabled_hover_text(&tip)
+                            })
+                            .inner
+                            .clicked();
+                        if clicked {
+                            picked_mode = Some((mode != Some(m)).then_some(m));
+                        }
+                    }
+                });
+                ui.add_space(22.0);
+                ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Auto Zoom").size(15.0));
+                    help(ui, "How tightly tracking frames the person");
+                });
+                ui.add_space(12.0);
+                let width = (ui.available_width() - 2.0 * 16.0) / 3.0;
+                for row in AutoZoom::ALL.chunks(3) {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 16.0;
+                        for &z in row {
+                            let enabled = zoom_ready
+                                && !(mode == Some(TrackingMode::Group) && z.single_only());
+                            let clicked = ui
+                                .add_enabled_ui(enabled, |ui| {
+                                    pill(
+                                        ui,
+                                        auto_zoom_label(z),
+                                        zoom == Some(z),
+                                        vec2(width, BUTTON_HEIGHT),
+                                    )
+                                    .on_disabled_hover_text(
+                                        if zoom_ready {
+                                            "Not available in Group Mode"
+                                        } else {
+                                            zoom_tip.as_str()
+                                        },
+                                    )
+                                })
+                                .inner
+                                .clicked();
+                            if clicked {
+                                picked_zoom = Some(z);
+                            }
+                        }
+                    });
+                    ui.add_space(12.0);
+                }
+                ui.add_space(10.0);
+                let sound = self.status.sound_source;
+                let sound_ready = self.ready(Feature::SoundSource) && sound.is_some();
+                if ai_tracking(
+                    ui,
+                    hand_running || object.is_some(),
+                    sound,
+                    sound_ready,
+                    &sound_tip,
+                ) {
+                    picked_sound = sound.map(|on| !on);
+                }
+                ui.add_space(22.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.label(egui::RichText::new(icon::CUBE).size(16.0));
+                    ui.label(egui::RichText::new("Object Tracking").size(15.0));
+                    ui.label(
+                        egui::RichText::new("(Select object in preview)")
+                            .size(12.0)
+                            .color(TEXT_DIM),
+                    );
+                });
+                ui.add_space(12.0);
+                let framings = [ObjectFraming::Normal, ObjectFraming::CloseUp];
+                let row = ui.add_enabled_ui(object_ready && object.is_some(), |ui| {
+                    pill_row(
+                        ui,
+                        &["Normal", "Close-up"],
+                        object.and_then(|o| framings.iter().position(|&f| f == o)),
+                        16.0,
+                    )
+                });
+                row.response.on_disabled_hover_text(if object_ready {
+                    "Select an object with the Object Tracking button in the preview"
+                } else {
+                    object_tip.as_str()
+                });
+                if let Some(i) = row.inner {
+                    picked_object = framings.get(i).copied();
+                }
+                ui.add_space(22.0);
+                group_label(ui, Some(icon::GAUGE), "Tracking Speed");
+                ui.add_space(12.0);
+                let row = ui.add_enabled_ui(speed_ready, |ui| {
+                    pill_row(
+                        ui,
+                        &["Slow", "Standard", "Fast"],
+                        speed.and_then(|s| TrackingSpeed::ALL.iter().position(|&x| x == s)),
+                        16.0,
+                    )
+                });
+                row.response.on_disabled_hover_text(&speed_tip);
+                picked_speed = row.inner;
             });
+            if let Some(mode) = picked_mode {
+                self.gimbal(GimbalCommand::SetHumanTracking(mode));
+            }
+            if let Some(zoom) = picked_zoom {
+                self.gimbal(GimbalCommand::SetAutoZoom(zoom));
+            }
+            if let Some(i) = picked_speed {
+                self.gimbal(GimbalCommand::SetTrackingSpeed(TrackingSpeed::ALL[i]));
+            }
+            if let Some(on) = picked_sound {
+                self.gimbal(GimbalCommand::SetSoundSource(on));
+            }
+            if let Some(framing) = picked_object {
+                // Clicking the highlighted framing stops object tracking.
+                self.gimbal(if object == Some(framing) {
+                    GimbalCommand::CancelTarget
+                } else {
+                    GimbalCommand::SetObjectFraming(framing)
+                });
+            }
         }
 
         divider(ui);
@@ -990,7 +1180,13 @@ impl GimblyApp {
             virtual_camera_tip: self.virtual_camera_tip(),
             transform: self.settings.transform,
             toast: toast.as_deref(),
-            gimbal: self.status.vendor_control,
+            gimbal: self.status.vendor_control && self.supports(Feature::Gimbal),
+            object_tracking: self.status.vendor_control && self.supports(Feature::ObjectTracking),
+            composition_lines: self.status.vendor_control && self.supports(Feature::Composition),
+            tracking: self.status.ai_mode == Some(AiMode::Human),
+            target: self.status.target,
+            composition: self.status.composition,
+            hint: !self.settings.preview_hint_seen,
         };
         let actions = self.preview_window.show(ctx, input);
         for action in actions {
@@ -1012,6 +1208,12 @@ impl GimblyApp {
                     }
                 }
                 PreviewAction::Gimbal(drag) => self.joystick_drag(drag, true),
+                PreviewAction::Command(command) => self.gimbal(command),
+                PreviewAction::Notify(message) => self.notify(message),
+                PreviewAction::HintSeen => {
+                    self.settings.preview_hint_seen = true;
+                    self.save_settings();
+                }
                 PreviewAction::SetPreviewMode(mode) => {
                     self.settings.preview_mode = mode;
                     self.save_settings();
@@ -1034,48 +1236,46 @@ impl GimblyApp {
     }
 }
 
-fn ai_tracking(ui: &mut Ui) {
-    ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
-    group_label(ui, Some(icon::PERSON_SIMPLE), "Human Tracking");
-    ui.add_space(12.0);
-    pill_row(ui, &["Single Mode", "Group Mode"], None, 16.0);
-    ui.add_space(22.0);
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Auto Zoom").size(15.0));
-        help(ui, NOT_YET);
-    });
-    ui.add_space(12.0);
-    pill_row(ui, &["Off", "Full Body", "Upper Body"], Some(1), 16.0);
-    ui.add_space(12.0);
-    pill_row(ui, &["Close-up", "Headless", "Lower Body"], None, 16.0);
-    ui.add_space(22.0);
-    switch_row(ui, "Zone Tracking", true, true);
-    ui.add_space(18.0);
-    switch_row(ui, "Sound Source Assisted Tracking", false, true);
-    ui.add_space(22.0);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        ui.label(egui::RichText::new(icon::CUBE).size(16.0));
-        ui.label(egui::RichText::new("Object Tracking").size(15.0));
-        ui.label(
-            egui::RichText::new("(Select object in preview)")
-                .size(12.0)
-                .color(TEXT_DIM),
-        );
-    });
-    ui.add_space(12.0);
-    pill_row(ui, &["Normal", "Close-up"], None, 16.0);
-    ui.add_space(22.0);
-    group_label(ui, Some(icon::GAUGE), "Tracking Speed");
-    ui.add_space(12.0);
-    pill_row(ui, &["Slow", "Standard", "Fast"], Some(1), 16.0);
+fn auto_zoom_label(zoom: AutoZoom) -> &'static str {
+    match zoom {
+        AutoZoom::Off => "Off",
+        AutoZoom::FullBody => "Full Body",
+        AutoZoom::UpperBody => "Upper Body",
+        AutoZoom::CloseUp => "Close-up",
+        AutoZoom::Headless => "Headless",
+        AutoZoom::LowerBody => "Lower Body",
+    }
 }
 
-fn switch_row(ui: &mut Ui, label: &str, settings: bool, on: bool) {
+/// The Zone Tracking (not implemented yet) and Sound Source Assisted
+/// Tracking switches; returns whether the sound switch was clicked.
+/// `zone_off`: the official app shows Zone Tracking off during Hand and
+/// object tracking.
+fn ai_tracking(ui: &mut Ui, zone_off: bool, sound: Option<bool>, ready: bool, tip: &str) -> bool {
+    ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+    ui.add_enabled_ui(false, |ui| {
+        switch_row(ui, "Zone Tracking", NOT_YET, true, !zone_off)
+    });
+    ui.add_space(18.0);
+    ui.add_enabled_ui(ready, |ui| {
+        switch_row(
+            ui,
+            "Sound Source Assisted Tracking",
+            "Use the microphones to help find who is speaking",
+            false,
+            sound.unwrap_or(false),
+        )
+        .on_disabled_hover_text(tip)
+    })
+    .inner
+    .clicked()
+}
+
+fn switch_row(ui: &mut Ui, label: &str, hint: &str, settings: bool, on: bool) -> Response {
     ui.horizontal(|ui| {
         ui.set_height(24.0);
         ui.label(egui::RichText::new(label).size(15.0));
-        help(ui, NOT_YET);
+        help(ui, hint);
         if settings {
             ui.label(
                 egui::RichText::new(icon::GEAR_SIX)
@@ -1083,10 +1283,10 @@ fn switch_row(ui: &mut Ui, label: &str, settings: bool, on: bool) {
                     .color(TEXT_DIM),
             );
         }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            toggle(ui, on);
-        });
-    });
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| toggle(ui, on))
+            .inner
+    })
+    .inner
 }
 
 impl eframe::App for GimblyApp {
@@ -1122,6 +1322,22 @@ impl eframe::App for GimblyApp {
         }
     }
 
+    /// The process ends right after this, before the camera thread could
+    /// clean up, so leave the Hand Tracking range-edit state here.
+    fn on_exit(&mut self) {
+        let Some(session) = &self.session else { return };
+        if session.status().hand_range.is_none() {
+            return;
+        }
+        session.send(Command::Gimbal(GimbalCommand::CloseHandRange {
+            save: false,
+        }));
+        let until = Instant::now() + Duration::from_secs(1);
+        while session.status().hand_range.is_some() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.poll(&ctx);
@@ -1148,10 +1364,14 @@ impl eframe::App for GimblyApp {
         );
 
         self.rename_dialog(&ctx);
+        self.hand_range_dialog(&ctx);
         self.preview_window(&ctx);
         self.settings_window(&ctx);
         #[cfg(target_os = "linux")]
         self.virtual_camera_setup.show(&ctx);
+        #[cfg(target_os = "linux")]
+        self.serial_access
+            .show(&ctx, self.status.serial_denied.as_ref());
         self.toast(&ctx);
     }
 }

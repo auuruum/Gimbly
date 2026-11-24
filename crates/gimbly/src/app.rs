@@ -17,8 +17,8 @@ use crate::theme::{self, *};
 use crate::vcam;
 use crate::widgets::*;
 use eframe::egui::{
-    self, Align, Align2, Color32, CornerRadius, Layout, Rect, ResizeDirection, Sense, Stroke,
-    StrokeKind, Ui, Vec2, ViewportCommand, pos2, vec2,
+    self, Align, Align2, Color32, CornerRadius, Layout, Rect, ResizeDirection, Response, Sense,
+    Stroke, StrokeKind, Ui, Vec2, ViewportCommand, pos2, vec2,
 };
 use egui_phosphor::regular as icon;
 use std::path::PathBuf;
@@ -887,6 +887,7 @@ impl GimblyApp {
             let mut picked_zoom = None;
             let mut picked_speed = None;
             let mut picked_object = None;
+            let mut picked_sound = None;
             band(ui, SECTION, margin, |ui| {
                 ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
                 group_label(ui, Some(icon::PERSON_SIMPLE), "Human Tracking");
@@ -960,9 +961,17 @@ impl GimblyApp {
                     ui.add_space(12.0);
                 }
                 ui.add_space(10.0);
-                ui.add_enabled_ui(false, |ui| {
-                    ai_tracking(ui, hand_running || object.is_some())
-                });
+                let sound = self.status.sound_source;
+                let sound_ready = self.gimbal_ready() && sound.is_some();
+                if ai_tracking(
+                    ui,
+                    hand_running || object.is_some(),
+                    sound,
+                    sound_ready,
+                    tip,
+                ) {
+                    picked_sound = sound.map(|on| !on);
+                }
                 ui.add_space(22.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
@@ -1012,6 +1021,9 @@ impl GimblyApp {
             }
             if let Some(i) = picked_speed {
                 self.gimbal(GimbalCommand::SetTrackingSpeed(TrackingSpeed::ALL[i]));
+            }
+            if let Some(on) = picked_sound {
+                self.gimbal(GimbalCommand::SetSoundSource(on));
             }
             if let Some(framing) = picked_object {
                 // Clicking the highlighted framing stops object tracking.
@@ -1206,7 +1218,6 @@ impl GimblyApp {
     }
 }
 
-/// The AI Tracking controls below Human Tracking, not implemented yet.
 fn auto_zoom_label(zoom: AutoZoom) -> &'static str {
     match zoom {
         AutoZoom::Off => "Off",
@@ -1218,20 +1229,35 @@ fn auto_zoom_label(zoom: AutoZoom) -> &'static str {
     }
 }
 
+/// The Zone Tracking (not implemented yet) and Sound Source Assisted
+/// Tracking switches; returns whether the sound switch was clicked.
 /// `zone_off`: the official app shows Zone Tracking off during Hand and
 /// object tracking.
-fn ai_tracking(ui: &mut Ui, zone_off: bool) {
+fn ai_tracking(ui: &mut Ui, zone_off: bool, sound: Option<bool>, ready: bool, tip: &str) -> bool {
     ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
-    switch_row(ui, "Zone Tracking", true, !zone_off);
+    ui.add_enabled_ui(false, |ui| {
+        switch_row(ui, "Zone Tracking", NOT_YET, true, !zone_off)
+    });
     ui.add_space(18.0);
-    switch_row(ui, "Sound Source Assisted Tracking", false, true);
+    ui.add_enabled_ui(ready, |ui| {
+        switch_row(
+            ui,
+            "Sound Source Assisted Tracking",
+            "Use the microphones to help find who is speaking",
+            false,
+            sound.unwrap_or(false),
+        )
+        .on_disabled_hover_text(tip)
+    })
+    .inner
+    .clicked()
 }
 
-fn switch_row(ui: &mut Ui, label: &str, settings: bool, on: bool) {
+fn switch_row(ui: &mut Ui, label: &str, hint: &str, settings: bool, on: bool) -> Response {
     ui.horizontal(|ui| {
         ui.set_height(24.0);
         ui.label(egui::RichText::new(label).size(15.0));
-        help(ui, NOT_YET);
+        help(ui, hint);
         if settings {
             ui.label(
                 egui::RichText::new(icon::GEAR_SIX)
@@ -1239,10 +1265,10 @@ fn switch_row(ui: &mut Ui, label: &str, settings: bool, on: bool) {
                     .color(TEXT_DIM),
             );
         }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            toggle(ui, on);
-        });
-    });
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| toggle(ui, on))
+            .inner
+    })
+    .inner
 }
 
 impl eframe::App for GimblyApp {

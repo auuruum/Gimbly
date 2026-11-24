@@ -220,6 +220,8 @@ pub struct SessionStatus {
     pub tracking_speed: Option<TrackingSpeed>,
     /// Voice Tracking Range the camera reports; `None` until read.
     pub voice_range: Option<VoiceRange>,
+    /// Sound Source Assisted Tracking the camera reports; `None` until read.
+    pub sound_source: Option<bool>,
     /// The hand Hand Tracking follows; `None` until read.
     pub hand: Option<Hand>,
     /// The Hand Tracking range being edited. `Some` exactly while the camera
@@ -292,6 +294,7 @@ pub enum GimbalCommand {
     /// Start Voice or Hand Tracking, or stop the running AI mode with `Off`.
     SetAiMode(AiMode),
     SetVoiceRange(VoiceRange),
+    SetSoundSource(bool),
     SetHand(Hand),
     /// Read the Hand Tracking range and put the camera in its edit state.
     OpenHandRange,

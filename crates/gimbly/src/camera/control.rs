@@ -46,6 +46,7 @@ impl<T: Transport> Channel<T> {
         status.ai_mode = view.and_then(|view| view.ai_mode);
         status.auto_zoom = view.and_then(|view| view.auto_zoom);
         status.voice_range = view.and_then(|view| view.voice_range);
+        status.sound_source = view.and_then(|view| view.sound_source);
         status.object_framing = view.and_then(|view| view.object_framing);
         status.tracking_speed = tracking_speed;
         status.hand = hand;
@@ -131,6 +132,7 @@ impl<T: Transport> Channel<T> {
             ai_mode: vendor::read_ai_mode(block),
             auto_zoom: vendor::read_auto_zoom(block),
             voice_range: vendor::read_voice_range(block),
+            sound_source: vendor::read_sound_source(block),
             object_framing: vendor::read_object_framing(block),
         })
     }
@@ -415,6 +417,10 @@ impl<T: Transport> Channel<T> {
                 self.set(vendor::SELECTOR_VIEW, &mut vendor::voice_range(range))?;
                 shared.status().voice_range = Some(range);
             }
+            GimbalCommand::SetSoundSource(on) => {
+                self.set(vendor::SELECTOR_VIEW, &mut vendor::sound_source(on))?;
+                shared.status().sound_source = Some(on);
+            }
             GimbalCommand::SetHand(hand) => {
                 self.send(vendor::hand(hand))?;
                 shared.status().hand = Some(hand);
@@ -629,6 +635,7 @@ fn commands_loop(
                             | GimbalCommand::SetAutoZoom(_)
                             | GimbalCommand::SetAiMode(_)
                             | GimbalCommand::SetVoiceRange(_)
+                            | GimbalCommand::SetSoundSource(_)
                             | GimbalCommand::SelectPoint { .. }
                             | GimbalCommand::SelectObject(_)
                             | GimbalCommand::CancelTarget
@@ -659,12 +666,14 @@ fn commands_loop(
                     status.ai_mode,
                     status.auto_zoom,
                     status.voice_range,
+                    status.sound_source,
                     status.object_framing,
                 );
                 // Unknown values (such as the switching value 6) keep the old state.
                 status.ai_mode = view.ai_mode.or(status.ai_mode);
                 status.auto_zoom = view.auto_zoom.or(status.auto_zoom);
                 status.voice_range = view.voice_range.or(status.voice_range);
+                status.sound_source = view.sound_source.or(status.sound_source);
                 // Another app may turn tracking on later in a mode we cannot read.
                 if view.ai_mode.is_some_and(|mode| mode != AiMode::Human) {
                     status.tracking_mode = None;
@@ -680,6 +689,7 @@ fn commands_loop(
                         status.ai_mode,
                         status.auto_zoom,
                         status.voice_range,
+                        status.sound_source,
                         status.object_framing,
                     );
                 drop(status);
@@ -772,6 +782,7 @@ pub(super) struct View {
     pub ai_mode: Option<AiMode>,
     pub auto_zoom: Option<AutoZoom>,
     pub voice_range: Option<VoiceRange>,
+    pub sound_source: Option<bool>,
     pub object_framing: Option<ObjectFraming>,
 }
 

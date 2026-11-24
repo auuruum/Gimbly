@@ -812,6 +812,20 @@ pub fn read_voice_range(data: &[u8]) -> Option<VoiceRange> {
     }
 }
 
+pub fn sound_source(on: bool) -> [u8; MESSAGE_LEN] {
+    view_block(&[0x25, 1, on.into()])
+}
+
+/// Sound Source Assisted Tracking: bit 0 of status offset 46 (see
+/// [`read_voice_range`]).
+pub fn read_sound_source(data: &[u8]) -> Option<bool> {
+    sleeping(data)?;
+    match *data.get(46)? {
+        value @ 0..=3 => Some(value & 1 == 1),
+        _ => None,
+    }
+}
+
 fn hand_setting(key: u32, value: &[u8]) -> Message {
     let mut data = key.to_le_bytes().to_vec();
     data.extend_from_slice(value);
@@ -1412,6 +1426,25 @@ mod tests {
             );
         }
         assert_eq!(read_voice_range(&status(0, 3)[..46]), None);
+
+        // Selector 6 writes from the 2026-11-24 capture.
+        assert_eq!(sound_source(false).to_vec(), padded("250100"));
+        assert_eq!(sound_source(true).to_vec(), padded("250101"));
+        for (value, on) in [
+            (0, Some(false)),
+            (1, Some(true)),
+            (2, Some(false)),
+            (3, Some(true)),
+            (4, None),
+            (0x81, None),
+        ] {
+            assert_eq!(
+                read_sound_source(&status(0, value)),
+                on,
+                "offset 46 = {value}"
+            );
+        }
+        assert_eq!(read_sound_source(&status(0, 1)[..46]), None);
 
         assert_gimbal_write(&hand(Hand::Left), [0x44, 0x20], "0400000001");
         assert_gimbal_write(&hand(Hand::Right), [0x44, 0x20], "0400000000");

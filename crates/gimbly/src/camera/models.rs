@@ -36,6 +36,7 @@ pub const MODELS: &[Model] = &[Model {
         Feature::Composition,
         Feature::VoiceTracking,
         Feature::HandTracking,
+        Feature::ZoneTracking,
     ],
     standby_picture: true,
 }];
@@ -79,10 +80,12 @@ pub enum Feature {
     VoiceTracking,
     /// Hand Tracking, its hand and its range panel.
     HandTracking,
+    /// Zone Tracking: its switch, range, auto-tracking and Non-tracking Areas.
+    ZoneTracking,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 13] = [
+    pub const ALL: [Feature; 14] = [
         Self::Gimbal,
         Self::Zoom,
         Self::FieldOfView,
@@ -96,6 +99,7 @@ impl Feature {
         Self::Composition,
         Self::VoiceTracking,
         Self::HandTracking,
+        Self::ZoneTracking,
     ];
 
     /// The name the UI and `docs/devices.md` use.
@@ -114,6 +118,7 @@ impl Feature {
             Self::Composition => "AI Composition",
             Self::VoiceTracking => "Voice Tracking",
             Self::HandTracking => "Hand Tracking",
+            Self::ZoneTracking => "Zone Tracking",
         }
     }
 }
@@ -161,6 +166,17 @@ impl GimbalCommand {
             | ResetHandRange { .. }
             | ConfirmHandRange(_)
             | CloseHandRange { .. } => &[Feature::HandTracking],
+            SetZoneTracking(_)
+            | OpenZone
+            | UpdateZone(_)
+            | ResetZone { .. }
+            | ConfirmZone(_)
+            | SetZoneAutoTarget(_)
+            | AddArea
+            | UpdateArea(_)
+            | RenameArea { .. }
+            | DeleteArea(_)
+            | CloseZone { .. } => &[Feature::ZoneTracking],
         }
     }
 }

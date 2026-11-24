@@ -26,9 +26,9 @@
 //! | 16.. | data, then padding |
 
 use super::{
-    AiMode, AutoZoom, Fov, GimbalCommand, Hand, HandRange, ObjectFraming, PRESET_NAME_MAX,
-    PRESET_SLOTS, PresetPosition, TargetBox, TrackingMode, TrackingSpeed, VoiceRange,
-    ZOOM_RATIO_MAX,
+    AiMode, AutoZoom, Fov, GimbalCommand, Hand, ObjectFraming, PRESET_NAME_MAX, PRESET_SLOTS,
+    PresetPosition, TargetBox, TrackingMode, TrackingRange, TrackingSpeed, VoiceRange, ZONE_AREAS,
+    ZOOM_RATIO_MAX, Zone,
 };
 
 /// GUID of the extension unit, as the UVC descriptor stores it.
@@ -448,7 +448,7 @@ pub fn read_composition(data: &[u8]) -> Option<f32> {
     (value.is_finite() && value.abs() <= 1.0).then(|| clamp_composition(value))
 }
 
-pub fn read_face_framing(data: &[u8]) -> Option<bool> {
+pub fn read_flag(data: &[u8]) -> Option<bool> {
     match data {
         [0] => Some(false),
         [1] => Some(true),
@@ -912,22 +912,181 @@ pub fn hand_range_gimbal(editing: bool) -> Message {
 
 /// Messages that follow [`hand_range_edit`]`(false)`: Done writes `save`,
 /// Cancel passes `None`. Both end the edit state and zoom back to 1.0x.
-pub fn hand_range_close(save: Option<&HandRange>) -> Vec<Message> {
+pub fn hand_range_close(save: Option<&TrackingRange>) -> Vec<Message> {
     let mut messages = Vec::new();
     if let Some(range) = save {
         for (key, limit) in (0u32..).zip(range.limits) {
             messages.push(hand_setting(key, &limit.to_le_bytes()));
         }
-        let mut record = range.record;
-        // The official app wrote this field (read as 100) as 0; meaning unknown.
-        record[20..22].fill(0);
-        messages.push(Message::new(GIMBAL, WRITE_RETURN_POSITION, record.to_vec()));
+        messages.push(Message::new(
+            GIMBAL,
+            WRITE_RETURN_POSITION,
+            written_record(range.record),
+        ));
     }
     messages.push(hand_range_gimbal(false));
     let mut zoom = 0x1e_u32.to_le_bytes().to_vec();
     zoom.extend_from_slice(&1.0f32.to_le_bytes());
     messages.push(Message::new(GIMBAL, [0x84, 0x68], zoom));
     messages
+}
+
+/// A position record as the official app writes it back.
+fn written_record(mut record: [u8; 24]) -> Vec<u8> {
+    // It wrote this field (read as 100) as 0; meaning unknown.
+    record[20..22].fill(0);
+    record.to_vec()
+}
+
+// Zone Tracking; see `docs/clean-room/2026-11-24-zone-tracking.md`.
+// Settings keys for READ_SETTING / WRITE_SETTING:
+const SETTING_ZONE_TRACKING: u32 = 3;
+const SETTING_ZONE_AUTO_TARGET: u32 = 0x12;
+/// Keys 0x13-0x16 hold yaw min, yaw max, pitch min, pitch max.
+const SETTING_ZONE_LIMITS: u32 = 0x13;
+/// Reads the zone return record: data `ff` gives the default, no data the
+/// stored one.
+pub const READ_ZONE_RETURN: [u8; 2] = [0xc4, 0x4e];
+const WRITE_ZONE_RETURN: [u8; 2] = [0x84, 0x4e];
+/// The default zone return record the camera gave: id 0, P 0, T 0, Z 1.0.
+pub const ZONE_RETURN_DEFAULT: [u8; 24] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0, 100, 0, 100, 0, 100, 0, 0, 0,
+];
+/// Lists the stored Non-tracking Area ids.
+pub const LIST_AREAS: [u8; 2] = [0x44, 0x13];
+pub const READ_AREA: [u8; 2] = [0x44, 0x14];
+pub const READ_AREA_NAME: [u8; 2] = [0x04, 0x15];
+const WRITE_AREA: [u8; 2] = [0x84, 0x13];
+const WRITE_AREA_NAME: [u8; 2] = [0x44, 0x15];
+const DELETE_AREA: [u8; 2] = [0xc4, 0x13];
+/// Reads the camera's initial position (38 bytes).
+pub const READ_INITIAL_POSITION: [u8; 2] = [0x84, 0x38];
+
+pub fn zone_tracking(on: bool) -> Message {
+    write_setting(SETTING_ZONE_TRACKING, &u32::from(on).to_le_bytes())
+}
+
+/// Request data for [`READ_SETTING`] that asks for the Zone Tracking switch.
+pub fn read_zone_tracking_request() -> Vec<u8> {
+    read_setting_request(SETTING_ZONE_TRACKING)
+}
+
+pub fn read_zone_tracking(data: &[u8]) -> Option<bool> {
+    match u32::from_le_bytes(data.try_into().ok()?) {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
+
+pub fn zone_auto_target(on: bool) -> Message {
+    write_setting(SETTING_ZONE_AUTO_TARGET, &[on.into()])
+}
+
+pub fn read_zone_auto_target_request() -> Vec<u8> {
+    read_setting_request(SETTING_ZONE_AUTO_TARGET)
+}
+
+/// Request data for limit `index` (0-3); `default` asks for the camera's
+/// default instead of the stored value, as the range reset icon does.
+pub fn read_zone_limit_request(index: u32, default: bool) -> Vec<u8> {
+    let mut data = read_setting_request(SETTING_ZONE_LIMITS + index);
+    if default {
+        data.push(1);
+    }
+    data
+}
+
+/// The messages that enter (`true`) or leave the zone-edit state. Leaving
+/// sends the second one only after Done; the official app's Cancel did not.
+pub fn zone_edit(editing: bool) -> [Message; 2] {
+    [
+        Message::new(GIMBAL, [0x44, 0x08], vec![u8::from(!editing)]),
+        Message::new(GIMBAL, [0x44, 0x04], vec![1, editing.into()]),
+    ]
+}
+
+/// The stored area ids from a [`LIST_AREAS`] reply: one `u32` each
+/// (checked with two areas stored). `None` for anything implausible.
+pub fn read_area_ids(data: &[u8]) -> Option<Vec<u8>> {
+    let (chunks, rest) = data.as_chunks::<4>();
+    if !rest.is_empty() || chunks.len() > ZONE_AREAS {
+        return None;
+    }
+    let mut ids = Vec::new();
+    for &chunk in chunks {
+        let id = u8::try_from(u32::from_le_bytes(chunk)).ok()?;
+        if usize::from(id) >= ZONE_AREAS || ids.contains(&id) {
+            return None;
+        }
+        ids.push(id);
+    }
+    Some(ids)
+}
+
+/// The record of a new area `id` at `angles` (from [`current_angles`]).
+pub fn area_record(id: u8, angles: (i16, i16), ratio: f32) -> Option<[u8; 24]> {
+    let mut record = [0; 24];
+    record[..4].copy_from_slice(&u32::from(id).to_le_bytes());
+    set_return_position(&record, angles, ratio)
+}
+
+/// Yaw and pitch of a [`READ_INITIAL_POSITION`] reply: `f32` at bytes 5
+/// and 9. The meaning of the rest is unknown.
+pub fn read_initial_position(data: &[u8]) -> Option<(f32, f32)> {
+    if data.len() != 38 {
+        return None;
+    }
+    let angle = |at: usize| {
+        let value = f32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?);
+        (value.is_finite() && value.abs() <= 360.0).then_some(value)
+    };
+    Some((angle(5)?, angle(9)?))
+}
+
+/// What Done writes before leaving the zone-edit state: limits, each area
+/// slot (stored or deleted) and the return position.
+pub fn zone_save(zone: &Zone) -> Result<Vec<Message>, String> {
+    let mut messages = Vec::new();
+    for (key, limit) in (SETTING_ZONE_LIMITS..).zip(zone.range.limits) {
+        messages.push(write_setting(key, &limit.to_le_bytes()));
+    }
+    for id in 0..ZONE_AREAS as u8 {
+        let id_bytes = u32::from(id).to_le_bytes();
+        match zone.areas.iter().find(|area| area.id == id) {
+            Some(area) => {
+                let mut record = written_record(area.record);
+                record[..4].copy_from_slice(&id_bytes);
+                messages.push(Message::new(GIMBAL, WRITE_AREA, record));
+                messages.push(named(WRITE_AREA_NAME, id, &area.name)?);
+            }
+            None => messages.push(Message::new(GIMBAL, DELETE_AREA, id_bytes.to_vec())),
+        }
+    }
+    messages.push(Message::new(
+        GIMBAL,
+        WRITE_ZONE_RETURN,
+        written_record(zone.range.record),
+    ));
+    Ok(messages)
+}
+
+pub fn area_name_valid(name: &str) -> bool {
+    !name.trim().is_empty()
+        && name.len() <= PRESET_NAME_MAX
+        && name.bytes().all(|b| (b' '..=b'~').contains(&b))
+}
+
+/// `u32 id` then the ASCII name, as preset and area names are written.
+fn named(command: [u8; 2], id: u8, name: &str) -> Result<Message, String> {
+    if !area_name_valid(name) {
+        return Err(format!(
+            "Use 1 to {PRESET_NAME_MAX} printable ASCII characters for a name"
+        ));
+    }
+    let mut data = preset_id(id);
+    data.extend_from_slice(name.as_bytes());
+    Ok(Message::new(GIMBAL, command, data))
 }
 
 pub fn zoom(ratio: f32) -> Option<(Message, f32)> {
@@ -970,17 +1129,7 @@ pub fn preset_ids(data: &[u8]) -> Option<&[u8]> {
 }
 
 pub fn preset_name(id: u8, name: &str) -> Result<Message, String> {
-    if name.trim().is_empty()
-        || name.len() > PRESET_NAME_MAX
-        || !name.bytes().all(|b| (b' '..=b'~').contains(&b))
-    {
-        return Err(format!(
-            "Use 1 to {PRESET_NAME_MAX} printable ASCII characters for a preset name"
-        ));
-    }
-    let mut data = preset_id(id);
-    data.extend_from_slice(name.as_bytes());
-    Ok(Message::new(GIMBAL, [0x84, 0x3a], data))
+    named([0x84, 0x3a], id, name)
 }
 
 pub fn read_preset_name(data: &[u8]) -> Option<String> {
@@ -1460,6 +1609,131 @@ mod tests {
     }
 
     #[test]
+    fn zone_tracking_matches_capture() {
+        // Writes and replies from the 2026-11-24 capture.
+        assert_gimbal_write(
+            &zone_tracking(true),
+            [0x44, 0x54],
+            "000000000300000001000000",
+        );
+        assert_gimbal_write(
+            &zone_tracking(false),
+            [0x44, 0x54],
+            "000000000300000000000000",
+        );
+        assert_eq!(read_zone_tracking_request(), hex("0000000003000000"));
+        assert_eq!(read_zone_tracking(&hex("01000000")), Some(true));
+        assert_eq!(read_zone_tracking(&hex("00000000")), Some(false));
+        assert_eq!(read_zone_tracking(&hex("02000000")), None);
+        assert_eq!(read_zone_tracking(&hex("01")), None);
+
+        assert_gimbal_write(&zone_auto_target(true), [0x44, 0x54], "000000001200000001");
+        assert_gimbal_write(&zone_auto_target(false), [0x44, 0x54], "000000001200000000");
+        assert_eq!(read_zone_auto_target_request(), hex("0000000012000000"));
+        assert_eq!(read_zone_limit_request(0, false), hex("0000000013000000"));
+        assert_eq!(read_zone_limit_request(3, true), hex("000000001600000001"));
+        let limits = ["0000c8c2", "0000c842", "0000f0c1", "0000f041"]
+            .map(|reply| read_hand_limit(&hex(reply)).unwrap());
+        assert_eq!(limits, [-100.0, 100.0, -30.0, 30.0]);
+
+        let default = hex("000000000000000000006400000000006400640064000000");
+        assert_eq!(read_return_record(&default), Some(ZONE_RETURN_DEFAULT));
+
+        let [enter, pause] = zone_edit(true);
+        assert_gimbal_write(&enter, [0x44, 0x08], "00");
+        assert_gimbal_write(&pause, [0x44, 0x04], "0101");
+        let [leave, unpause] = zone_edit(false);
+        assert_gimbal_write(&leave, [0x44, 0x08], "01");
+        assert_gimbal_write(&unpause, [0x44, 0x04], "0100");
+
+        // `44 13` answered without data before any area was stored, and
+        // with four zero bytes once Area1 (id 0) was.
+        assert_eq!(read_area_ids(&[]), Some(vec![]));
+        assert_eq!(read_area_ids(&hex("00000000")), Some(vec![0]));
+        assert_eq!(read_area_ids(&hex("0200000000000000")), Some(vec![2, 0]));
+        assert_eq!(read_area_ids(&hex("03000000")), None);
+        assert_eq!(read_area_ids(&hex("0100000001000000")), None);
+        assert_eq!(read_area_ids(&hex("000000")), None);
+        assert_eq!(read_area_ids(&[0; 16]), None);
+
+        // Area1 added at the position read then (pitch 3.6°, yaw 3.4°) and
+        // zoom 1.93x; read back by `44 14` and `04 15`.
+        let current = hex("0900d10000fe00002400220000000100010071b340000000");
+        let angles = current_angles(&current).unwrap();
+        let record = area_record(0, angles, 1.93).unwrap();
+        let stored = hex("00000000540168010000c100000000000000000064000000");
+        let stored = read_return_record(&stored).unwrap();
+        assert_eq!(return_position(&stored), (3.4, 3.6, 1.93));
+        assert_eq!(written_record(record), written_record(stored));
+        assert_eq!(
+            read_preset_name(&hex("4172656131")).as_deref(),
+            Some("Area1")
+        );
+        assert!(area_name_valid("Area1"));
+        assert!(!area_name_valid(" "));
+        assert!(!area_name_valid(&"a".repeat(PRESET_NAME_MAX + 1)));
+
+        // Done at 23:10:19: limits, area 0 with its name, slots 1 and 2
+        // deleted, then the return position.
+        let zone = Zone {
+            range: TrackingRange {
+                limits,
+                record: read_return_record(&hex(
+                    "000000003b00000000006400000000006400640064000000",
+                ))
+                .unwrap(),
+            },
+            default_record: [0; 24],
+            auto_target: true,
+            areas: vec![super::super::Area {
+                id: 0,
+                name: "Area1".into(),
+                record: stored,
+            }],
+            initial: None,
+        };
+        let expected = [
+            ([0x44, 0x54], "00000000130000000000c8c2"),
+            ([0x44, 0x54], "00000000140000000000c842"),
+            ([0x44, 0x54], "00000000150000000000f0c1"),
+            ([0x44, 0x54], "00000000160000000000f041"),
+            (
+                [0x84, 0x13],
+                "00000000540168010000c100000000000000000000000000",
+            ),
+            ([0x44, 0x15], "000000004172656131"),
+            ([0xc4, 0x13], "01000000"),
+            ([0xc4, 0x13], "02000000"),
+            (
+                [0x84, 0x4e],
+                "000000003b00000000006400000000006400640000000000",
+            ),
+        ];
+        let done = zone_save(&zone).unwrap();
+        assert_eq!(done.len(), expected.len());
+        for (message, (command, data)) in done.iter().zip(expected) {
+            assert_gimbal_write(message, command, data);
+        }
+        // Done with no areas deletes all three slots (23:07:03).
+        let empty = zone_save(&Zone {
+            areas: Vec::new(),
+            ..zone
+        })
+        .unwrap();
+        assert_gimbal_write(&empty[4], [0xc4, 0x13], "00000000");
+
+        // The initial position the Non-tracking Area Reset turned to.
+        let initial =
+            hex("0000000000e27acc4034335340000000000000803f0000003f0000003f0000803f0000803f00");
+        let (yaw, pitch) = read_initial_position(&initial).unwrap();
+        assert_eq!(
+            move_to(Some(pitch), Some(yaw)).data[4..],
+            hex("34335340e27acc40")
+        );
+        assert_eq!(read_initial_position(&initial[..37]), None);
+    }
+
+    #[test]
     fn hand_range_panel_moves_match_capture() {
         // Writes from the 2026-11-22 14:26 capture: clicking the limits
         // -45 / 30 / 45 / -30 and the return position P 44.90° T -30.00°.
@@ -1506,7 +1780,7 @@ mod tests {
         assert_eq!(hand_range_edit(false).to_vec(), padded("180100"));
         assert_gimbal_write(&hand_range_gimbal(true), [0xc4, 0x26], "00");
 
-        let range = HandRange {
+        let range = TrackingRange {
             limits,
             record: none,
         };
@@ -1635,8 +1909,8 @@ mod tests {
         );
         assert_eq!(read_composition(&hex("0000c07f")), None);
         assert_eq!(read_composition(&hex("00")), None);
-        assert_eq!(read_face_framing(&hex("01")), Some(true));
-        assert_eq!(read_face_framing(&hex("02")), None);
+        assert_eq!(read_flag(&hex("01")), Some(true));
+        assert_eq!(read_flag(&hex("02")), None);
     }
 
     #[test]

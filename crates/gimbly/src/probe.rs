@@ -64,6 +64,13 @@ fn control_step(step: &str) -> Option<Command> {
         ["range"] => GimbalCommand::OpenHandRange,
         ["rangedone"] => GimbalCommand::CloseHandRange { save: true },
         ["rangecancel"] => GimbalCommand::CloseHandRange { save: false },
+        ["zone", "on"] => GimbalCommand::SetZoneTracking(true),
+        ["zone", "off"] => GimbalCommand::SetZoneTracking(false),
+        ["zone"] => GimbalCommand::OpenZone,
+        ["zonedone"] => GimbalCommand::CloseZone { save: true },
+        ["zonecancel"] => GimbalCommand::CloseZone { save: false },
+        ["area"] => GimbalCommand::AddArea,
+        ["area", "delete", id] => GimbalCommand::DeleteArea(id.parse().ok()?),
         ["zoom", ratio] => GimbalCommand::ZoomRatio(ratio.parse().ok()?),
         ["go", id] => GimbalCommand::TriggerPreset(id.parse().ok()?),
         ["add"] => GimbalCommand::AddPreset,
@@ -106,7 +113,7 @@ fn gimbal(session: &camera::Session, args: &[String], virtual_camera: bool) -> i
             .and_then(|f| crate::snapshot::save(&f, Path::new(dir), [0, 0, 0, 0, 0, step as u16]));
         let status = session.status();
         println!(
-            "step {step}: {saved:?}, vendor control {}, sleeping {}, AI mode {:?} {:?}, auto zoom {:?}, speed {:?}, voice range {:?}, sound source {:?}, hand {:?} {:?}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
+            "step {step}: {saved:?}, vendor control {}, sleeping {}, AI mode {:?} {:?}, auto zoom {:?}, speed {:?}, voice range {:?}, sound source {:?}, hand {:?} {:?}, zone {:?} {:?}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
             status.vendor_control,
             status.sleeping,
             status.ai_mode,
@@ -117,6 +124,8 @@ fn gimbal(session: &camera::Session, args: &[String], virtual_camera: bool) -> i
             status.sound_source,
             status.hand,
             status.hand_range,
+            status.zone_tracking,
+            status.zone,
             status.zoom_ratio,
             status.fov,
             status.presets,

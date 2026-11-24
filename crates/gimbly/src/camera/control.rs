@@ -4,9 +4,9 @@
 use super::queue::Receiver;
 use super::sleep::SleepReadback;
 use super::{
-    AiMode, AutoZoom, Command, Composition, Feature, GimbalCommand, Hand, HandRange,
-    HandRangeField, ObjectFraming, PRESET_SLOTS, Preset, Shared, TrackingMode, TrackingSpeed,
-    VoiceRange, serial, vendor,
+    AiMode, Area, AutoZoom, Command, Composition, Feature, GimbalCommand, Hand, ObjectFraming,
+    PRESET_SLOTS, Preset, RangeField, Shared, TrackingMode, TrackingRange, TrackingSpeed,
+    VoiceRange, ZONE_AREAS, Zone, serial, vendor,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -40,6 +40,7 @@ impl<T: Transport> Channel<T> {
         let presets = self.presets().ok();
         let tracking_speed = self.read_tracking_speed().ok();
         let hand = self.read_hand().ok();
+        let zone_tracking = self.read_zone_tracking().ok();
         let mut status = shared.status();
         status.ai_mode = view.and_then(|view| view.ai_mode);
         status.auto_zoom = view.and_then(|view| view.auto_zoom);
@@ -48,6 +49,7 @@ impl<T: Transport> Channel<T> {
         status.object_framing = view.and_then(|view| view.object_framing);
         status.tracking_speed = tracking_speed;
         status.hand = hand;
+        status.zone_tracking = zone_tracking;
         status.zoom_ratio = ratio;
         status.presets = presets;
         status.vendor_control = true;
@@ -163,7 +165,7 @@ impl<T: Transport> Channel<T> {
         Ok(Composition {
             x: vendor::read_composition(&x).ok_or_else(invalid)?,
             y: vendor::read_composition(&y).ok_or_else(invalid)?,
-            face_framing: vendor::read_face_framing(&face).ok_or_else(invalid)?,
+            face_framing: vendor::read_flag(&face).ok_or_else(invalid)?,
         })
     }
 
@@ -191,11 +193,11 @@ impl<T: Transport> Channel<T> {
         // The official app then reads keys 0-3 again with one more `00` byte
         // and gets the same replies; Gimbly skips that.
         self.set(vendor::SELECTOR_VIEW, &mut vendor::hand_range_edit(true))?;
-        shared.status().hand_range = Some(HandRange { limits, record });
+        shared.status().hand_range = Some(TrackingRange { limits, record });
         self.send(vendor::hand_range_gimbal(true))
     }
 
-    fn update_hand_range(&mut self, shared: &Shared, field: HandRangeField) -> Result<(), String> {
+    fn update_hand_range(&mut self, shared: &Shared, field: RangeField) -> Result<(), String> {
         let mut range = shared
             .status()
             .hand_range
@@ -204,7 +206,7 @@ impl<T: Transport> Channel<T> {
         let angles =
             vendor::current_angles(&current).ok_or("Camera returned an invalid gimbal position")?;
         match field {
-            HandRangeField::Limit(key) => {
+            RangeField::Limit(key) => {
                 let (yaw, pitch) = angles;
                 let value = f32::from(if key < 2 { yaw } else { pitch }) / 100.0;
                 let mut limits = range.limits;
@@ -214,7 +216,7 @@ impl<T: Transport> Channel<T> {
                 }
                 range.limits = limits;
             }
-            HandRangeField::Return => {
+            RangeField::Return => {
                 let ratio = self.read_zoom()?;
                 range.record = vendor::set_return_position(&range.record, angles, ratio)
                     .ok_or("Camera returned an invalid zoom ratio")?;
@@ -234,7 +236,7 @@ impl<T: Transport> Channel<T> {
         let mut status = shared.status();
         if let Some(range) = &mut status.hand_range {
             if limits {
-                range.limits = HandRange::DEFAULT_LIMITS;
+                range.limits = TrackingRange::DEFAULT_LIMITS;
             } else {
                 range.record = vendor::RETURN_RECORD_NONE;
             }
@@ -265,6 +267,218 @@ impl<T: Transport> Channel<T> {
         let mut status = shared.status();
         status.hand_range = None;
         status.hand_range_proposal = None;
+        result
+    }
+
+    fn read_zone_tracking(&mut self) -> Result<bool, String> {
+        let data = self.request(vendor::READ_SETTING, vendor::read_zone_tracking_request())?;
+        vendor::read_zone_tracking(&data)
+            .ok_or_else(|| "Camera returned an unknown Zone Tracking state".into())
+    }
+
+    fn read_zone_limits(&mut self, default: bool) -> Result<[f32; 4], String> {
+        let mut limits = [0.0; 4];
+        for (index, limit) in (0u32..).zip(&mut limits) {
+            let data = self.request(
+                vendor::READ_SETTING,
+                vendor::read_zone_limit_request(index, default),
+            )?;
+            *limit =
+                vendor::read_hand_limit(&data).ok_or("Camera returned an invalid range limit")?;
+        }
+        Ok(limits)
+    }
+
+    /// The current gimbal angles in hundredths of a degree, and the zoom ratio.
+    fn current_view(&mut self) -> Result<((i16, i16), f32), String> {
+        let current = self.request(vendor::READ_POSITION, Vec::new())?;
+        let angles =
+            vendor::current_angles(&current).ok_or("Camera returned an invalid gimbal position")?;
+        Ok((angles, self.read_zoom()?))
+    }
+
+    /// Reads the Zone Tracking settings while entering the zone-edit state.
+    fn open_zone(&mut self, shared: &Shared) -> Result<(), String> {
+        let [enter, pause] = vendor::zone_edit(true);
+        self.send(enter)?;
+        // Just after connecting the camera sometimes left these reads
+        // unanswered for a moment (2026-11-24); one retry covers it.
+        let opened = self
+            .read_zone(pause.clone())
+            .or_else(|_| self.read_zone(pause));
+        match opened {
+            Ok(zone) => {
+                shared.status().zone = Some(zone);
+                Ok(())
+            }
+            Err(error) => {
+                // Without a panel to close, leave the edit state now.
+                for message in vendor::zone_edit(false) {
+                    let _ = self.send(message);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// The reads between [`vendor::zone_edit`]'s two messages, `pause`
+    /// sent where the official app sent it.
+    fn read_zone(&mut self, pause: vendor::Message) -> Result<Zone, String> {
+        // Like the official app: the default record (data `ff`), then the stored one.
+        // The first read once went unanswered; the default is known anyway.
+        let default_record = self
+            .request(vendor::READ_ZONE_RETURN, vec![0xff])
+            .ok()
+            .and_then(|data| vendor::read_return_record(&data))
+            .unwrap_or(vendor::ZONE_RETURN_DEFAULT);
+        let record =
+            vendor::read_return_record(&self.request(vendor::READ_ZONE_RETURN, Vec::new())?)
+                .ok_or("Camera returned an invalid return position")?;
+        self.send(pause)?;
+        let limits = self.read_zone_limits(false)?;
+        let auto_target = self.request(
+            vendor::READ_SETTING,
+            vendor::read_zone_auto_target_request(),
+        )?;
+        let auto_target =
+            vendor::read_flag(&auto_target).ok_or("Camera returned an unknown setting")?;
+        // An area list that cannot be read must fail: Done would delete the areas.
+        let ids = vendor::read_area_ids(&self.request(vendor::LIST_AREAS, Vec::new())?)
+            .ok_or("Camera returned an invalid area list")?;
+        let initial = self
+            .request(vendor::READ_INITIAL_POSITION, Vec::new())
+            .ok()
+            .and_then(|data| vendor::read_initial_position(&data));
+        let mut areas = Vec::new();
+        for id in ids {
+            let name = self.request(vendor::READ_AREA_NAME, vendor::preset_id(id))?;
+            let name = vendor::read_preset_name(&name)
+                .filter(|name| vendor::area_name_valid(name))
+                .unwrap_or_else(|| format!("Area{}", id + 1));
+            let record = vendor::read_return_record(
+                &self.request(vendor::READ_AREA, vendor::preset_id(id))?,
+            )
+            .ok_or("Camera returned an invalid area")?;
+            areas.push(Area { id, name, record });
+        }
+        Ok(Zone {
+            range: TrackingRange { limits, record },
+            default_record,
+            auto_target,
+            areas,
+            initial,
+        })
+    }
+
+    fn update_zone(&mut self, shared: &Shared, field: RangeField) -> Result<(), String> {
+        let current = shared.status().zone.as_ref().map(|zone| zone.range);
+        let mut range = current.ok_or("The Zone Tracking panel is not open")?;
+        let (angles, ratio) = self.current_view()?;
+        // Like the official app, ask before a change moves the other values.
+        let proposal = match field {
+            RangeField::Limit(key) => {
+                let (yaw, pitch) = angles;
+                let value = f32::from(if key < 2 { yaw } else { pitch }) / 100.0;
+                *range.limits.get_mut(key).ok_or("Unknown range limit")? = value;
+                if !vendor::hand_limits_valid(&range.limits) {
+                    return Err("Keep at least 10° between opposite limits".into());
+                }
+                range.return_within().map(|moved| (moved, false))
+            }
+            RangeField::Return => {
+                range.record = vendor::set_return_position(&range.record, angles, ratio)
+                    .ok_or("Camera returned an invalid zoom ratio")?;
+                range.including_return().map(|wider| (wider, true))
+            }
+        };
+        let mut status = shared.status();
+        match (proposal, &mut status.zone) {
+            (Some(proposal), _) => status.zone_proposal = Some(proposal),
+            (None, Some(zone)) => zone.range = range,
+            (None, None) => {}
+        }
+        Ok(())
+    }
+
+    /// The panel's two reset icons; nothing is written until Done.
+    fn reset_zone(&mut self, shared: &Shared, limits: bool) -> Result<(), String> {
+        // The official app reads the default limits from the camera.
+        let defaults = if limits {
+            Some(self.read_zone_limits(true)?)
+        } else {
+            None
+        };
+        if let Some(zone) = &mut shared.status().zone {
+            match defaults {
+                Some(limits) => zone.range.limits = limits,
+                None => zone.range.record = zone.default_record,
+            }
+        }
+        Ok(())
+    }
+
+    /// Area edits; they stay in the panel until Done.
+    fn change_area(&mut self, shared: &Shared, command: GimbalCommand) -> Result<(), String> {
+        let view = match command {
+            GimbalCommand::AddArea | GimbalCommand::UpdateArea(_) => Some(self.current_view()?),
+            _ => None,
+        };
+        let mut status = shared.status();
+        let zone = status
+            .zone
+            .as_mut()
+            .ok_or("The Zone Tracking panel is not open")?;
+        let invalid = "Camera returned an invalid view";
+        match (command, view) {
+            (GimbalCommand::AddArea, Some((angles, ratio))) => {
+                let id = (0..ZONE_AREAS as u8)
+                    .find(|id| zone.areas.iter().all(|area| area.id != *id))
+                    .ok_or("All Non-tracking Area slots are occupied")?;
+                let record = vendor::area_record(id, angles, ratio).ok_or(invalid)?;
+                let name = format!("Area{}", id + 1);
+                zone.areas.push(Area { id, name, record });
+                zone.areas.sort_by_key(|area| area.id);
+            }
+            (GimbalCommand::UpdateArea(id), Some((angles, ratio))) => {
+                let area = zone.areas.iter_mut().find(|area| area.id == id);
+                area.ok_or("No such area")?.record =
+                    vendor::area_record(id, angles, ratio).ok_or(invalid)?;
+            }
+            (GimbalCommand::RenameArea { id, name }, _) => {
+                if !vendor::area_name_valid(&name) {
+                    return Err("Use 1 to 40 printable ASCII characters for a name".into());
+                }
+                if let Some(area) = zone.areas.iter_mut().find(|area| area.id == id) {
+                    area.name = name;
+                }
+            }
+            (GimbalCommand::DeleteArea(id), _) => zone.areas.retain(|area| area.id != id),
+            _ => return Err("Unsupported area command".into()),
+        }
+        Ok(())
+    }
+
+    /// Leaves the zone-edit state, writing the settings when `save` is set.
+    fn close_zone(&mut self, shared: &Shared, save: bool) -> Result<(), String> {
+        let Some(zone) = shared.status().zone.clone() else {
+            return Ok(());
+        };
+        let [leave, unpause] = vendor::zone_edit(false);
+        let close = || {
+            if save {
+                vendor::zone_save(&zone)?
+                    .into_iter()
+                    .try_for_each(|message| self.send(message))?;
+            }
+            self.send(leave)?;
+            // The official app's Cancel sent only `leave`.
+            if save { self.send(unpause) } else { Ok(()) }
+        };
+        let result = close();
+        // Cleared only now: exiting waits for this.
+        let mut status = shared.status();
+        status.zone = None;
+        status.zone_proposal = None;
         result
     }
 
@@ -482,6 +696,31 @@ impl<T: Transport> Channel<T> {
                 // The close sequence zooms back to 1.0x.
                 *zoom_refresh = follow_zoom();
             }
+            GimbalCommand::SetZoneTracking(on) => {
+                self.send(vendor::zone_tracking(on))?;
+                shared.status().zone_tracking = Some(on);
+            }
+            GimbalCommand::OpenZone => self.open_zone(shared)?,
+            GimbalCommand::UpdateZone(field) => self.update_zone(shared, field)?,
+            GimbalCommand::ResetZone { limits } => self.reset_zone(shared, limits)?,
+            GimbalCommand::ConfirmZone(accept) => {
+                let mut status = shared.status();
+                let proposal = status.zone_proposal.take();
+                if let (true, Some((range, _)), Some(zone)) = (accept, proposal, &mut status.zone) {
+                    zone.range = range;
+                }
+            }
+            GimbalCommand::SetZoneAutoTarget(on) => {
+                self.send(vendor::zone_auto_target(on))?;
+                if let Some(zone) = &mut shared.status().zone {
+                    zone.auto_target = on;
+                }
+            }
+            GimbalCommand::AddArea
+            | GimbalCommand::UpdateArea(_)
+            | GimbalCommand::RenameArea { .. }
+            | GimbalCommand::DeleteArea(_) => self.change_area(shared, command)?,
+            GimbalCommand::CloseZone { save } => self.close_zone(shared, save)?,
             GimbalCommand::ZoomRatio(ratio) => {
                 let (message, ratio) = vendor::zoom(ratio).ok_or("Zoom ratio is out of range")?;
                 if shared.status().zoom_ratio == Some(ratio) && shared.status().fov.is_none() {
@@ -710,11 +949,12 @@ fn commands_loop(
             }
             sleep_polled = Instant::now();
             // Opening or waking the stream can briefly interrupt replies.
-            let (retry_presets, retry_speed, retry_hand) = {
+            let (retry_presets, retry_speed, retry_hand, retry_zone) = {
                 let status = shared.status();
                 if status.presets.is_some()
                     && status.tracking_speed.is_some()
                     && status.hand.is_some()
+                    && status.zone_tracking.is_some()
                 {
                     preset_retries = 0;
                 }
@@ -723,10 +963,15 @@ fn commands_loop(
                     retry && status.presets.is_none(),
                     retry && status.tracking_speed.is_none(),
                     retry && status.hand.is_none(),
+                    retry && status.zone_tracking.is_none(),
                 )
             };
-            if retry_presets || retry_speed || retry_hand {
+            if retry_presets || retry_speed || retry_hand || retry_zone {
                 preset_retries += 1;
+            }
+            if retry_zone && let Ok(on) = xu.read_zone_tracking() {
+                shared.status().zone_tracking = Some(on);
+                repaint();
             }
             if retry_hand && let Ok(hand) = xu.read_hand() {
                 shared.status().hand = Some(hand);
@@ -771,6 +1016,7 @@ fn commands_loop(
     // Never leave the camera in the range-edit state (best effort: it may
     // be gone already).
     let _ = xu.close_hand_range(shared, false);
+    let _ = xu.close_zone(shared, false);
 }
 
 /// The status block fields Gimbly reads.
@@ -910,6 +1156,7 @@ pub(super) fn report(xu: &mut Channel<impl Transport>) -> Vec<String> {
             Feature::Composition => format!("{:?}", xu.read_composition()),
             Feature::VoiceTracking => format!("{:?}", view.map(|v| v.voice_range)),
             Feature::HandTracking => format!("{:?}", xu.read_hand()),
+            Feature::ZoneTracking => format!("switch {:?}", xu.read_zone_tracking()),
         };
         lines.push(format!("{}: {answer}", feature.name()));
     }

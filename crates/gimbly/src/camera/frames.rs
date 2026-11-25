@@ -25,6 +25,8 @@ pub(super) struct Frames<'a> {
     /// session.
     compressed: Option<(u32, u32, u32)>,
     recorder: Option<Recorder>,
+    /// The camera microphone, recorded with the video.
+    audio: Option<crate::audio::Recording>,
     last_picture: Option<Instant>,
 }
 
@@ -41,6 +43,7 @@ impl<'a> Frames<'a> {
             fps_window: (Instant::now(), 0),
             compressed: None,
             recorder: None,
+            audio: None,
             last_picture: None,
         }
     }
@@ -59,6 +62,10 @@ impl<'a> Frames<'a> {
         let mut status = self.worker.shared.status();
         match result {
             Ok(recorder) => {
+                self.audio = status.model.map(|model| {
+                    let path = recorder.path().with_extension("wav");
+                    crate::audio::Recording::start(model.name, path)
+                });
                 self.recorder = Some(recorder);
                 status.recording = Some(RecordingStatus::default());
             }
@@ -75,13 +82,22 @@ impl<'a> Frames<'a> {
         };
         let now = Instant::now();
         let pushed = recorder.push(jpeg, now);
+        if let Some(audio) = &self.audio {
+            // The sound runs while video frames are being recorded.
+            audio.set_paused(recorder.paused());
+        }
         let current = RecordingStatus {
             elapsed: recorder.recorded(now),
             paused: recorder.paused(),
         };
+        let audio_error = self.audio.as_mut().and_then(|audio| audio.take_error());
         let mut status = self.worker.shared.status();
+        if let Some(error) = audio_error {
+            status.error = Some(error);
+        }
         if let Err(error) = pushed {
             self.recorder = None;
+            self.audio = None;
             status.recording = None;
             status.error = Some(error);
             drop(status);
@@ -147,6 +163,9 @@ impl<'a> Frames<'a> {
                 Command::PauseRecording(paused) => {
                     if let Some(recorder) = &mut self.recorder {
                         recorder.set_paused(paused, Instant::now());
+                        if let Some(audio) = &self.audio {
+                            audio.set_paused(paused);
+                        }
                         if let Some(status) = &mut self.worker.shared.status().recording {
                             status.paused = paused;
                         }

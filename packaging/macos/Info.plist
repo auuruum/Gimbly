@@ -10,6 +10,7 @@
     <key>CFBundleVersion</key><string>1</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>NSCameraUsageDescription</key><string>Gimbly uses the camera for live preview, snapshots, and virtual camera output.</string>
+    <key>NSMicrophoneUsageDescription</key><string>Gimbly records the camera microphone with High-fps Recording.</string>
     <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>

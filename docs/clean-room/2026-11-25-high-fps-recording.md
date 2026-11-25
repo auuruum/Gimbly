@@ -148,10 +148,19 @@ recording and in the preview mode afterwards. While recording, the preview
 and virtual camera get every second frame (about 60 fps), decoded in
 Gimbly. Recording Bitrate stays disabled because it has no effect here.
 
+The camera microphone goes into a `.wav` (16-bit PCM) with the video's
+name. Gimbly finds it by name: an audio input whose name contains "OBSBOT"
+and the model name. It is captured with WASAPI on Windows, ALSA
+(`plughw`, libasound loaded at run time) on Linux and AVFoundation on
+macOS. The sound starts with the first recorded video frame and pauses
+with the video. A camera without a matching microphone records video
+only, with a notice.
+
 Differences: file names follow Gimbly's snapshot style
 (`Gimbly_YYYYMMDD_HHMMSS.mkv`) because Gimbly does not read the camera
-serial, the help notes are Gimbly's own text, and the `.wav` audio file is
-not implemented yet.
+serial; the help notes are Gimbly's own text; the `.wav` keeps the
+microphone's rate (48 kHz stereo on Windows with the Tiny 3 Lite, and
+requested on Linux and macOS) instead of 44.1 kHz.
 
 ## Test
 
@@ -161,6 +170,8 @@ not implemented yet.
 - `record::tests`: recorded time without pauses, the playback rate in
   Normal and Slow Motion, skipped non-JPEG data and the file name.
 - `camera::mjpeg::tests`: damaged frames are rejected.
+- `audio::tests`: the WAV header and sizes, and which input names count as
+  the camera microphone.
 
 Hardware, Windows 10 with the Tiny 3 Lite, 2026-11-25:
 
@@ -173,7 +184,13 @@ Hardware, Windows 10 with the Tiny 3 Lite, 2026-11-25:
   60 frames per second before and during the recording. The 720P question,
   Slow Motion with mp4, and closing the app mid-recording (the mp4 was
   complete) were checked too.
+- Sound: the WAV was 48 kHz stereo. A 1 kHz tone played through the PC
+  speakers during a probe recording showed up in the WAV (the 1 kHz band
+  rose from about −84 dB to −45 dB). In the app, a recording with a 4 s
+  pause gave 5.90 s of video and 5.82 s of sound.
 
 Still to check: Linux and macOS at runtime (both compile and pass Clippy).
 The macOS path relies on AVFoundation delivering the native JPEG samples
-when the output's video settings are empty.
+when the output's video settings are empty, and on the audio output
+accepting 48 kHz stereo 16-bit PCM settings. On Linux the camera
+microphone must not be held by another program.

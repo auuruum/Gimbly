@@ -207,6 +207,10 @@ impl Recorder {
         }
     }
 
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn set_paused(&mut self, paused: bool, now: Instant) {
         self.clock.set_paused(paused, now);
     }

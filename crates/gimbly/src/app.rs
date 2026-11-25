@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 const NOT_YET: &str = "Not implemented in Gimbly yet";
 const HIGH_FPS_NOTES: &str = "High-fps Recording\n\n\
     1. The file holds the camera's own frames: rotation, mirror and the portrait crop are not applied.\n\
-    2. The recording has no sound yet.\n\
+    2. The camera microphone is saved separately, as a WAV file with the same name.\n\
     3. The camera switches to the chosen resolution and frame rate when the recording starts, \
     and back when it stops.";
 const LOW_RES_NOTE: &str = "720P 120 has a lower resolution, so the preview looks softer while \

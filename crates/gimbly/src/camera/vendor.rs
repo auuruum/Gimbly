@@ -827,6 +827,27 @@ pub fn read_sound_source(data: &[u8]) -> Option<bool> {
     }
 }
 
+/// HDR on or off (selector 6 `01 01 v`).
+pub fn hdr(on: bool) -> [u8; MESSAGE_LEN] {
+    view_block(&[0x01, 1, on.into()])
+}
+
+/// HDR: status offset 6, 0 off and 1 on. Other values were never seen.
+pub fn read_hdr(data: &[u8]) -> Option<bool> {
+    sleeping(data)?;
+    match *data.get(6)? {
+        value @ 0..=1 => Some(value == 1),
+        _ => None,
+    }
+}
+
+/// The frame rate the camera streams at: status offset 31 (30 at 4K 30 and
+/// 1080P 30, 60 at 1080P 60). Zero or a rate above 240 is treated as unknown.
+pub fn read_frame_rate(data: &[u8]) -> Option<u8> {
+    sleeping(data)?;
+    data.get(31).copied().filter(|fps| (1..=240).contains(fps))
+}
+
 fn hand_setting(key: u32, value: &[u8]) -> Message {
     let mut data = key.to_le_bytes().to_vec();
     data.extend_from_slice(value);
@@ -1595,6 +1616,22 @@ mod tests {
             );
         }
         assert_eq!(read_sound_source(&status(0, 1)[..46]), None);
+
+        // HDR writes and status offset 6 from the 2026-11-25 capture.
+        assert_eq!(hdr(true).to_vec(), padded("010101"));
+        assert_eq!(hdr(false).to_vec(), padded("010100"));
+        let mut block = status(0, 1);
+        for (value, on) in [(0, Some(false)), (1, Some(true)), (2, None), (0xff, None)] {
+            block[6] = value;
+            assert_eq!(read_hdr(&block), on, "offset 6 = {value}");
+        }
+        block[6] = 1;
+        assert_eq!(read_hdr(&block[..6]), None);
+        for (value, fps) in [(0x1e, Some(30)), (0x3c, Some(60)), (0, None), (0xff, None)] {
+            block[31] = value;
+            assert_eq!(read_frame_rate(&block), fps, "offset 31 = {value}");
+        }
+        assert_eq!(read_frame_rate(&block[..31]), None);
 
         assert_gimbal_write(&hand(Hand::Left), [0x44, 0x20], "0400000001");
         assert_gimbal_write(&hand(Hand::Right), [0x44, 0x20], "0400000000");

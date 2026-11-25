@@ -56,8 +56,10 @@ bytes. `u32`, `i16` and `f32` are little-endian.
 | --- | --- | --- |
 | 0-1 | block marker | `2e 00` |
 | 2 | asleep | 0 awake, 1 asleep |
+| 6 | HDR | 0 off, 1 on |
 | 24 | AI mode | 0 off, 2 human, 3 hand, 7 voice, 6 switching (under 2 s) |
 | 28 | object framing, while AI mode is 2 | `14` Normal, `17` Close-up |
+| 31 | frame rate | fps the camera streams at: 30 (`1e`), 60 (`3c`) |
 | 42 | Auto Zoom | as in [Auto Zoom](#auto-zoom) |
 | 46 | voice bits | bit 1 Forward range, bit 0 Sound Source |
 
@@ -160,6 +162,17 @@ Note: [tracking speed](clean-room/2026-11-21-tracking-speed.md).
 | Read | status block offset 46, bit 0 | |
 
 Note: [sound source tracking](clean-room/2026-11-24-sound-source-tracking.md).
+
+## HDR
+
+| Action | Message | Data |
+| --- | --- | --- |
+| On / off | `sel 6: 01 01 v` | v: 1 on, 0 off |
+| Read | status block offset 6 | |
+
+The official app enables the switch only while offset 31 is 30 or less.
+
+Note: [HDR](clean-room/2026-11-25-hdr.md).
 
 ## Zone Tracking
 

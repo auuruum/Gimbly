@@ -874,7 +874,8 @@ impl GimblyApp {
                         self.gimbal_ui.zone_open = false;
                         self.console(ui)
                     }
-                    Tab::Image | Tab::More => {
+                    Tab::Image => self.image(ui),
+                    Tab::More => {
                         ui.add_space(40.0);
                         ui.vertical_centered(|ui| {
                             ui.label(egui::RichText::new(NOT_YET).color(TEXT_DIM));
@@ -1040,6 +1041,50 @@ impl GimblyApp {
                 self.start_recording(ctx);
             }
         }
+    }
+
+    /// The Image tab: HDR. Focus, exposure and white balance are not there yet.
+    fn image(&mut self, ui: &mut Ui) {
+        let margin = egui::Margin {
+            left: PADDING as i8,
+            right: PADDING as i8,
+            top: 14,
+            bottom: 14,
+        };
+        let hdr = self.status.hdr;
+        // Like the official app: HDR only while the camera runs at 30 fps or less.
+        let slow = self.status.frame_rate.is_some_and(|fps| fps <= 30);
+        let ready = self.ready(Feature::Hdr) && hdr.is_some() && slow;
+        let tip = if self.ready(Feature::Hdr) && !slow {
+            "HDR needs a 30 fps resolution, such as 4K 30 or 1080P 30".to_owned()
+        } else {
+            self.gimbal_tip(Feature::Hdr)
+        };
+        let mut clicked = false;
+        band(ui, CARD, margin, |ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+            ui.add_enabled_ui(ready, |ui| {
+                let (switch, _) = switch_row(
+                    ui,
+                    "HDR",
+                    "Keeps detail in bright and dark parts of the picture, such as a window behind you",
+                    None,
+                    hdr.unwrap_or(false),
+                );
+                clicked = switch.on_disabled_hover_text(&tip).clicked();
+            });
+        });
+        if clicked && let Some(on) = hdr {
+            self.gimbal(GimbalCommand::SetHdr(!on));
+        }
+        divider(ui);
+        ui.add_space(40.0);
+        ui.vertical_centered(|ui| {
+            ui.label(
+                egui::RichText::new(format!("Focus, exposure and white balance: {NOT_YET}"))
+                    .color(TEXT_DIM),
+            );
+        });
     }
 
     fn console(&mut self, ui: &mut Ui) {

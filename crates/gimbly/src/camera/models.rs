@@ -37,6 +37,7 @@ pub const MODELS: &[Model] = &[Model {
         Feature::VoiceTracking,
         Feature::HandTracking,
         Feature::ZoneTracking,
+        Feature::Hdr,
     ],
     standby_picture: true,
 }];
@@ -82,10 +83,12 @@ pub enum Feature {
     HandTracking,
     /// Zone Tracking: its switch, range, auto-tracking and Non-tracking Areas.
     ZoneTracking,
+    /// The HDR switch on the Image tab.
+    Hdr,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 14] = [
+    pub const ALL: [Feature; 15] = [
         Self::Gimbal,
         Self::Zoom,
         Self::FieldOfView,
@@ -100,6 +103,7 @@ impl Feature {
         Self::VoiceTracking,
         Self::HandTracking,
         Self::ZoneTracking,
+        Self::Hdr,
     ];
 
     /// The name the UI and `docs/devices.md` use.
@@ -119,6 +123,7 @@ impl Feature {
             Self::VoiceTracking => "Voice Tracking",
             Self::HandTracking => "Hand Tracking",
             Self::ZoneTracking => "Zone Tracking",
+            Self::Hdr => "HDR",
         }
     }
 }
@@ -150,6 +155,7 @@ impl GimbalCommand {
             SetAutoZoom(_) => &[Feature::AutoZoom],
             SetTrackingSpeed(_) => &[Feature::TrackingSpeed],
             SetSoundSource(_) => &[Feature::SoundSource],
+            SetHdr(_) => &[Feature::Hdr],
             SelectPoint { .. } | SelectObject(_) | CancelTarget | SetObjectFraming(_) => {
                 &[Feature::ObjectTracking]
             }

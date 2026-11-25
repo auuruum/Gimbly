@@ -46,6 +46,8 @@ impl<T: Transport> Channel<T> {
         status.auto_zoom = view.and_then(|view| view.auto_zoom);
         status.voice_range = view.and_then(|view| view.voice_range);
         status.sound_source = view.and_then(|view| view.sound_source);
+        status.hdr = view.and_then(|view| view.hdr);
+        status.frame_rate = view.and_then(|view| view.frame_rate);
         status.object_framing = view.and_then(|view| view.object_framing);
         status.tracking_speed = tracking_speed;
         status.hand = hand;
@@ -133,6 +135,8 @@ impl<T: Transport> Channel<T> {
             auto_zoom: vendor::read_auto_zoom(block),
             voice_range: vendor::read_voice_range(block),
             sound_source: vendor::read_sound_source(block),
+            hdr: vendor::read_hdr(block),
+            frame_rate: vendor::read_frame_rate(block),
             object_framing: vendor::read_object_framing(block),
         })
     }
@@ -633,6 +637,10 @@ impl<T: Transport> Channel<T> {
                 self.set(vendor::SELECTOR_VIEW, &mut vendor::sound_source(on))?;
                 shared.status().sound_source = Some(on);
             }
+            GimbalCommand::SetHdr(on) => {
+                self.set(vendor::SELECTOR_VIEW, &mut vendor::hdr(on))?;
+                shared.status().hdr = Some(on);
+            }
             GimbalCommand::SetHand(hand) => {
                 self.send(vendor::hand(hand))?;
                 shared.status().hand = Some(hand);
@@ -877,6 +885,7 @@ fn commands_loop(
                             | GimbalCommand::SetAiMode(_)
                             | GimbalCommand::SetVoiceRange(_)
                             | GimbalCommand::SetSoundSource(_)
+                            | GimbalCommand::SetHdr(_)
                             | GimbalCommand::SelectPoint { .. }
                             | GimbalCommand::SelectObject(_)
                             | GimbalCommand::CancelTarget
@@ -908,6 +917,8 @@ fn commands_loop(
                     status.auto_zoom,
                     status.voice_range,
                     status.sound_source,
+                    status.hdr,
+                    status.frame_rate,
                     status.object_framing,
                 );
                 // Unknown values (such as the switching value 6) keep the old state.
@@ -915,6 +926,8 @@ fn commands_loop(
                 status.auto_zoom = view.auto_zoom.or(status.auto_zoom);
                 status.voice_range = view.voice_range.or(status.voice_range);
                 status.sound_source = view.sound_source.or(status.sound_source);
+                status.hdr = view.hdr.or(status.hdr);
+                status.frame_rate = view.frame_rate.or(status.frame_rate);
                 // Another app may turn tracking on later in a mode we cannot read.
                 if view.ai_mode.is_some_and(|mode| mode != AiMode::Human) {
                     status.tracking_mode = None;
@@ -931,6 +944,8 @@ fn commands_loop(
                         status.auto_zoom,
                         status.voice_range,
                         status.sound_source,
+                        status.hdr,
+                        status.frame_rate,
                         status.object_framing,
                     );
                 drop(status);
@@ -1031,6 +1046,8 @@ pub(super) struct View {
     pub auto_zoom: Option<AutoZoom>,
     pub voice_range: Option<VoiceRange>,
     pub sound_source: Option<bool>,
+    pub hdr: Option<bool>,
+    pub frame_rate: Option<u8>,
     pub object_framing: Option<ObjectFraming>,
 }
 
@@ -1153,6 +1170,11 @@ pub(super) fn report(xu: &mut Channel<impl Transport>) -> Vec<String> {
             Feature::AutoZoom => format!("{:?}", view.map(|v| v.auto_zoom)),
             Feature::TrackingSpeed => format!("{:?}", xu.read_tracking_speed()),
             Feature::SoundSource => format!("{:?}", view.map(|v| v.sound_source)),
+            Feature::Hdr => format!(
+                "{:?} at {:?} fps",
+                view.map(|v| v.hdr),
+                view.map(|v| v.frame_rate)
+            ),
             Feature::ObjectTracking => format!(
                 "{:?} (None unless an object is tracked)",
                 view.map(|v| v.object_framing)

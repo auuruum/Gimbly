@@ -338,33 +338,44 @@ impl SettingsWindow {
         rule(ui);
         ui.add_space(14.0);
         dim(ui, "Record");
-        disabled(ui, "Recording is not implemented in Gimbly yet", |ui| {
-            row(
-                ui,
-                46.0,
-                |ui| {
-                    label(ui, "Recording Bitrate");
-                    help(ui, "Higher bitrates need a faster computer.");
-                },
-                |ui| {
-                    dropdown(ui, "bitrate", settings.bitrate.label(), &[], FIELD_WIDTH);
-                },
-            );
-            row(
-                ui,
-                44.0,
-                |ui| label(ui, "Recording Format"),
-                |ui| {
-                    dropdown(
-                        ui,
-                        "record-format",
-                        settings.record_format.label(),
-                        &[],
-                        FIELD_WIDTH,
-                    );
-                },
-            );
-        });
+        disabled(
+            ui,
+            "High-fps Recording stores the camera's frames as they are; the bitrate \
+             applies to normal recording, which Gimbly does not have yet",
+            |ui| {
+                row(
+                    ui,
+                    46.0,
+                    |ui| {
+                        label(ui, "Recording Bitrate");
+                        help(ui, "Higher bitrates need a faster computer.");
+                    },
+                    |ui| {
+                        dropdown(ui, "bitrate", settings.bitrate.label(), &[], FIELD_WIDTH);
+                    },
+                );
+            },
+        );
+        row(
+            ui,
+            44.0,
+            |ui| label(ui, "Recording Format"),
+            |ui| {
+                let labels: Vec<&str> = RecordFormat::ALL.iter().map(|f| f.label()).collect();
+                if let Some(&format) = dropdown(
+                    ui,
+                    "record-format",
+                    settings.record_format.label(),
+                    &labels,
+                    FIELD_WIDTH,
+                )
+                .and_then(|i| RecordFormat::ALL.get(i))
+                {
+                    settings.record_format = format;
+                    changes.push(Change::Saved);
+                }
+            },
+        );
         rule(ui);
         ui.add_space(12.0);
         label(ui, "Media File Location");

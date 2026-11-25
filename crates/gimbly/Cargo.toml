@@ -25,6 +25,10 @@ egui-phosphor = "0.14.0"
 gimbly-vcam-shm.workspace = true
 # Snapshots. Already in the tree through eframe, so it adds no new crates.
 png = "0.18.1"
+# MJPEG decoding for the preview while High-fps Recording keeps the camera's
+# JPEG frames (and for Linux MJPEG capture).
+zune-core = "0.5.3"
+zune-jpeg = "0.5.15"
 
 [build-dependencies]
 object = { version = "0.40.0", default-features = false, features = ["write_core", "coff"] }
@@ -34,12 +38,16 @@ resvg = { version = "0.48.1", default-features = false }
 windows-core.workspace = true
 windows = { workspace = true, features = [
     "Win32_Devices_Communication",
+    "Win32_Devices_FunctionDiscovery",
     "Win32_Foundation",
+    "Win32_Media_Audio",
     "Win32_Media_DirectShow",
     "Win32_Media_KernelStreaming",
     "Win32_Media_MediaFoundation",
     "Win32_Storage_FileSystem",
+    "Win32_Security",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_Console",
     "Win32_System_IO",
     "Win32_System_LibraryLoader",
@@ -49,6 +57,7 @@ windows = { workspace = true, features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
+    "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
 
@@ -62,8 +71,6 @@ libc = "0.2"
 linuxvideo = "0.3.5"
 raw-window-handle = "0.6"
 nix = { version = "0.31", features = ["ioctl"] }
-zune-core = "0.5.3"
-zune-jpeg = "0.5.15"
 ashpd = { version = "0.14", default-features = false, features = ["global_shortcuts", "tokio"] }
 tokio = { version = "1", features = ["macros", "rt", "sync"] }
 futures-util = "0.3"
@@ -77,7 +84,7 @@ objc2 = "0.6"
 objc2-av-foundation = { version = "0.3.2", default-features = false, features = [
     "std", "block2", "dispatch2", "objc2-core-media", "AVMediaFormat",
     "AVCaptureDevice", "AVCaptureInput", "AVCaptureOutputBase", "AVCaptureSession",
-    "AVCaptureVideoDataOutput",
+    "AVCaptureVideoDataOutput", "AVCaptureAudioDataOutput",
 ] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "std", "NSArray", "NSBundle", "NSDictionary", "NSError", "NSSet", "NSString", "NSValue", "NSUUID", "NSRunLoop",

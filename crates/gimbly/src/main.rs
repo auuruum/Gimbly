@@ -4,6 +4,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod audio;
 mod branding;
 mod camera;
 mod gimbal;
@@ -14,6 +15,7 @@ mod preview_tracking;
 mod preview_view;
 mod preview_window;
 mod probe;
+mod record;
 #[cfg(target_os = "linux")]
 mod serial_access;
 mod settings;

@@ -5,16 +5,16 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
-/// File name for a snapshot taken at `time` (year, month, day, hour,
-/// minute, second), e.g. `Gimbly_20261022_153012.png`.
-pub fn file_name(time: [u16; 6], attempt: u32) -> String {
+/// File name for a snapshot or recording made at `time` (year, month, day,
+/// hour, minute, second), e.g. `Gimbly_20261022_153012.png`.
+pub fn file_name(time: [u16; 6], attempt: u32, extension: &str) -> String {
     let [y, mo, d, h, mi, s] = time;
     let suffix = if attempt == 0 {
         String::new()
     } else {
         format!("_{attempt}")
     };
-    format!("Gimbly_{y:04}{mo:02}{d:02}_{h:02}{mi:02}{s:02}{suffix}.png")
+    format!("Gimbly_{y:04}{mo:02}{d:02}_{h:02}{mi:02}{s:02}{suffix}.{extension}")
 }
 
 /// Writes `frame` into `dir` (created if missing) without overwriting an
@@ -23,7 +23,7 @@ pub fn save(frame: &PreviewFrame, dir: &Path, time: [u16; 6]) -> Result<PathBuf,
     std::fs::create_dir_all(dir).map_err(|e| format!("Could not create {}: {e}", dir.display()))?;
     let (path, file) = (0..100)
         .find_map(|attempt| {
-            let path = dir.join(file_name(time, attempt));
+            let path = dir.join(file_name(time, attempt, "png"));
             File::create_new(&path).ok().map(|f| (path, f))
         })
         .ok_or_else(|| format!("Could not create a snapshot file in {}", dir.display()))?;
@@ -60,8 +60,8 @@ mod tests {
     #[test]
     fn names_sort_by_time_and_avoid_clashes() {
         let t = [2026, 10, 22, 9, 5, 7];
-        assert_eq!(file_name(t, 0), "Gimbly_20261022_090507.png");
-        assert_eq!(file_name(t, 2), "Gimbly_20261022_090507_2.png");
+        assert_eq!(file_name(t, 0, "png"), "Gimbly_20261022_090507.png");
+        assert_eq!(file_name(t, 2, "mkv"), "Gimbly_20261022_090507_2.mkv");
     }
 
     #[test]

@@ -2,13 +2,15 @@
 //!
 //! Capture uses an `IMFSourceReader` with advanced video processing enabled,
 //! so Media Foundation decodes the camera's MJPEG stream and hands us NV12.
+//! High-fps Recording sessions take the MJPEG frames themselves instead and
+//! decode the preview with `super::mjpeg`.
 //! Standard zoom uses `IAMCameraControl`. The Tiny 3 Lite uses vendor
 //! controls through the camera's UVC extension unit.
 
 use super::control::{AbsoluteZoom, Channel, Transport, control_loop, zoom_loop};
 use super::preview::YuvRange;
 use super::{CaptureConfig, DeviceInfo, Shared, VideoMode, Worker, ZoomRange, parse_usb_ids};
-use super::{frames::Frames, queue, vendor};
+use super::{frames::Frames, mjpeg, queue, vendor};
 use gimbly_vcam_shm::Nv12View;
 use std::time::Instant;
 use windows::Win32::Media::DirectShow::{
@@ -607,6 +609,30 @@ impl Transport for Xu {
     }
 }
 
+/// Locks a compressed sample's bytes for the duration of `f`.
+fn with_bytes<R>(sample: &IMFSample, f: impl FnOnce(&[u8]) -> R) -> Result<R, String> {
+    // SAFETY: the buffer stays locked while `data` is borrowed and is
+    // unlocked before returning.
+    unsafe {
+        let buffer = sample
+            .ConvertToContiguousBuffer()
+            .map_err(|e| e.to_string())?;
+        let mut data = std::ptr::null_mut();
+        let mut len = 0u32;
+        buffer
+            .Lock(&mut data, None, Some(&mut len))
+            .map_err(|e| e.to_string())?;
+        let bytes = if data.is_null() {
+            &[][..]
+        } else {
+            std::slice::from_raw_parts(data, len as usize)
+        };
+        let result = f(bytes);
+        let _ = buffer.Unlock();
+        Ok(result)
+    }
+}
+
 /// Locks a sample's buffer and exposes it as NV12 for the duration of `f`.
 fn with_nv12<R>(
     sample: &IMFSample,
@@ -741,8 +767,20 @@ fn capture_loop<'scope, 'env>(
             mode.codec
         )
     })?;
-    set_nv12_output(&reader, width, height)?;
-    let mut geometry = output_geometry(&reader)?;
+    // Recording keeps the camera's JPEG frames, so Media Foundation must
+    // not decode them.
+    let compressed = config.compressed && mode.codec == "MJPG";
+    let mut geometry = if compressed {
+        OutputGeometry {
+            width: width as usize,
+            height: height as usize,
+            alloc_height: height as usize,
+            range: YuvRange::Full601,
+        }
+    } else {
+        set_nv12_output(&reader, width, height)?;
+        output_geometry(&reader)?
+    };
 
     let zoom = if xu.is_none() {
         Zoom::open(source)
@@ -785,6 +823,10 @@ fn capture_loop<'scope, 'env>(
     };
 
     let mut frames = Frames::new(worker, config, model.is_some_and(|m| m.standby_picture));
+    if compressed {
+        frames.set_compressed(width, height, fps);
+    }
+    let (mut decoded, mut packed) = (Vec::new(), Vec::new());
     while !worker.should_stop() {
         frames.commands(|command| super::forward_control(worker, control.as_ref(), command));
         let epoch = worker.shared.status().video_epoch;
@@ -799,7 +841,7 @@ fn capture_loop<'scope, 'env>(
         if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
             return Err("The camera stream ended".into());
         }
-        if flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0 as u32 != 0 {
+        if flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0 as u32 != 0 && !compressed {
             geometry = output_geometry(&reader)?;
         }
         let Some(sample) = sample else {
@@ -807,9 +849,26 @@ fn capture_loop<'scope, 'env>(
             continue;
         };
 
-        with_nv12(&sample, geometry, |view| {
-            frames.publish(epoch, view, geometry.range)
-        })?;
+        if compressed {
+            with_bytes(&sample, |jpeg| {
+                frames.packet(jpeg);
+                if frames.picture_due()
+                    && let Some(view) = mjpeg::decode(
+                        jpeg,
+                        geometry.width,
+                        geometry.height,
+                        &mut decoded,
+                        &mut packed,
+                    )
+                {
+                    frames.publish(epoch, &view, geometry.range);
+                }
+            })?;
+        } else {
+            with_nv12(&sample, geometry, |view| {
+                frames.publish(epoch, view, geometry.range)
+            })?;
+        }
         frames.received();
     }
     Ok(())

@@ -7,6 +7,9 @@
 //! `--mode WxH@FPS` (e.g. `3840x2160@30`) captures that mode instead of
 //! stepping the zoom; `--portrait` adds the 9:16 crop. Use
 //! `--virtual-camera` before `--gimbal` to exercise virtual output too.
+//! `--record DIR` (with a 120 fps `--mode`) records the capture like
+//! High-fps Recording; add `--slow` for Slow Motion and `--container
+//! mkv|mp4|mov`.
 
 use crate::camera::{
     self, AiMode, AutoZoom, CaptureConfig, Command, Fov, GimbalCommand, Hand, SessionState,
@@ -212,8 +215,23 @@ pub fn run() -> i32 {
         Some(Ok(m)) => Some(m),
         None => None,
     };
+    let value = |name: &str| {
+        let i = args.iter().position(|a| a == name)?;
+        args.get(i + 1).cloned()
+    };
+    let record = value("--record").map(|dir| crate::record::Spec {
+        dir: dir.into(),
+        time: crate::os::local_time(),
+        container: match value("--container").as_deref() {
+            Some("mp4") => crate::record::Container::Mp4,
+            Some("mov") => crate::record::Container::Mov,
+            _ => crate::record::Container::Mkv,
+        },
+        slow_motion: args.iter().any(|a| a == "--slow"),
+    });
     let mut config = CaptureConfig {
         portrait: args.iter().any(|a| a == "--portrait"),
+        compressed: record.is_some(),
         ..CaptureConfig::default()
     };
     if let Some((width, height, fps)) = mode {
@@ -293,6 +311,9 @@ pub fn run() -> i32 {
         return 1;
     }
     let session = camera::Session::start(device, config, virtual_camera, || {});
+    if let Some(spec) = record {
+        session.send(Command::Record(spec));
+    }
     if let Some(i) = args.iter().position(|a| a == "--gimbal") {
         return gimbal(
             &session,
@@ -361,6 +382,14 @@ pub fn run() -> i32 {
         "format: {:?}, output: {:?}, preview frames taken: {frames}, measured capture fps: {:.1}",
         status.format, status.output, status.measured_fps
     );
+    if config.compressed {
+        println!(
+            "recording: {:?}, error: {:?}",
+            status.recording, status.error
+        );
+        session.close(Duration::from_secs(5));
+        return i32::from(status.recording.is_none());
+    }
     if frames == 0 || (virtual_camera && !status.virtual_camera) {
         eprintln!(
             "no usable output: {:?}",

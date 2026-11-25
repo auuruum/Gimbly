@@ -13,8 +13,6 @@ use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use zune_core::{bytestream::ZCursor, colorspace::ColorSpace, options::DecoderOptions};
-use zune_jpeg::JpegDecoder;
 
 const NV12: PixelFormat = PixelFormat::from_fourcc(*b"NV12");
 const MJPG: PixelFormat = PixelFormat::from_fourcc(*b"MJPG");
@@ -443,6 +441,9 @@ pub fn run_capture(
         });
         // The closure owns tx, so it disconnects before the scope joins.
         let mut frames = Frames::new(worker, config, model.is_some_and(|m| m.standby_picture));
+        if config.compressed && pixel == MJPG {
+            frames.set_compressed(w, h, fps);
+        }
         let mut decoded = Vec::new();
         let mut packed = Vec::new();
         let mut last = Instant::now();
@@ -463,9 +464,12 @@ pub fn run_capture(
                 if buffer.is_error() {
                     return Ok(false);
                 }
-                if frames.needed() {
+                if pixel == MJPG {
+                    frames.packet(&buffer);
+                }
+                if frames.picture_due() {
                     let view = match pixel {
-                        MJPG => decode_jpeg(&buffer, w, h, &mut decoded, &mut packed)
+                        MJPG => super::mjpeg::decode(&buffer, w, h, &mut decoded, &mut packed)
                             .map(|view| (view, YuvRange::Full601)),
                         PixelFormat::YUYV => unpack_yuyv(&buffer, stride, w, h, &mut packed)
                             .map(|view| (view, YuvRange::Limited601)),
@@ -501,56 +505,6 @@ pub fn run_capture(
         drop(tx);
         Ok(())
     })
-}
-
-fn decode_jpeg<'a>(
-    data: &[u8],
-    w: usize,
-    h: usize,
-    decoded: &mut Vec<u8>,
-    packed: &'a mut Vec<u8>,
-) -> Option<Nv12View<'a>> {
-    let options = DecoderOptions::default()
-        .set_max_width(w)
-        .set_max_height(h)
-        .jpeg_set_out_colorspace(ColorSpace::YCbCr);
-    let mut decoder = JpegDecoder::new_with_options(ZCursor::new(data), options);
-    decoder.decode_headers().ok()?;
-    let info = decoder.info()?;
-    if (usize::from(info.width), usize::from(info.height)) != (w, h) {
-        return None;
-    }
-    let size = w * h;
-    if decoder.output_buffer_size()? != size * 3 {
-        return None;
-    }
-    decoded.resize(size * 3, 0);
-    decoder.decode_into(decoded).ok()?;
-    packed.resize(size * 3 / 2, 0);
-    let (y, uv) = packed.split_at_mut(size);
-    for (dst, pixel) in y.iter_mut().zip(decoded.as_chunks::<3>().0) {
-        *dst = pixel[0];
-    }
-    for (rows, dst) in decoded.chunks_exact(w * 6).zip(uv.chunks_exact_mut(w)) {
-        let (top, bottom) = rows.split_at(w * 3);
-        for ((a, b), uv) in top
-            .as_chunks::<6>()
-            .0
-            .iter()
-            .zip(bottom.as_chunks::<6>().0)
-            .zip(dst.as_chunks_mut::<2>().0)
-        {
-            for (out, c) in uv.iter_mut().zip(1..=2) {
-                *out = ((u16::from(a[c])
-                    + u16::from(a[c + 3])
-                    + u16::from(b[c])
-                    + u16::from(b[c + 3])
-                    + 2)
-                    / 4) as u8;
-            }
-        }
-    }
-    Nv12View::packed(packed, w, h)
 }
 
 fn unpack_yuyv<'a>(
@@ -606,6 +560,5 @@ mod tests {
         assert_eq!(view.y, &[20, 30, 40, 50]);
         assert_eq!(view.uv, &[110, 140]);
         assert!(unpack_yuyv(&data[..11], 6, 2, 2, &mut packed).is_none());
-        assert!(decode_jpeg(&[0xff, 0xd8], 2, 2, &mut Vec::new(), &mut packed).is_none());
     }
 }

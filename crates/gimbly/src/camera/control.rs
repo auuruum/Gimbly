@@ -744,9 +744,13 @@ impl<T: Transport> Channel<T> {
             }
             _ => {
                 self.send(vendor::for_gimbal(&command).ok_or("Unsupported gimbal command")?)?;
+                // The plain Reset zoomed out to 1.0x too (2026-11-25), so
+                // every reset reads the zoom back.
                 if matches!(
                     command,
-                    GimbalCommand::TriggerPreset(_) | GimbalCommand::ResetWithZoom
+                    GimbalCommand::TriggerPreset(_)
+                        | GimbalCommand::Reset
+                        | GimbalCommand::ResetWithZoom
                 ) {
                     // The official app showed Wide after the 1.0x reset.
                     shared.status().fov =

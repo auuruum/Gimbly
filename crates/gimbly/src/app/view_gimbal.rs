@@ -815,9 +815,7 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
             .inner
         });
         if clicked.clicked() {
-            if with_zoom {
-                self.zoom_target_clear();
-            }
+            self.zoom_target_clear();
             self.gimbal(reset);
         }
     }

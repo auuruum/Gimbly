@@ -15,5 +15,9 @@ fn main() -> ExitCode {
     let extra: Vec<String> = std::env::args().skip(1).collect();
     let ok = cargo(&["build", "--workspace", "--release"], &[])
         && cargo(&["run", "--release", "-p", "gimbly", "--"], &extra);
-    if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }

@@ -21,9 +21,17 @@ The firmware release and OBSBOT Center version were not recorded.
   back towards its earlier framing. The default Alt+R did not trigger
   a move in this session. The reason was not established.
 
+- 2026-11-25, owner's observation in Gimbly on the same camera
+  (firmware not recorded): at 2.01x, the Console Reset (`04 39`, no
+  payload) zoomed the preview out to about 1.0x, but the zoom slider
+  stayed at 2.01x because Gimbly did not read the zoom back after it.
+  This differs from the 2026-11-08 preset test above.
+
 ## Inferred
 
 The result suggests `84 38` is unnecessary for Reset on this unit.
+Since the plain Reset may change the zoom, Gimbly reads the zoom back
+after it, as after `04 39` with data `01`.
 
 ## Unknown
 

@@ -4,13 +4,14 @@ mod view_gimbal;
 
 use crate::branding::Branding;
 use crate::camera::{
-    self, AiMode, AutoZoom, Command, DeviceInfo, Feature, GimbalCommand, ObjectFraming,
-    PreviewFrame, Session, SessionState, SessionStatus, TrackingMode, TrackingSpeed,
+    self, AiMode, AutoZoom, CaptureConfig, Command, DeviceInfo, Feature, GimbalCommand,
+    ObjectFraming, PreviewFrame, Session, SessionState, SessionStatus, TrackingMode, TrackingSpeed,
 };
 use crate::hotkeys::GlobalHotkeys;
 use crate::os;
 use crate::preview_window::{PreviewAction, PreviewInput, PreviewWindow};
-use crate::settings::{CloseAction, HotkeyAction, Settings};
+use crate::record;
+use crate::settings::{CloseAction, HighFps, HotkeyAction, Settings};
 use crate::settings_ui::{self, Change, SettingsWindow};
 use crate::snapshot;
 use crate::theme::{self, *};
@@ -26,6 +27,13 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 const NOT_YET: &str = "Not implemented in Gimbly yet";
+const HIGH_FPS_NOTES: &str = "High-fps Recording\n\n\
+    1. The file holds the camera's own frames: rotation, mirror and the portrait crop are not applied.\n\
+    2. The recording has no sound yet.\n\
+    3. The camera switches to the chosen resolution and frame rate when the recording starts, \
+    and back when it stops.";
+const LOW_RES_NOTE: &str = "720P 120 has a lower resolution, so the preview looks softer while \
+    recording. The preview resolution comes back when the recording stops.";
 const TOAST_FOR: Duration = Duration::from_secs(6);
 
 /// Where a snapshot was saved, or why it failed.
@@ -70,6 +78,12 @@ pub struct GimblyApp {
     /// it reachable.
     sleep_button: Rect,
     toast: Option<(String, Instant)>,
+    /// The session was opened for High-fps Recording.
+    recording: bool,
+    /// The High-fps Recording notes are open.
+    high_fps_tips: bool,
+    /// Asking before a 720P recording.
+    confirm_low_res: bool,
     settings: Settings,
     settings_window: SettingsWindow,
     hotkeys: Option<GlobalHotkeys>,
@@ -113,6 +127,9 @@ impl GimblyApp {
             serial_access: Default::default(),
             sleep_button: Rect::NOTHING,
             toast: None,
+            recording: false,
+            high_fps_tips: false,
+            confirm_low_res: false,
             settings,
             settings_window,
             hotkeys: None,
@@ -259,6 +276,44 @@ impl GimblyApp {
         }
     }
 
+    /// Reopens the camera in the High-fps mode and starts recording into
+    /// the media folder (see `docs/clean-room/2026-11-25-high-fps-recording.md`).
+    fn start_recording(&mut self, ctx: &egui::Context) {
+        let high_fps = self.settings.high_fps;
+        let (width, height, fps) = high_fps.mode();
+        if self.session.is_none() || self.status.state != SessionState::Streaming {
+            self.notify("High-fps Recording needs a streaming camera");
+            return;
+        }
+        let supported = self
+            .status
+            .modes
+            .iter()
+            .any(|m| m.codec == "MJPG" && m.covers(width, height, fps));
+        if !supported {
+            self.notify(format!("This camera cannot record {}", high_fps.label()));
+            return;
+        }
+        let config = CaptureConfig {
+            width,
+            height,
+            fps,
+            compressed: true,
+            ..self.settings.capture_config()
+        };
+        let spec = record::Spec {
+            dir: PathBuf::from(&self.settings.media_dir),
+            time: os::local_time(),
+            container: self.settings.record_format.container(),
+            slow_motion: self.settings.slow_motion,
+        };
+        self.open_camera(self.selected, config, ctx);
+        if let Some(session) = &self.session {
+            session.send(Command::Record(spec));
+            self.recording = true;
+        }
+    }
+
     fn settings_window(&mut self, ctx: &egui::Context) {
         let view = settings_ui::View {
             devices: &self.devices,
@@ -307,10 +362,21 @@ impl GimblyApp {
     }
 
     fn select(&mut self, index: Option<usize>, ctx: &egui::Context) {
-        // Dropping the old session releases the camera before reopening.
-        self.session = None;
-        self.status = SessionStatus::default();
         self.virtual_camera_announced = false;
+        self.open_camera(index, self.settings.capture_config(), ctx);
+    }
+
+    /// Back to the preview mode; the old session finishes the file.
+    fn stop_recording(&mut self, ctx: &egui::Context) {
+        self.open_camera(self.selected, self.settings.capture_config(), ctx);
+    }
+
+    fn open_camera(&mut self, index: Option<usize>, config: CaptureConfig, ctx: &egui::Context) {
+        // Dropping the old session releases the camera (and finishes a
+        // recording) before reopening.
+        self.session = None;
+        self.recording = false;
+        self.status = SessionStatus::default();
         self.preview = None;
         self.zoom_target = None;
         self.gimbal_ui.reset_camera();
@@ -320,7 +386,7 @@ impl GimblyApp {
             let ctx = ctx.clone();
             self.session = Some(Session::start(
                 self.devices[i].clone(),
-                self.settings.capture_config(),
+                config,
                 self.virtual_camera,
                 move || ctx.request_repaint(),
             ));
@@ -371,6 +437,10 @@ impl GimblyApp {
         {
             // Non-fatal errors (zoom, virtual camera) are shown once.
             self.notify(error);
+            // The recording could not start or stopped writing.
+            if self.recording && self.status.recording.is_none() {
+                self.stop_recording(ctx);
+            }
         }
         if let Some(error) = self.status.virtual_camera_error.take() {
             self.virtual_camera = false;
@@ -814,6 +884,164 @@ impl GimblyApp {
             });
     }
 
+    /// The High-fps Recording block at the top of the console.
+    fn high_fps(&mut self, ui: &mut Ui) {
+        let recording = self.recording;
+        ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+        ui.horizontal(|ui| {
+            ui.set_height(32.0);
+            ui.label(egui::RichText::new("High-fps Recording").size(15.0));
+            if help_button(ui).clicked() {
+                self.high_fps_tips = true;
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let labels: Vec<&str> = HighFps::ALL.iter().map(|m| m.label()).collect();
+                let current = self.settings.high_fps.label();
+                let chosen = ui
+                    .add_enabled_ui(!recording, |ui| {
+                        dropdown(ui, current, &labels, vec2(131.0, 30.0))
+                    })
+                    .inner;
+                if let Some(&mode) = chosen.and_then(|i| HighFps::ALL.get(i)) {
+                    self.settings.high_fps = mode;
+                    self.save_settings();
+                }
+            });
+        });
+        ui.add_space(16.0);
+        let selected = (!recording).then_some(usize::from(!self.settings.slow_motion));
+        let chosen = ui
+            .add_enabled_ui(!recording, |ui| {
+                pill_row(ui, &["Slow Motion", "Normal"], selected, 16.0)
+            })
+            .inner;
+        if let Some(i) = chosen {
+            self.settings.slow_motion = i == 0;
+            self.save_settings();
+        }
+        ui.add_space(18.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 16.0;
+            if self.record_bar(ui, vec2(ui.available_width() - 84.0, 46.0)) {
+                if recording {
+                    self.stop_recording(ui.ctx());
+                } else if self.settings.high_fps == HighFps::Hd120 {
+                    self.confirm_low_res = true;
+                } else {
+                    self.start_recording(ui.ctx());
+                }
+            }
+            let (folder, response) = ui.allocate_exact_size(vec2(68.0, 46.0), Sense::click());
+            let fill = if response.hovered() {
+                BUTTON_HOVER
+            } else {
+                BUTTON
+            };
+            ui.painter()
+                .rect_filled(folder, CornerRadius::same(6), fill);
+            ui.painter().text(
+                folder.center(),
+                Align2::CENTER_CENTER,
+                icon::FOLDER_SIMPLE,
+                font(22.0),
+                TEXT,
+            );
+            if response
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+            {
+                self.open_media_folder();
+            }
+        });
+    }
+
+    /// The REC / stop bar with the timer and, while recording, the pause
+    /// button. Returns true when the bar itself was clicked.
+    fn record_bar(&mut self, ui: &mut Ui, size: Vec2) -> bool {
+        let (bar, response) = ui.allocate_exact_size(size, Sense::click());
+        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        let fill = if response.hovered() {
+            BUTTON_HOVER
+        } else {
+            BUTTON
+        };
+        let painter = ui.painter().clone();
+        painter.rect_filled(bar, CornerRadius::same(6), fill);
+        let state = self.status.recording.clone().filter(|_| self.recording);
+        let elapsed = state.as_ref().map_or(0, |s| s.elapsed.as_secs());
+        let timer = format!(
+            "{:02}:{:02}:{:02}",
+            elapsed / 3600,
+            elapsed / 60 % 60,
+            elapsed % 60
+        );
+        let dot = pos2(bar.left() + 64.0, bar.center().y);
+        if !self.recording {
+            painter.circle(dot, 13.0, ACCENT, Stroke::new(2.0, Color32::WHITE));
+            painter.text(dot, Align2::CENTER_CENTER, "REC", font(9.0), ON_ACCENT);
+            painter.circle_filled(pos2(dot.x + 22.0, dot.y), 2.0, TEXT);
+            painter.text(
+                pos2(dot.x + 30.0, dot.y),
+                Align2::LEFT_CENTER,
+                timer,
+                font(14.0),
+                TEXT,
+            );
+            return response.clicked();
+        }
+        painter.circle_stroke(dot, 13.0, Stroke::new(1.5, TEXT));
+        painter.rect_filled(
+            Rect::from_center_size(dot, Vec2::splat(10.0)),
+            CornerRadius::same(2),
+            ACCENT,
+        );
+        let text = painter.text(
+            pos2(dot.x + 22.0, dot.y),
+            Align2::LEFT_CENTER,
+            timer,
+            font(14.0),
+            TEXT,
+        );
+        let paused = state.is_some_and(|s| s.paused);
+        let pause = Rect::from_center_size(pos2(text.right() + 26.0, dot.y), Vec2::splat(30.0));
+        let pause_response = ui
+            .interact(pause, ui.id().with("record-pause"), Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if pause_response.hovered() {
+            painter.rect_filled(pause, CornerRadius::same(5), SLEEP_BUTTON_HOVER);
+        }
+        let glyph = if paused { icon::PLAY } else { icon::PAUSE };
+        painter.text(
+            pause.center(),
+            Align2::CENTER_CENTER,
+            glyph,
+            font(16.0),
+            TEXT,
+        );
+        if pause_response.clicked() {
+            if let Some(session) = &self.session {
+                session.send(Command::PauseRecording(!paused));
+            }
+            return false;
+        }
+        response.clicked()
+    }
+
+    /// The High-fps notes and the question before a 720P recording.
+    fn high_fps_dialogs(&mut self, ctx: &egui::Context) {
+        if self.high_fps_tips && tips(ctx, "high-fps-tips", HIGH_FPS_NOTES, "OK").is_some() {
+            self.high_fps_tips = false;
+        }
+        if self.confirm_low_res
+            && let Some(start) = tips(ctx, "high-fps-low-res", LOW_RES_NOTE, "Yes")
+        {
+            self.confirm_low_res = false;
+            if start {
+                self.start_recording(ctx);
+            }
+        }
+    }
+
     fn console(&mut self, ui: &mut Ui) {
         let margin = egui::Margin {
             left: PADDING as i8,
@@ -821,57 +1049,7 @@ impl GimblyApp {
             top: 6,
             bottom: 22,
         };
-        band(ui, CARD, margin, |ui| {
-            ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
-            ui.add_enabled_ui(false, |ui| {
-                ui.horizontal(|ui| {
-                    ui.set_height(32.0);
-                    ui.label(egui::RichText::new("High-fps Recording").size(15.0));
-                    help(ui, NOT_YET);
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        combo_box(ui, "1080P 120", vec2(131.0, 30.0))
-                            .on_disabled_hover_text(NOT_YET);
-                    });
-                });
-                ui.add_space(16.0);
-                pill_row(ui, &["Slow Motion", "Normal"], Some(0), 16.0);
-                ui.add_space(18.0);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 16.0;
-                    let (bar, _) = ui.allocate_exact_size(
-                        vec2(ui.available_width() - 84.0, 46.0),
-                        Sense::hover(),
-                    );
-                    ui.painter().rect_filled(bar, CornerRadius::same(6), BUTTON);
-                    let dot = pos2(bar.left() + 64.0, bar.center().y);
-                    ui.painter()
-                        .circle(dot, 13.0, ACCENT, Stroke::new(2.0, Color32::WHITE));
-                    ui.painter()
-                        .text(dot, Align2::CENTER_CENTER, "REC", font(9.0), ON_ACCENT);
-                    ui.painter()
-                        .circle_filled(pos2(dot.x + 22.0, dot.y), 2.0, TEXT);
-                    ui.painter().text(
-                        pos2(dot.x + 30.0, dot.y),
-                        Align2::LEFT_CENTER,
-                        "00:00:00",
-                        font(14.0),
-                        TEXT,
-                    );
-                    let (folder, _) = ui.allocate_exact_size(vec2(68.0, 46.0), Sense::hover());
-                    ui.painter()
-                        .rect_filled(folder, CornerRadius::same(6), BUTTON);
-                    ui.painter().text(
-                        folder.center(),
-                        Align2::CENTER_CENTER,
-                        icon::FOLDER_SIMPLE,
-                        font(22.0),
-                        TEXT,
-                    );
-                });
-            })
-            .response
-            .on_disabled_hover_text(NOT_YET);
-        });
+        band(ui, CARD, margin, |ui| self.high_fps(ui));
 
         divider(ui);
         self.ai_open = section_header(ui, "AI Tracking", self.ai_open);
@@ -1345,6 +1523,38 @@ fn switch_row(
     .inner
 }
 
+/// A "Tips" modal with one button: `Some(true)` for the button,
+/// `Some(false)` when dismissed.
+fn tips(ctx: &egui::Context, id: &str, text: &str, button: &str) -> Option<bool> {
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::new(id))
+        .backdrop_color(Color32::from_black_alpha(120))
+        .frame(
+            egui::Frame::new()
+                .fill(CARD)
+                .stroke(Stroke::new(1.0, FIELD_STROKE))
+                .corner_radius(CornerRadius::same(8))
+                .inner_margin(egui::Margin::same(16)),
+        )
+        .show(ctx, |ui| {
+            ui.set_width(270.0);
+            ui.spacing_mut().item_spacing = vec2(8.0, 14.0);
+            ui.vertical_centered(|ui| {
+                ui.label(egui::RichText::new("Tips").size(15.0).color(TEXT));
+            });
+            ui.label(egui::RichText::new(text).size(13.0).color(TEXT));
+            ui.vertical_centered(|ui| {
+                if pill(ui, button, false, vec2(85.0, 31.0)).clicked() {
+                    answer = Some(true);
+                }
+            });
+        });
+    if modal.should_close() && answer.is_none() {
+        answer = Some(false);
+    }
+    answer
+}
+
 impl eframe::App for GimblyApp {
     /// Runs every frame and also while the window is minimised, so global
     /// shortcuts keep working in the background.
@@ -1381,6 +1591,13 @@ impl eframe::App for GimblyApp {
     /// The process ends right after this, before the camera thread could
     /// clean up, so leave the Hand and Zone Tracking edit states here.
     fn on_exit(&mut self) {
+        // Let the camera thread finish the recording file.
+        if self.recording
+            && let Some(session) = self.session.take()
+        {
+            session.close(Duration::from_secs(5));
+            return;
+        }
         let Some(session) = &self.session else { return };
         let editing =
             |status: &camera::SessionStatus| status.hand_range.is_some() || status.zone.is_some();
@@ -1427,6 +1644,7 @@ impl eframe::App for GimblyApp {
         self.rename_dialog(&ctx);
         self.hand_range_dialog(&ctx);
         self.zone_dialog(&ctx);
+        self.high_fps_dialogs(&ctx);
         self.preview_window(&ctx);
         self.settings_window(&ctx);
         #[cfg(target_os = "linux")]

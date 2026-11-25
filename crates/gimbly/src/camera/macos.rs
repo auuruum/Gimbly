@@ -1,9 +1,13 @@
-//! AVFoundation decodes capture into NV12. USB endpoint-zero control uses
+//! AVFoundation decodes capture into NV12; High-fps Recording sessions take
+//! the camera's native JPEG frames instead and decode the preview with
+//! `super::mjpeg`. USB endpoint-zero control uses
 //! IOKit through nusb and does not claim the video interface from AVFoundation.
 
 use super::control::{self, AbsoluteZoom, Channel, Transport};
 use super::frames::Frames;
-use super::{CaptureConfig, DeviceInfo, VideoMode, Worker, YuvRange, ZoomRange, queue, vendor};
+use super::{
+    CaptureConfig, DeviceInfo, VideoMode, Worker, YuvRange, ZoomRange, mjpeg, queue, vendor,
+};
 use dispatch2::DispatchQueue;
 use gimbly_vcam_shm::{MAX_DIMENSION, MAX_PIXELS, Nv12View};
 use nusb::MaybeFuture;
@@ -15,6 +19,7 @@ use objc2_av_foundation::*;
 use objc2_core_media::{CMSampleBuffer, CMTime, CMVideoFormatDescriptionGetDimensions};
 use objc2_core_video::*;
 use objc2_foundation::{NSDictionary, NSNumber, NSString};
+use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 use std::time::{Duration, Instant};
@@ -363,6 +368,7 @@ fn authorize(worker: &Worker) -> Result<(), String> {
     }
 }
 
+#[derive(Clone, Copy)]
 struct PreferredSize(usize, usize);
 
 impl PreferredSize {
@@ -389,6 +395,8 @@ struct DelegateData {
     frames: SyncSender<Frame>,
     recycled: mpsc::Receiver<Vec<u8>>,
     shared: Arc<super::Shared>,
+    /// Size of the camera's JPEG frames when they are passed on as is.
+    jpeg: Option<PreferredSize>,
 }
 
 define_class!(
@@ -409,6 +417,18 @@ define_class!(
             _connection: &AVCaptureConnection,
         ) {
             let data = self.ivars();
+            if let Some(size) = data.jpeg {
+                let epoch = data.shared.status().video_epoch;
+                if let Some(bytes) = copy_jpeg(sample) {
+                    let _ = data.frames.try_send(Frame {
+                        bytes,
+                        size,
+                        range: YuvRange::Full601,
+                        epoch,
+                    });
+                }
+                return;
+            }
             let Ok(mut bytes) = data.recycled.try_recv() else {
                 return;
             };
@@ -431,6 +451,22 @@ define_class!(
         }
     }
 );
+
+/// The compressed bytes of a sample in the camera's native format.
+fn copy_jpeg(sample: &CMSampleBuffer) -> Option<Vec<u8>> {
+    // SAFETY: the callback holds a live sample; exactly the reported number
+    // of bytes is copied into owned memory of that size.
+    unsafe {
+        let block = sample.data_buffer()?;
+        let len = block.data_length();
+        if !(4..=16 << 20).contains(&len) {
+            return None;
+        }
+        let mut bytes = vec![0u8; len];
+        let dst = NonNull::new(bytes.as_mut_ptr())?.cast();
+        (block.copy_data_bytes(0, len, dst) == 0).then_some(bytes)
+    }
+}
 
 fn copy_frame(sample: &CMSampleBuffer, bytes: &mut Vec<u8>) -> Option<(PreferredSize, YuvRange)> {
     // SAFETY: the callback holds a live sample. The plane pointers are used
@@ -499,7 +535,11 @@ fn capture(info: &DeviceInfo, config: CaptureConfig, worker: &Worker) -> Result<
         .max_by_key(|m| super::mode_score(&m.video, config))
         .ok_or("The camera offers no supported video format")?;
     let (w, h, fps) = (mode.video.width, mode.video.height, mode.video.fps);
-    let (tx, rx) = mpsc::sync_channel(1);
+    let compressed = config.compressed && mode.video.codec == "MJPG";
+    let jpeg = compressed
+        .then(|| PreferredSize::checked(w as usize, h as usize))
+        .flatten();
+    let (tx, rx) = mpsc::sync_channel(if compressed { 16 } else { 1 });
     let (recycle, recycled) = mpsc::sync_channel(1);
     let _ = recycle.try_send(Vec::new());
     let queue = DispatchQueue::new("gimbly.capture", None);
@@ -508,6 +548,7 @@ fn capture(info: &DeviceInfo, config: CaptureConfig, worker: &Worker) -> Result<
             frames: tx,
             recycled,
             shared: worker.shared.clone(),
+            jpeg,
         });
         // SAFETY: initializes the allocated delegate's NSObject superclass.
         unsafe { msg_send![super(delegate), init] }
@@ -543,15 +584,20 @@ fn capture(info: &DeviceInfo, config: CaptureConfig, worker: &Worker) -> Result<
         })();
         session.commitConfiguration();
         configured?;
-        let formats = output.availableVideoCVPixelFormatTypes();
-        let pixel_format = [NV12_VIDEO, NV12_FULL]
-            .into_iter()
-            .find(|format| formats.iter().any(|value| value.as_u32() == *format))
-            .ok_or("AVFoundation did not offer an NV12 video output")?;
-        let settings = NSDictionary::<NSString, AnyObject>::from_retained_objects(
-            &[&*NSString::from_str("PixelFormatType")],
-            &[NSNumber::new_u32(pixel_format).into()],
-        );
+        let settings = if jpeg.is_some() {
+            // An empty dictionary keeps the device's native (JPEG) samples.
+            NSDictionary::<NSString, AnyObject>::new()
+        } else {
+            let formats = output.availableVideoCVPixelFormatTypes();
+            let pixel_format = [NV12_VIDEO, NV12_FULL]
+                .into_iter()
+                .find(|format| formats.iter().any(|value| value.as_u32() == *format))
+                .ok_or("AVFoundation did not offer an NV12 video output")?;
+            NSDictionary::<NSString, AnyObject>::from_retained_objects(
+                &[&*NSString::from_str("PixelFormatType")],
+                &[NSNumber::new_u32(pixel_format).into()],
+            )
+        };
         output.setVideoSettings(Some(&settings));
         output.setAlwaysDiscardsLateVideoFrames(true);
         output.setSampleBufferDelegate_queue(
@@ -565,7 +611,8 @@ fn capture(info: &DeviceInfo, config: CaptureConfig, worker: &Worker) -> Result<
     {
         let mut status = worker.shared.status();
         status.modes = modes.into_iter().map(|m| m.video).collect();
-        status.format = Some(format!("NV12 {w}x{h} @ {fps:.0} fps"));
+        let codec = if jpeg.is_some() { "MJPG" } else { "NV12" };
+        status.format = Some(format!("{codec} {w}x{h} @ {fps:.0} fps"));
         status.output = Some(config.output_size(w, h));
         status.vendor_control_untested = info.is_obsbot();
     }
@@ -599,10 +646,26 @@ fn capture(info: &DeviceInfo, config: CaptureConfig, worker: &Worker) -> Result<
             }
         });
         let mut frames = Frames::new(worker, config, model.is_some_and(|m| m.standby_picture));
+        if jpeg.is_some() {
+            frames.set_compressed(w, h, fps);
+        }
+        let (mut decoded, mut packed) = (Vec::new(), Vec::new());
         let mut last = Instant::now();
         while !worker.should_stop() {
             frames.commands(|command| super::forward_control(worker, Some(&commands), command));
             match rx.recv_timeout(Duration::from_millis(40)) {
+                Ok(frame) if jpeg.is_some() => {
+                    let PreferredSize(w, h) = frame.size;
+                    frames.packet(&frame.bytes);
+                    if frames.picture_due()
+                        && let Some(view) =
+                            mjpeg::decode(&frame.bytes, w, h, &mut decoded, &mut packed)
+                    {
+                        frames.publish(frame.epoch, &view, frame.range);
+                    }
+                    frames.received();
+                    last = Instant::now();
+                }
                 Ok(frame) => {
                     let PreferredSize(w, h) = frame.size;
                     if let Some(view) = Nv12View::packed(&frame.bytes, w, h) {

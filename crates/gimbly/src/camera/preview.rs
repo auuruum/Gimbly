@@ -23,7 +23,7 @@ pub enum YuvRange {
     Full,
     #[cfg(target_os = "linux")]
     Limited601,
-    #[cfg(target_os = "linux")]
+    /// JPEG frames: full range with BT.601 colours.
     Full601,
 }
 
@@ -35,7 +35,6 @@ fn coefficients(range: YuvRange) -> (i32, i32, i32, i32, i32, i32) {
         YuvRange::Full => (0, 256, 403, 48, 120, 475),
         #[cfg(target_os = "linux")]
         YuvRange::Limited601 => (16, 298, 409, 100, 208, 516),
-        #[cfg(target_os = "linux")]
         YuvRange::Full601 => (0, 256, 359, 88, 183, 454),
     }
 }
@@ -151,12 +150,12 @@ pub fn sleep_frame(
         YuvRange::Full => (0.0, 1.0, 1.0),
         #[cfg(target_os = "linux")]
         YuvRange::Limited601 => (16.0, 219.0 / 255.0, 224.0 / 255.0),
-        #[cfg(target_os = "linux")]
         YuvRange::Full601 => (0.0, 1.0, 1.0),
     };
     let (kr, kb) = match range {
         #[cfg(target_os = "linux")]
-        YuvRange::Limited601 | YuvRange::Full601 => (0.299, 0.114),
+        YuvRange::Limited601 => (0.299, 0.114),
+        YuvRange::Full601 => (0.299, 0.114),
         _ => (0.2126, 0.0722),
     };
     let luma = |[r, g, b]: [f32; 3]| kr * r + (1.0 - kr - kb) * g + kb * b;

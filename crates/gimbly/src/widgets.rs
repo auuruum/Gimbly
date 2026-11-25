@@ -122,6 +122,24 @@ pub fn help(ui: &mut Ui, tip: &str) {
     response.on_hover_text(tip);
 }
 
+/// The question-mark icon as a button that opens a longer explanation.
+pub fn help_button(ui: &mut Ui) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(16.0, 18.0), Sense::click());
+    let color = if hovered(ui, &response) {
+        TEXT
+    } else {
+        TEXT_DIM
+    };
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        icon::QUESTION,
+        font(14.0),
+        color,
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 /// Label used above control groups, optionally preceded by an icon.
 pub fn group_label(ui: &mut Ui, glyph: Option<&str>, text: &str) {
     ui.horizontal(|ui| {
@@ -203,6 +221,49 @@ pub fn combo_box(ui: &mut Ui, text: &str, size: Vec2) -> Response {
         TEXT_DIM,
     );
     response
+}
+
+/// A [`combo_box`] that opens a list of `options` below it. Returns the
+/// index chosen.
+pub fn dropdown(ui: &mut Ui, current: &str, options: &[&str], size: Vec2) -> Option<usize> {
+    let response = combo_box(ui, current, size).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let mut chosen = None;
+    egui::Popup::from_toggle_button_response(&response)
+        .width(size.x)
+        .gap(2.0)
+        .frame(
+            egui::Frame::new()
+                .fill(FIELD)
+                .stroke(Stroke::new(1.0, FIELD_STROKE))
+                .corner_radius(CornerRadius::same(4))
+                .inner_margin(egui::Margin::symmetric(0, 4)),
+        )
+        .show(|ui| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+            for (i, option) in options.iter().enumerate() {
+                let (item, r) = ui.allocate_exact_size(vec2(size.x, 32.0), Sense::click());
+                if r.hovered() {
+                    ui.painter()
+                        .rect_filled(item, CornerRadius::ZERO, BUTTON_HOVER);
+                }
+                let color = if *option == current {
+                    ACCENT_HOVER
+                } else {
+                    TEXT
+                };
+                ui.painter().text(
+                    pos2(item.left() + 12.0, item.center().y),
+                    Align2::LEFT_CENTER,
+                    *option,
+                    font(14.0),
+                    color,
+                );
+                if r.clicked() {
+                    chosen = Some(i);
+                }
+            }
+        });
+    chosen
 }
 
 /// Lays out `add` inside `rect`, which the caller has already allocated.

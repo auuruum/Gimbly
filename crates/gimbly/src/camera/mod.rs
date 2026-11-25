@@ -5,6 +5,7 @@
 
 mod control;
 mod frames;
+mod mjpeg;
 mod models;
 mod preview;
 mod queue;
@@ -140,6 +141,9 @@ pub struct CaptureConfig {
     /// Rotation and mirror for the preview, snapshots and virtual camera;
     /// changed live with [`Command::SetTransform`].
     pub transform: Transform,
+    /// Keep the camera's own JPEG frames for High-fps Recording
+    /// ([`Command::Record`]); the session then needs an MJPEG mode.
+    pub compressed: bool,
 }
 
 impl Default for CaptureConfig {
@@ -150,6 +154,7 @@ impl Default for CaptureConfig {
             fps: 30,
             portrait: false,
             transform: Transform::default(),
+            compressed: false,
         }
     }
 }
@@ -261,6 +266,8 @@ pub struct SessionStatus {
     pub composition: Option<Composition>,
     /// Stored preset positions, in the camera's order. `None` until read.
     pub presets: Option<Vec<Preset>>,
+    /// High-fps Recording runs in this session.
+    pub recording: Option<RecordingStatus>,
     /// The virtual camera has received at least one frame in this session.
     pub virtual_camera: bool,
     pub virtual_camera_error: Option<String>,
@@ -280,6 +287,18 @@ pub enum Command {
     SetSleep(bool),
     /// An OBSBOT vendor command (gimbal, zoom ratio, presets).
     Gimbal(GimbalCommand),
+    /// Start High-fps Recording in a [`CaptureConfig::compressed`] session.
+    /// The recording ends with the session.
+    Record(crate::record::Spec),
+    /// Pause (`true`) or resume the recording.
+    PauseRecording(bool),
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RecordingStatus {
+    /// Real time recorded, without pauses.
+    pub elapsed: std::time::Duration,
+    pub paused: bool,
 }
 
 /// Commands for OBSBOT cameras with a gimbal, carried out off the UI thread.
@@ -762,6 +781,7 @@ pub struct Session {
     shared: Arc<Shared>,
     commands: Sender,
     stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Session {
@@ -807,6 +827,24 @@ impl Session {
             shared,
             commands: tx,
             stop,
+            thread: thread.ok(),
+        }
+    }
+
+    /// Stops the capture and waits up to `limit` for the camera thread to
+    /// end, which also finishes a running recording. Dropping a session
+    /// does not wait.
+    pub fn close(self, limit: std::time::Duration) {
+        let until = std::time::Instant::now() + limit;
+        {
+            let _busy = CAPTURE_BUSY.lock().unwrap_or_else(|e| e.into_inner());
+            self.stop.store(true, Ordering::Relaxed);
+            CAPTURE_CHANGED.notify_all();
+        }
+        while self.thread.as_ref().is_some_and(|t| !t.is_finished())
+            && std::time::Instant::now() < until
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
 

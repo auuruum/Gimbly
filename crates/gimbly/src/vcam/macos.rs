@@ -302,7 +302,10 @@ impl Output {
         if unsafe { self.queue.count() } >= 2 {
             return Ok(false);
         }
-        if let Some((sample, _)) = self.pool.sample(Some(view), range == YuvRange::Full) {
+        if let Some((sample, _)) = self.pool.sample(
+            Some(view),
+            matches!(range, YuvRange::Full | YuvRange::Full601),
+        ) {
             let ptr = CFRetained::into_raw(sample);
             // SAFETY: transfer the sample's reference to Core Media I/O.
             let status = unsafe { self.queue.enqueue(ptr.cast()) };

@@ -52,6 +52,21 @@ impl Resolution {
     }
 }
 
+choice!(HighFps {
+    Fhd120 => "1080P 120",
+    Hd120 => "720P 120",
+});
+
+impl HighFps {
+    /// Capture width, height and frame rate.
+    pub fn mode(self) -> (u32, u32, u32) {
+        match self {
+            HighFps::Fhd120 => (1920, 1080, 120),
+            HighFps::Hd120 => (1280, 720, 120),
+        }
+    }
+}
+
 choice!(PreviewMode {
     Landscape => "Landscape",
     Portrait => "Portrait",
@@ -72,6 +87,16 @@ choice!(RecordFormat {
     Mp4 => "mp4",
     Mov => "mov",
 });
+
+impl RecordFormat {
+    pub fn container(self) -> crate::record::Container {
+        match self {
+            RecordFormat::Mkv => crate::record::Container::Mkv,
+            RecordFormat::Mp4 => crate::record::Container::Mp4,
+            RecordFormat::Mov => crate::record::Container::Mov,
+        }
+    }
+}
 
 choice!(CloseAction {
     FullyClosed => "Fully Closed",
@@ -421,6 +446,9 @@ pub struct Settings {
     pub bitrate: Bitrate,
     pub record_format: RecordFormat,
     pub media_dir: String,
+    /// High-fps Recording mode and Slow Motion (Console tab).
+    pub high_fps: HighFps,
+    pub slow_motion: bool,
     /// Rotation and mirror chosen in the preview window.
     pub transform: Transform,
     pub hotkeys_enabled: bool,
@@ -442,6 +470,8 @@ impl Default for Settings {
             bitrate: Bitrate::Low,
             record_format: RecordFormat::Mkv,
             media_dir: default_media_dir(),
+            high_fps: HighFps::Fhd120,
+            slow_motion: false,
             transform: Transform::default(),
             hotkeys_enabled: false,
             hotkeys: default_bindings(),
@@ -543,6 +573,10 @@ impl Settings {
         if let Some(v) = get("Output", "MediaFileLocation").filter(|v| !v.is_empty()) {
             s.media_dir = v.clone();
         }
+        if let Some(v) = get("Output", "HighFpsRecording").and_then(|v| HighFps::parse(v)) {
+            s.high_fps = v;
+        }
+        s.slow_motion = get("Output", "SlowMotion").is_some_and(|v| v == "true");
         let rotation = get("Output", "PreviewRotation")
             .and_then(|v| v.parse::<u32>().ok())
             .filter(|d| d % 90 == 0 && *d < 360);
@@ -583,6 +617,8 @@ impl Settings {
         out += &format!("RecordingBitrate={}\n", self.bitrate.label());
         out += &format!("RecordingFormat={}\n", self.record_format.label());
         out += &format!("MediaFileLocation={}\n", self.media_dir);
+        out += &format!("HighFpsRecording={}\n", self.high_fps.label());
+        out += &format!("SlowMotion={}\n", self.slow_motion);
         out += &format!("PreviewRotation={}\n", self.transform.degrees());
         out += &format!("PreviewMirror={}\n", self.transform.mirror);
         out += "\n[General]\n";
@@ -610,6 +646,7 @@ impl Settings {
             fps,
             portrait: self.preview_mode == PreviewMode::Portrait,
             transform: self.transform,
+            compressed: false,
         }
     }
 }
@@ -626,6 +663,8 @@ mod tests {
             bitrate: Bitrate::High,
             record_format: RecordFormat::Mp4,
             media_dir: r"D:\Clips".into(),
+            high_fps: HighFps::Hd120,
+            slow_motion: true,
             transform: Transform::new(270, true),
             hotkeys_enabled: true,
             close_action: CloseAction::Minimize,

@@ -1,9 +1,14 @@
 //! One NV12 output pipeline for preview, snapshots and the virtual camera.
 
-use super::{CaptureConfig, Command, SessionState, Worker, preview, standby};
+use super::{CaptureConfig, Command, RecordingStatus, SessionState, Worker, preview, standby};
+use crate::record::Recorder;
 use gimbly_vcam_shm::Nv12View;
 use preview::YuvRange;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// While recording, decode at most one JPEG frame per this interval for
+/// the preview and virtual camera (about every second frame at 120 fps).
+const PICTURE_INTERVAL: Duration = Duration::from_millis(15);
 
 type Placeholder = ((usize, usize, YuvRange), Vec<u8>);
 
@@ -16,6 +21,11 @@ pub(super) struct Frames<'a> {
     turned: Vec<u8>,
     placeholder: Option<Placeholder>,
     fps_window: (Instant, u32),
+    /// Width, height and rate of the camera's JPEG frames in a compressed
+    /// session.
+    compressed: Option<(u32, u32, u32)>,
+    recorder: Option<Recorder>,
+    last_picture: Option<Instant>,
 }
 
 impl<'a> Frames<'a> {
@@ -29,7 +39,82 @@ impl<'a> Frames<'a> {
             turned: Vec::new(),
             placeholder: None,
             fps_window: (Instant::now(), 0),
+            compressed: None,
+            recorder: None,
+            last_picture: None,
         }
+    }
+
+    /// The backend delivers the camera's JPEG frames through
+    /// [`Self::packet`], `width` x `height` at `fps`.
+    pub(super) fn set_compressed(&mut self, width: u32, height: u32, fps: f32) {
+        self.compressed = Some((width, height, fps.round().max(1.0) as u32));
+    }
+
+    fn start_recording(&mut self, spec: &crate::record::Spec) {
+        let result = match self.compressed {
+            Some((w, h, fps)) => Recorder::start(spec, w, h, fps),
+            None => Err("This camera mode cannot be recorded".into()),
+        };
+        let mut status = self.worker.shared.status();
+        match result {
+            Ok(recorder) => {
+                self.recorder = Some(recorder);
+                status.recording = Some(RecordingStatus::default());
+            }
+            Err(error) => status.error = Some(error),
+        }
+        drop(status);
+        (self.worker.repaint)();
+    }
+
+    /// Hands one camera JPEG frame to the recording, if one runs.
+    pub(super) fn packet(&mut self, jpeg: &[u8]) {
+        let Some(recorder) = &mut self.recorder else {
+            return;
+        };
+        let now = Instant::now();
+        let pushed = recorder.push(jpeg, now);
+        let current = RecordingStatus {
+            elapsed: recorder.recorded(now),
+            paused: recorder.paused(),
+        };
+        let mut status = self.worker.shared.status();
+        if let Err(error) = pushed {
+            self.recorder = None;
+            status.recording = None;
+            status.error = Some(error);
+            drop(status);
+            (self.worker.repaint)();
+            return;
+        }
+        let tick = status.recording.as_ref().map(|r| r.elapsed.as_secs())
+            != Some(current.elapsed.as_secs());
+        status.recording = Some(current);
+        drop(status);
+        if tick {
+            (self.worker.repaint)();
+        }
+    }
+
+    /// Whether to turn this frame into a picture for the preview, a
+    /// snapshot or the virtual camera. Compressed sessions decode at a
+    /// reduced rate so the 120 fps recording keeps up.
+    pub(super) fn picture_due(&mut self) -> bool {
+        let wanted =
+            self.virtual_camera.is_some() || self.snapshot || self.worker.shared.frame().is_none();
+        if !wanted || self.compressed.is_none() {
+            return wanted;
+        }
+        let now = Instant::now();
+        if self
+            .last_picture
+            .is_some_and(|last| now.saturating_duration_since(last) < PICTURE_INTERVAL)
+        {
+            return false;
+        }
+        self.last_picture = Some(now);
+        true
     }
 
     pub(super) fn commands(&mut self, mut control: impl FnMut(Command)) {
@@ -58,15 +143,20 @@ impl<'a> Frames<'a> {
                     (self.worker.repaint)();
                 }
                 Command::Snapshot => self.snapshot = true,
+                Command::Record(spec) => self.start_recording(&spec),
+                Command::PauseRecording(paused) => {
+                    if let Some(recorder) = &mut self.recorder {
+                        recorder.set_paused(paused, Instant::now());
+                        if let Some(status) = &mut self.worker.shared.status().recording {
+                            status.paused = paused;
+                        }
+                        (self.worker.repaint)();
+                    }
+                }
                 Command::SetTransform(transform) => self.config.transform = transform,
                 command => control(command),
             }
         }
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(super) fn needed(&self) -> bool {
-        self.virtual_camera.is_some() || self.snapshot || self.worker.shared.frame().is_none()
     }
 
     /// On systems where the camera stops delivering buffers in sleep, keep

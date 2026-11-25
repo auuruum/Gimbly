@@ -25,6 +25,10 @@ egui-phosphor = "0.14.0"
 gimbly-vcam-shm.workspace = true
 # Snapshots. Already in the tree through eframe, so it adds no new crates.
 png = "0.18.1"
+# MJPEG decoding for the preview while High-fps Recording keeps the camera's
+# JPEG frames (and for Linux MJPEG capture).
+zune-core = "0.5.3"
+zune-jpeg = "0.5.15"
 
 [build-dependencies]
 object = { version = "0.40.0", default-features = false, features = ["write_core", "coff"] }
@@ -62,8 +66,6 @@ libc = "0.2"
 linuxvideo = "0.3.5"
 raw-window-handle = "0.6"
 nix = { version = "0.31", features = ["ioctl"] }
-zune-core = "0.5.3"
-zune-jpeg = "0.5.15"
 ashpd = { version = "0.14", default-features = false, features = ["global_shortcuts", "tokio"] }
 tokio = { version = "1", features = ["macros", "rt", "sync"] }
 futures-util = "0.3"

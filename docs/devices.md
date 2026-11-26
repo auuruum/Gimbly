@@ -38,4 +38,4 @@ The Linux virtual camera delivered frames to a second process both with
 synthetic input in a guest and with a physical Tiny 3 Lite on the host.
 See the [virtual camera evidence log](clean-room/2026-11-10-linux-virtual-camera.md)
 and the [physical-camera baseline](clean-room/2026-11-20-human-tracking.md).
-| OBSBOT Tiny 3 Lite | `3564:ff04` | not reread | 6.5.11.1 | Windows 10 Pro 19045 | Focus: Auto Focus, Global/Face, Manual Focus | probe steps without errors; the camera status read in the next process matched each write; snapshots at positions 10 and 90 differed in sharpness. Panel in the running app not checked | 2026-11-26 |
+| OBSBOT Tiny 3 Lite | `3564:ff04` | not reread | 6.5.11.1 | Windows 10 Pro 19045 | Focus: Auto Focus, Global/Face, Manual Focus | probe steps without errors; the camera status read in the next process matched each write; snapshots at positions 10 and 90 differed in sharpness. Owner checked the panel in the running app | 2026-11-26 |

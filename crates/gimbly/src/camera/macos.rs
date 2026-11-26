@@ -231,6 +231,8 @@ impl Usb {
 struct Xu {
     usb: Usb,
     index: u16,
+    /// The camera terminal's control index (focus), if the camera has one.
+    terminal: Option<u16>,
 }
 
 impl Xu {
@@ -239,9 +241,12 @@ impl Xu {
         let config = usb.0.active_configuration().map_err(|e| e.to_string())?;
         let (interface, unit) = control::extension_unit(config.as_bytes())
             .ok_or("UVC vendor extension unit not found")?;
+        let terminal = control::camera_terminal(config.as_bytes())
+            .map(|(interface, terminal)| u16::from_be_bytes([terminal, interface]));
         Channel::open(Self {
             usb,
             index: u16::from_be_bytes([unit, interface]),
+            terminal,
         })
     }
 
@@ -265,6 +270,19 @@ impl Transport for Xu {
     fn write(&self, selector: u32, block: &mut [u8; vendor::MESSAGE_LEN]) -> Result<(), String> {
         self.check_length(selector)?;
         self.usb.write(self.index, selector, block)
+    }
+
+    // macOS has no public focus API for UVC cameras; send the standard
+    // camera terminal requests (CT_FOCUS_AUTO_CONTROL 8, CT_FOCUS_ABSOLUTE 6).
+    fn set_auto_focus(&mut self, on: bool) -> Result<(), String> {
+        let terminal = self.terminal.ok_or("The camera has no focus control")?;
+        self.usb.write(terminal, 8, &[on.into()])
+    }
+
+    fn set_focus_position(&mut self, position: u8) -> Result<(), String> {
+        let terminal = self.terminal.ok_or("The camera has no focus control")?;
+        self.usb
+            .write(terminal, 6, &u16::from(position).to_le_bytes())
     }
 }
 

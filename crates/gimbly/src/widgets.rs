@@ -8,6 +8,7 @@ use eframe::egui::{
 use egui_phosphor::regular as icon;
 
 pub const BUTTON_HEIGHT: f32 = 40.0;
+const SLIDER_TRACK: Color32 = Color32::from_rgb(0x08, 0x0A, 0x0B);
 
 fn hovered(ui: &Ui, response: &Response) -> bool {
     ui.is_enabled() && response.hovered()
@@ -151,12 +152,14 @@ pub fn group_label(ui: &mut Ui, glyph: Option<&str>, text: &str) {
     });
 }
 
-/// Full-width collapsible section header. Returns the toggled open state.
-pub fn section_header(ui: &mut Ui, title: &str, open: bool) -> bool {
+/// Full-width collapsible section header, with a reset icon after the
+/// title when `reset` names its tooltip. Returns the toggled open state and
+/// whether the reset icon was clicked.
+pub fn section_header(ui: &mut Ui, title: &str, open: bool, reset: Option<&str>) -> (bool, bool) {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(vec2(width, 60.0), Sense::click());
     ui.painter().rect_filled(rect, CornerRadius::ZERO, CARD);
-    ui.painter().text(
+    let title = ui.painter().text(
         pos2(rect.left() + PADDING, rect.center().y),
         Align2::LEFT_CENTER,
         title,
@@ -175,7 +178,92 @@ pub fn section_header(ui: &mut Ui, title: &str, open: bool) -> bool {
         font(18.0),
         TEXT,
     );
-    if response.clicked() { !open } else { open }
+    let reset = reset.is_some_and(|tip| {
+        let icon_rect = Rect::from_center_size(
+            pos2(title.right() + 16.0, rect.center().y),
+            Vec2::splat(22.0),
+        );
+        let response = ui.interact(icon_rect, response.id.with("reset"), Sense::click());
+        let color = if hovered(ui, &response) {
+            TEXT
+        } else {
+            TEXT_DIM
+        };
+        ui.painter().text(
+            icon_rect.center(),
+            Align2::CENTER_CENTER,
+            icon::ARROW_COUNTER_CLOCKWISE,
+            font(14.0),
+            color,
+        );
+        response.on_hover_text(tip).clicked()
+    });
+    (
+        if response.clicked() && !reset {
+            !open
+        } else {
+            open
+        },
+        reset,
+    )
+}
+
+/// Two or more small pills on a dark strip, like a segmented switch.
+/// Returns the index that was clicked.
+pub fn segmented(ui: &mut Ui, labels: &[&str], selected: Option<usize>) -> Option<usize> {
+    let size = vec2(52.0, 26.0);
+    let strip = vec2(size.x * labels.len() as f32 + 4.0, size.y + 4.0);
+    let (rect, _) = ui.allocate_exact_size(strip, Sense::hover());
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(6), BUTTON);
+    let mut clicked = None;
+    for (i, label) in labels.iter().enumerate() {
+        let min = rect.min + vec2(2.0 + size.x * i as f32, 2.0);
+        let response = ui.put(Rect::from_min_size(min, size), |ui: &mut Ui| {
+            pill(ui, label, selected == Some(i), size)
+        });
+        if response.clicked() && selected != Some(i) {
+            clicked = Some(i);
+        }
+    }
+    clicked
+}
+
+/// Horizontal slider with a 4-point track, an accent fill up to the handle,
+/// and a white round handle. Returns the new position (0–1) on drag or click.
+pub fn slider(ui: &mut Ui, rect: Rect, t: f32, enabled: bool, salt: &str) -> Option<f32> {
+    let response = ui.interact(
+        rect,
+        ui.id().with(salt),
+        if enabled {
+            Sense::click_and_drag()
+        } else {
+            Sense::hover()
+        },
+    );
+    let radius = 6.5;
+    let x0 = rect.left() + radius;
+    let x1 = rect.right() - radius;
+    let t = t.clamp(0.0, 1.0);
+    let x = egui::lerp(x0..=x1, t);
+    let cy = rect.center().y;
+    let painter = ui.painter();
+    let track = Rect::from_min_max(pos2(rect.left(), cy - 2.0), pos2(rect.right(), cy + 2.0));
+    painter.rect_filled(track, CornerRadius::same(2), SLIDER_TRACK);
+    let left = Rect::from_min_max(track.min, pos2(x, track.bottom()));
+    painter.rect_filled(
+        left,
+        CornerRadius::same(2),
+        if enabled { ACCENT } else { TEXT_FAINT },
+    );
+    painter.circle_filled(
+        pos2(x, cy),
+        radius,
+        if enabled { Color32::WHITE } else { TEXT_FAINT },
+    );
+    let pointer = response.interact_pointer_pos()?;
+    (response.dragged() || response.clicked())
+        .then(|| ((pointer.x - x0) / (x1 - x0)).clamp(0.0, 1.0))
 }
 
 /// The 2-px dark line that separates the console from the sections below.

@@ -42,6 +42,7 @@ fn continuous(command: &Command) -> Option<u8> {
         Command::Gimbal(GimbalCommand::ZoomRatio(_)) => Some(1),
         Command::SetZoom(_) => Some(2),
         Command::SetTransform(_) => Some(3),
+        Command::Gimbal(GimbalCommand::SetFocusPosition(_)) => Some(4),
         _ => None,
     }
 }
@@ -136,6 +137,28 @@ mod tests {
         assert_eq!(
             pending.back(),
             Some(&Command::Gimbal(GimbalCommand::Drag(false)))
+        );
+    }
+
+    #[test]
+    fn focus_slider_keeps_only_the_newest_position_in_order() {
+        let (sender, receiver) = channel();
+        let focus = |p| Command::Gimbal(GimbalCommand::SetFocusPosition(p));
+        sender.send(Command::Gimbal(GimbalCommand::SetAutoFocus(false)));
+        for position in 0..=100 {
+            assert!(sender.send(focus(position)));
+        }
+        sender.send(Command::Gimbal(GimbalCommand::SetAutoFocus(true)));
+        sender.send(focus(7));
+        let pending: Vec<_> = receiver.drain().into_iter().collect();
+        assert_eq!(
+            pending,
+            [
+                Command::Gimbal(GimbalCommand::SetAutoFocus(false)),
+                focus(100),
+                Command::Gimbal(GimbalCommand::SetAutoFocus(true)),
+                focus(7),
+            ]
         );
     }
 }

@@ -57,6 +57,9 @@ bytes. `u32`, `i16` and `f32` are little-endian.
 | 0-1 | block marker | `2e 00` |
 | 2 | asleep | 0 awake, 1 asleep |
 | 6 | HDR | 0 off, 1 on |
+| 13 | Auto Focus Mode | 0 Global, 1 Face |
+| 14 | Auto Focus | 0 off, 1 on |
+| 15 | Manual Focus position | 0 to 100 |
 | 24 | AI mode | 0 off, 2 human, 3 hand, 7 voice, 6 switching (under 2 s) |
 | 28 | object framing, while AI mode is 2 | `14` Normal, `17` Close-up |
 | 31 | frame rate | fps the camera streams at: 30 (`1e`), 60 (`3c`) |
@@ -173,6 +176,22 @@ Note: [sound source tracking](clean-room/2026-11-24-sound-source-tracking.md).
 The official app enables the switch only while offset 31 is 30 or less.
 
 Note: [HDR](clean-room/2026-11-25-hdr.md).
+
+## Focus
+
+Auto Focus and the manual position are the standard UVC camera terminal
+controls, not vendor messages. Gimbly writes them through the system's
+camera control API (`IAMCameraControl` on Windows, V4L2 on Linux) or as
+plain UVC requests on macOS.
+
+| Action | Message | Data |
+| --- | --- | --- |
+| Auto Focus on / off | UVC `CT_FOCUS_AUTO_CONTROL` | u8: 1 on, 0 off |
+| Manual position | UVC `CT_FOCUS_ABSOLUTE_CONTROL` | u16, 0 to 100; also sent right after Auto Focus off |
+| Auto Focus Mode | `02 36 → 02` | u32: 0 Global, 1 Face |
+| Read | status block offsets 13, 14 and 15 | |
+
+Note: [focus](clean-room/2026-11-26-focus.md).
 
 ## Zone Tracking
 

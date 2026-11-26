@@ -27,7 +27,6 @@ const ZOOM_HOLD: Duration = Duration::from_millis(1500);
 /// Zoom hotkeys and the spin box arrows change the ratio by this much.
 pub const ZOOM_STEP: f32 = 0.1;
 
-const SLIDER_TRACK: Color32 = Color32::from_rgb(0x08, 0x0A, 0x0B);
 const SPIN_EDGE: Color32 = Color32::from_rgb(0x0F, 0x0F, 0x11);
 const SPIN_ARROW_BOX: Color32 = Color32::from_rgb(0x37, 0x3A, 0x3D);
 const SIDE_TAB: Color32 = Color32::from_rgb(0x2B, 0x2D, 0x2F);
@@ -983,43 +982,6 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
             self.set_zoom_ratio(ratio + direction * ZOOM_STEP);
         }
     }
-}
-
-/// Horizontal slider with a 4-point track, an accent fill up to the handle,
-/// and a white round handle. Returns the new position (0–1) on drag or click.
-fn slider(ui: &mut Ui, rect: Rect, t: f32, enabled: bool, salt: &str) -> Option<f32> {
-    let response = ui.interact(
-        rect,
-        ui.id().with(salt),
-        if enabled {
-            Sense::click_and_drag()
-        } else {
-            Sense::hover()
-        },
-    );
-    let radius = 6.5;
-    let x0 = rect.left() + radius;
-    let x1 = rect.right() - radius;
-    let t = t.clamp(0.0, 1.0);
-    let x = egui::lerp(x0..=x1, t);
-    let cy = rect.center().y;
-    let painter = ui.painter();
-    let track = Rect::from_min_max(pos2(rect.left(), cy - 2.0), pos2(rect.right(), cy + 2.0));
-    painter.rect_filled(track, CornerRadius::same(2), SLIDER_TRACK);
-    let left = Rect::from_min_max(track.min, pos2(x, track.bottom()));
-    painter.rect_filled(
-        left,
-        CornerRadius::same(2),
-        if enabled { ACCENT } else { TEXT_FAINT },
-    );
-    painter.circle_filled(
-        pos2(x, cy),
-        radius,
-        if enabled { Color32::WHITE } else { TEXT_FAINT },
-    );
-    let pointer = response.interact_pointer_pos()?;
-    (response.dragged() || response.clicked())
-        .then(|| ((pointer.x - x0) / (x1 - x0)).clamp(0.0, 1.0))
 }
 
 /// Read-only number field with up/down arrows. Returns +1 or -1 when an

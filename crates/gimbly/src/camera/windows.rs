@@ -14,7 +14,8 @@ use super::{frames::Frames, mjpeg, queue, vendor};
 use gimbly_vcam_shm::Nv12View;
 use std::time::Instant;
 use windows::Win32::Media::DirectShow::{
-    CameraControl_Flags_Manual, CameraControl_Zoom, IAMCameraControl,
+    CameraControl_Flags_Auto, CameraControl_Flags_Manual, CameraControl_Focus, CameraControl_Zoom,
+    IAMCameraControl,
 };
 use windows::Win32::Media::KernelStreaming::{
     IKsControl, IKsTopologyInfo, KSIDENTIFIER_0_0, KSNODETYPE_DEV_SPECIFIC, KSP_NODE,
@@ -547,10 +548,12 @@ impl AbsoluteZoom for Zoom {
 struct Xu {
     control: IKsControl,
     node: u32,
+    /// Standard camera-terminal controls (focus).
+    camera: Option<IAMCameraControl>,
 }
 
-// SAFETY: the control comes from a media source opened on a thread in the
-// multithreaded apartment and is only used from threads that joined it
+// SAFETY: both controls come from a media source opened on a thread in the
+// multithreaded apartment and are only used from threads that joined it
 // (see `control_loop`); kernel-streaming property calls are free-threaded.
 unsafe impl Send for Xu {}
 
@@ -559,6 +562,7 @@ impl Xu {
     fn open(source: &IMFMediaSource) -> Option<Channel<Self>> {
         let control: IKsControl = source.cast().ok()?;
         let topology: IKsTopologyInfo = source.cast().ok()?;
+        let camera: Option<IAMCameraControl> = source.cast().ok();
         // SAFETY: plain topology queries.
         let nodes = unsafe { topology.NumNodes() }.ok()?;
         (0..nodes)
@@ -566,6 +570,7 @@ impl Xu {
             .map(|node| Self {
                 control: control.clone(),
                 node,
+                camera: camera.clone(),
             })
             .find_map(|xu| Channel::open(xu).ok())
     }
@@ -606,6 +611,41 @@ impl Transport for Xu {
     fn write(&self, selector: u32, block: &mut [u8; vendor::MESSAGE_LEN]) -> Result<(), String> {
         self.property(selector, KSPROPERTY_TYPE_SET, block)
             .map(|_| ())
+    }
+
+    fn set_auto_focus(&mut self, on: bool) -> Result<(), String> {
+        let camera = self
+            .camera
+            .as_ref()
+            .ok_or("The camera has no focus control")?;
+        let (mut value, mut flags) = (0, 0);
+        // SAFETY: out-pointers are valid locals.
+        unsafe { camera.Get(CameraControl_Focus.0, &mut value, &mut flags) }
+            .map_err(|e| format!("Focus failed: {e}"))?;
+        let flags = if on {
+            CameraControl_Flags_Auto
+        } else {
+            CameraControl_Flags_Manual
+        };
+        // SAFETY: the value is the one the device just reported.
+        unsafe { camera.Set(CameraControl_Focus.0, value, flags.0) }
+            .map_err(|e| format!("Focus failed: {e}"))
+    }
+
+    fn set_focus_position(&mut self, position: u8) -> Result<(), String> {
+        let camera = self
+            .camera
+            .as_ref()
+            .ok_or("The camera has no focus control")?;
+        // SAFETY: plain value call; the driver rejects values out of range.
+        unsafe {
+            camera.Set(
+                CameraControl_Focus.0,
+                i32::from(position),
+                CameraControl_Flags_Manual.0,
+            )
+        }
+        .map_err(|e| format!("Focus failed: {e}"))
     }
 }
 

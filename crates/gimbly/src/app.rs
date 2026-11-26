@@ -4,8 +4,9 @@ mod view_gimbal;
 
 use crate::branding::Branding;
 use crate::camera::{
-    self, AiMode, AutoZoom, CaptureConfig, Command, DeviceInfo, Feature, GimbalCommand,
-    ObjectFraming, PreviewFrame, Session, SessionState, SessionStatus, TrackingMode, TrackingSpeed,
+    self, AiMode, AutoZoom, CaptureConfig, Command, DeviceInfo, FOCUS_MAX, Feature, FocusMode,
+    GimbalCommand, ObjectFraming, PreviewFrame, Session, SessionState, SessionStatus, TrackingMode,
+    TrackingSpeed,
 };
 use crate::hotkeys::GlobalHotkeys;
 use crate::os;
@@ -62,6 +63,9 @@ pub struct GimblyApp {
     wayland: bool,
     tab: Tab,
     ai_open: bool,
+    focus_open: bool,
+    /// Manual focus position the user dragged to, until the camera reports it.
+    focus_target: Option<u8>,
     /// UVC zoom value the user asked for (cameras without vendor control);
     /// the camera's own reading lags behind while it zooms smoothly.
     zoom_target: Option<i32>,
@@ -116,6 +120,8 @@ impl GimblyApp {
             wayland,
             tab: Tab::Console,
             ai_open: true,
+            focus_open: true,
+            focus_target: None,
             zoom_target: None,
             gimbal_ui: view_gimbal::GimbalUi::default(),
             virtual_camera: false,
@@ -1043,7 +1049,7 @@ impl GimblyApp {
         }
     }
 
-    /// The Image tab: HDR. Focus, exposure and white balance are not there yet.
+    /// The Image tab: HDR and Focus. Exposure and white balance are not there yet.
     fn image(&mut self, ui: &mut Ui) {
         let margin = egui::Margin {
             left: PADDING as i8,
@@ -1078,13 +1084,108 @@ impl GimblyApp {
             self.gimbal(GimbalCommand::SetHdr(!on));
         }
         divider(ui);
+        self.focus(ui);
+        divider(ui);
         ui.add_space(40.0);
         ui.vertical_centered(|ui| {
             ui.label(
-                egui::RichText::new(format!("Focus, exposure and white balance: {NOT_YET}"))
+                egui::RichText::new(format!("Exposure and white balance: {NOT_YET}"))
                     .color(TEXT_DIM),
             );
         });
+    }
+
+    /// The Focus section: Auto Focus, its mode, or the manual position.
+    fn focus(&mut self, ui: &mut Ui) {
+        let focus = self.status.focus;
+        let ready = self.ready(Feature::Focus) && focus.is_some();
+        let tip = self.gimbal_tip(Feature::Focus);
+        let reset;
+        (self.focus_open, reset) = section_header(
+            ui,
+            "Focus",
+            self.focus_open,
+            ready.then_some("Reset to Auto Focus on faces"),
+        );
+        // Like the official app: reset turns Auto Focus on in Face mode and
+        // keeps the manual position.
+        if reset && let Some(focus) = focus {
+            if !focus.auto {
+                self.gimbal(GimbalCommand::SetAutoFocus(true));
+            }
+            if focus.mode != FocusMode::Face {
+                self.gimbal(GimbalCommand::SetFocusMode(FocusMode::Face));
+            }
+        }
+        if !self.focus_open {
+            return;
+        }
+        if self.focus_target == focus.map(|f| f.position) {
+            self.focus_target = None;
+        }
+        let margin = egui::Margin {
+            left: PADDING as i8,
+            right: PADDING as i8,
+            top: 4,
+            bottom: 18,
+        };
+        let auto = focus.is_none_or(|f| f.auto);
+        let mut command = None;
+        band(ui, CARD, margin, |ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 16.0);
+            ui.add_enabled_ui(ready, |ui| {
+                let (switch, _) = switch_row(
+                    ui,
+                    "Auto Focus",
+                    "Keeps the picture sharp by itself. Turn it off to set the focus by hand",
+                    None,
+                    auto,
+                );
+                if switch.on_disabled_hover_text(&tip).clicked() {
+                    command = Some(GimbalCommand::SetAutoFocus(!auto));
+                }
+                ui.horizontal(|ui| {
+                    ui.set_height(30.0);
+                    if auto {
+                        ui.label(egui::RichText::new("Auto Focus Mode").size(15.0));
+                        help(
+                            ui,
+                            "Global focuses on the whole picture, Face on faces first",
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let selected = focus.map(|f| usize::from(f.mode == FocusMode::Face));
+                            match segmented(ui, &["Global", "Face"], selected) {
+                                Some(0) => {
+                                    command = Some(GimbalCommand::SetFocusMode(FocusMode::Global))
+                                }
+                                Some(_) => {
+                                    command = Some(GimbalCommand::SetFocusMode(FocusMode::Face))
+                                }
+                                None => {}
+                            }
+                        });
+                    } else {
+                        ui.label(egui::RichText::new("Manual Focus").size(15.0));
+                        let position = self.focus_target.or(focus.map(|f| f.position)).unwrap_or(0);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let (track, _) =
+                                ui.allocate_exact_size(vec2(160.0, 20.0), egui::Sense::hover());
+                            let t = f32::from(position) / f32::from(FOCUS_MAX);
+                            if let Some(t) = slider(ui, track, t, ready, "manual-focus") {
+                                let value = (t * f32::from(FOCUS_MAX)).round() as u8;
+                                if value != position {
+                                    self.focus_target = Some(value);
+                                    command = Some(GimbalCommand::SetFocusPosition(value));
+                                }
+                            }
+                        });
+                    }
+                });
+            });
+        });
+        if let Some(command) = command {
+            self.gimbal(command);
+        }
     }
 
     fn console(&mut self, ui: &mut Ui) {
@@ -1097,7 +1198,7 @@ impl GimblyApp {
         band(ui, CARD, margin, |ui| self.high_fps(ui));
 
         divider(ui);
-        self.ai_open = section_header(ui, "AI Tracking", self.ai_open);
+        (self.ai_open, _) = section_header(ui, "AI Tracking", self.ai_open, None);
         if self.ai_open {
             let margin = egui::Margin {
                 left: PADDING as i8,

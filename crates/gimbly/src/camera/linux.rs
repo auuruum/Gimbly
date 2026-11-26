@@ -251,6 +251,18 @@ impl Transport for Xu {
         self.check_length(selector)?;
         self.query(selector, 0x01, block)
     }
+    // uvcvideo maps the camera terminal's focus controls to V4L2 controls.
+    fn set_auto_focus(&mut self, on: bool) -> Result<(), String> {
+        self.device
+            .write_control_raw(Cid::FOCUS_AUTO, on.into())
+            .map_err(|e| format!("Focus failed: {e}"))
+    }
+
+    fn set_focus_position(&mut self, position: u8) -> Result<(), String> {
+        self.device
+            .write_control_raw(Cid::FOCUS_ABSOLUTE, position.into())
+            .map_err(|e| format!("Focus failed: {e}"))
+    }
 }
 
 struct Zoom {

@@ -241,6 +241,8 @@ pub struct SessionStatus {
     pub hdr: Option<bool>,
     /// Frame rate the camera streams at; `None` until read.
     pub frame_rate: Option<u8>,
+    /// Focus settings the camera reports; `None` until read.
+    pub focus: Option<Focus>,
     /// The hand Hand Tracking follows; `None` until read.
     pub hand: Option<Hand>,
     /// The Hand Tracking range being edited. `Some` exactly while the camera
@@ -338,6 +340,11 @@ pub enum GimbalCommand {
     SetVoiceRange(VoiceRange),
     SetSoundSource(bool),
     SetHdr(bool),
+    /// Auto Focus on, or off at the manual focus position.
+    SetAutoFocus(bool),
+    SetFocusMode(FocusMode),
+    /// Manual focus position, 0 to [`FOCUS_MAX`].
+    SetFocusPosition(u8),
     SetHand(Hand),
     /// Read the Hand Tracking range and put the camera in its edit state.
     OpenHandRange,
@@ -522,6 +529,27 @@ pub enum AiMode {
     Human,
     Hand,
     Voice,
+}
+
+/// The highest manual focus position (UVC focus range of the Tiny 3 Lite).
+pub const FOCUS_MAX: u8 = 100;
+
+/// What Auto Focus looks at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FocusMode {
+    /// The whole picture.
+    Global,
+    /// Faces first.
+    Face,
+}
+
+/// The Focus settings in the status block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Focus {
+    pub auto: bool,
+    pub mode: FocusMode,
+    /// Manual focus position, kept while Auto Focus is on.
+    pub position: u8,
 }
 
 /// Which directions Voice Tracking listens to.

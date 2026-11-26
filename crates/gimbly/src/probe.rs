@@ -12,8 +12,8 @@
 //! mkv|mp4|mov`.
 
 use crate::camera::{
-    self, AiMode, AutoZoom, CaptureConfig, Command, Fov, GimbalCommand, Hand, SessionState,
-    TrackingMode, TrackingSpeed, VoiceRange,
+    self, AiMode, AutoZoom, CaptureConfig, Command, FocusMode, Fov, GimbalCommand, Hand,
+    SessionState, TrackingMode, TrackingSpeed, VoiceRange,
 };
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -64,6 +64,11 @@ fn control_step(step: &str) -> Option<Command> {
         ["sound", "off"] => GimbalCommand::SetSoundSource(false),
         ["hdr", "on"] => GimbalCommand::SetHdr(true),
         ["hdr", "off"] => GimbalCommand::SetHdr(false),
+        ["af", "on"] => GimbalCommand::SetAutoFocus(true),
+        ["af", "off"] => GimbalCommand::SetAutoFocus(false),
+        ["af", "global"] => GimbalCommand::SetFocusMode(FocusMode::Global),
+        ["af", "face"] => GimbalCommand::SetFocusMode(FocusMode::Face),
+        ["focus", position] => GimbalCommand::SetFocusPosition(position.parse().ok()?),
         ["left"] => GimbalCommand::SetHand(Hand::Left),
         ["right"] => GimbalCommand::SetHand(Hand::Right),
         ["range"] => GimbalCommand::OpenHandRange,
@@ -118,7 +123,7 @@ fn gimbal(session: &camera::Session, args: &[String], virtual_camera: bool) -> i
             .and_then(|f| crate::snapshot::save(&f, Path::new(dir), [0, 0, 0, 0, 0, step as u16]));
         let status = session.status();
         println!(
-            "step {step}: {saved:?}, vendor control {}, sleeping {}, AI mode {:?} {:?}, auto zoom {:?}, speed {:?}, voice range {:?}, sound source {:?}, HDR {:?}, hand {:?} {:?}, zone {:?} {:?}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
+            "step {step}: {saved:?}, vendor control {}, sleeping {}, AI mode {:?} {:?}, auto zoom {:?}, speed {:?}, voice range {:?}, sound source {:?}, HDR {:?}, focus {:?}, hand {:?} {:?}, zone {:?} {:?}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
             status.vendor_control,
             status.sleeping,
             status.ai_mode,
@@ -128,6 +133,7 @@ fn gimbal(session: &camera::Session, args: &[String], virtual_camera: bool) -> i
             status.voice_range,
             status.sound_source,
             status.hdr,
+            status.focus,
             status.hand,
             status.hand_range,
             status.zone_tracking,

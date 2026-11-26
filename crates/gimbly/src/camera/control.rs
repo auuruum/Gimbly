@@ -4,9 +4,9 @@
 use super::queue::Receiver;
 use super::sleep::SleepReadback;
 use super::{
-    AiMode, Area, AutoZoom, Command, Composition, Feature, GimbalCommand, Hand, ObjectFraming,
-    PRESET_SLOTS, Preset, RangeField, Shared, TrackingMode, TrackingRange, TrackingSpeed,
-    VoiceRange, ZONE_AREAS, Zone, serial, vendor,
+    AiMode, Area, AutoZoom, Command, Composition, FOCUS_MAX, Feature, Focus, GimbalCommand, Hand,
+    ObjectFraming, PRESET_SLOTS, Preset, RangeField, Shared, TrackingMode, TrackingRange,
+    TrackingSpeed, VoiceRange, ZONE_AREAS, Zone, serial, vendor,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -14,6 +14,14 @@ use std::time::{Duration, Instant};
 pub(super) trait Transport {
     fn read(&self, selector: u32, block: &mut [u8; vendor::MESSAGE_LEN]) -> Result<usize, String>;
     fn write(&self, selector: u32, block: &mut [u8; vendor::MESSAGE_LEN]) -> Result<(), String>;
+    /// Standard UVC Auto Focus on the camera terminal (`CT_FOCUS_AUTO_CONTROL`).
+    fn set_auto_focus(&mut self, _on: bool) -> Result<(), String> {
+        Err("Focus is not supported on this system".into())
+    }
+    /// Standard UVC focus position (`CT_FOCUS_ABSOLUTE_CONTROL`).
+    fn set_focus_position(&mut self, _position: u8) -> Result<(), String> {
+        Err("Focus is not supported on this system".into())
+    }
 }
 
 pub(super) struct Channel<T> {
@@ -48,6 +56,7 @@ impl<T: Transport> Channel<T> {
         status.sound_source = view.and_then(|view| view.sound_source);
         status.hdr = view.and_then(|view| view.hdr);
         status.frame_rate = view.and_then(|view| view.frame_rate);
+        status.focus = view.and_then(|view| view.focus);
         status.object_framing = view.and_then(|view| view.object_framing);
         status.tracking_speed = tracking_speed;
         status.hand = hand;
@@ -137,6 +146,7 @@ impl<T: Transport> Channel<T> {
             sound_source: vendor::read_sound_source(block),
             hdr: vendor::read_hdr(block),
             frame_rate: vendor::read_frame_rate(block),
+            focus: vendor::read_focus(block),
             object_framing: vendor::read_object_framing(block),
         })
     }
@@ -641,6 +651,31 @@ impl<T: Transport> Channel<T> {
                 self.set(vendor::SELECTOR_VIEW, &mut vendor::hdr(on))?;
                 shared.status().hdr = Some(on);
             }
+            GimbalCommand::SetAutoFocus(on) => {
+                self.transport.set_auto_focus(on)?;
+                let mut focus = shared.status().focus;
+                // Like the official app: turning it off also sends the manual position.
+                if !on && let Some(focus) = focus {
+                    self.transport.set_focus_position(focus.position)?;
+                }
+                if let Some(focus) = &mut focus {
+                    focus.auto = on;
+                }
+                shared.status().focus = focus;
+            }
+            GimbalCommand::SetFocusMode(mode) => {
+                self.send(vendor::focus_mode(mode))?;
+                if let Some(focus) = &mut shared.status().focus {
+                    focus.mode = mode;
+                }
+            }
+            GimbalCommand::SetFocusPosition(position) => {
+                let position = position.min(FOCUS_MAX);
+                self.transport.set_focus_position(position)?;
+                if let Some(focus) = &mut shared.status().focus {
+                    focus.position = position;
+                }
+            }
             GimbalCommand::SetHand(hand) => {
                 self.send(vendor::hand(hand))?;
                 shared.status().hand = Some(hand);
@@ -886,6 +921,9 @@ fn commands_loop(
                             | GimbalCommand::SetVoiceRange(_)
                             | GimbalCommand::SetSoundSource(_)
                             | GimbalCommand::SetHdr(_)
+                            | GimbalCommand::SetAutoFocus(_)
+                            | GimbalCommand::SetFocusMode(_)
+                            | GimbalCommand::SetFocusPosition(_)
                             | GimbalCommand::SelectPoint { .. }
                             | GimbalCommand::SelectObject(_)
                             | GimbalCommand::CancelTarget
@@ -919,6 +957,7 @@ fn commands_loop(
                     status.sound_source,
                     status.hdr,
                     status.frame_rate,
+                    status.focus,
                     status.object_framing,
                 );
                 // Unknown values (such as the switching value 6) keep the old state.
@@ -928,6 +967,7 @@ fn commands_loop(
                 status.sound_source = view.sound_source.or(status.sound_source);
                 status.hdr = view.hdr.or(status.hdr);
                 status.frame_rate = view.frame_rate.or(status.frame_rate);
+                status.focus = view.focus.or(status.focus);
                 // Another app may turn tracking on later in a mode we cannot read.
                 if view.ai_mode.is_some_and(|mode| mode != AiMode::Human) {
                     status.tracking_mode = None;
@@ -946,6 +986,7 @@ fn commands_loop(
                         status.sound_source,
                         status.hdr,
                         status.frame_rate,
+                        status.focus,
                         status.object_framing,
                     );
                 drop(status);
@@ -1048,6 +1089,7 @@ pub(super) struct View {
     pub sound_source: Option<bool>,
     pub hdr: Option<bool>,
     pub frame_rate: Option<u8>,
+    pub focus: Option<Focus>,
     pub object_framing: Option<ObjectFraming>,
 }
 
@@ -1073,6 +1115,15 @@ pub(super) fn zoom_terminal(descriptors: &[u8]) -> Option<(u8, u8)> {
         {
             Some(*terminal)
         }
+        _ => None,
+    })
+}
+
+/// The camera input terminal (focus and the other camera controls).
+#[cfg(target_os = "macos")]
+pub(super) fn camera_terminal(descriptors: &[u8]) -> Option<(u8, u8)> {
+    video_control_entities(descriptors, |descriptor| match descriptor {
+        [_, 0x24, 2, terminal, 1, 2, ..] => Some(*terminal),
         _ => None,
     })
 }
@@ -1175,6 +1226,7 @@ pub(super) fn report(xu: &mut Channel<impl Transport>) -> Vec<String> {
                 view.map(|v| v.hdr),
                 view.map(|v| v.frame_rate)
             ),
+            Feature::Focus => format!("{:?}", view.map(|v| v.focus)),
             Feature::ObjectTracking => format!(
                 "{:?} (None unless an object is tracked)",
                 view.map(|v| v.object_framing)
@@ -1259,5 +1311,20 @@ mod tests {
         assert_eq!(extension_unit(&descriptors[..28]), None);
         descriptors[6] = 2;
         assert_eq!(extension_unit(&descriptors), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn finds_the_camera_terminal() {
+        use super::camera_terminal;
+        // Interface 0, then a camera input terminal (id 1, type 0x0201).
+        let mut descriptors = vec![9, 4, 0, 0, 0, 0x0e, 1, 0, 0];
+        descriptors.extend_from_slice(&[
+            18, 0x24, 2, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0x2a, 0x0a, 0x02,
+        ]);
+        assert_eq!(camera_terminal(&descriptors), Some((0, 1)));
+        // An input terminal of another type (0x0202) is not the camera.
+        descriptors[13] = 2;
+        assert_eq!(camera_terminal(&descriptors), None);
     }
 }

@@ -26,9 +26,9 @@
 //! | 16.. | data, then padding |
 
 use super::{
-    AiMode, AutoZoom, Fov, GimbalCommand, Hand, ObjectFraming, PRESET_NAME_MAX, PRESET_SLOTS,
-    PresetPosition, TargetBox, TrackingMode, TrackingRange, TrackingSpeed, VoiceRange, ZONE_AREAS,
-    ZOOM_RATIO_MAX, Zone,
+    AiMode, AutoZoom, FOCUS_MAX, Focus, FocusMode, Fov, GimbalCommand, Hand, ObjectFraming,
+    PRESET_NAME_MAX, PRESET_SLOTS, PresetPosition, TargetBox, TrackingMode, TrackingRange,
+    TrackingSpeed, VoiceRange, ZONE_AREAS, ZOOM_RATIO_MAX, Zone,
 };
 
 /// GUID of the extension unit, as the UVC descriptor stores it.
@@ -848,6 +848,34 @@ pub fn read_frame_rate(data: &[u8]) -> Option<u8> {
     data.get(31).copied().filter(|fps| (1..=240).contains(fps))
 }
 
+/// What Auto Focus looks at (`02 36` to the camera, u32 0 Global, 1 Face).
+pub fn focus_mode(mode: FocusMode) -> Message {
+    let face = u32::from(mode == FocusMode::Face);
+    Message::new(CAMERA, [0x02, 0x36], face.to_le_bytes().to_vec())
+}
+
+/// Focus: status offset 13 the Auto Focus mode (0 Global, 1 Face), 14 Auto
+/// Focus (0 off, 1 on), 15 the manual position (0 to [`FOCUS_MAX`]). Other
+/// values were never seen.
+pub fn read_focus(data: &[u8]) -> Option<Focus> {
+    sleeping(data)?;
+    let mode = match *data.get(13)? {
+        0 => FocusMode::Global,
+        1 => FocusMode::Face,
+        _ => return None,
+    };
+    let auto = match *data.get(14)? {
+        value @ 0..=1 => value == 1,
+        _ => return None,
+    };
+    let position = data.get(15).copied().filter(|&p| p <= FOCUS_MAX)?;
+    Some(Focus {
+        auto,
+        mode,
+        position,
+    })
+}
+
 fn hand_setting(key: u32, value: &[u8]) -> Message {
     let mut data = key.to_le_bytes().to_vec();
     data.extend_from_slice(value);
@@ -1632,6 +1660,47 @@ mod tests {
             assert_eq!(read_frame_rate(&block), fps, "offset 31 = {value}");
         }
         assert_eq!(read_frame_rate(&block[..31]), None);
+
+        // Focus mode writes and status offsets 13-15 from the 2026-11-26 capture.
+        for (mode, seq, captured) in [
+            (
+                FocusMode::Global,
+                0x60,
+                "aa2560010c00973d0a0202360400be0700000000",
+            ),
+            (
+                FocusMode::Face,
+                0x6d,
+                "aa256d010c0006c70a0202360400bffb01000000",
+            ),
+        ] {
+            let mut message = focus_mode(mode);
+            (message.seq, message.channel) = (seq, 1);
+            assert_eq!(message.encode().to_vec(), padded(captured), "{mode:?}");
+        }
+        let mut block = status(0, 1);
+        block[13..16].copy_from_slice(&[1, 1, 0x31]);
+        let face = Focus {
+            auto: true,
+            mode: FocusMode::Face,
+            position: 0x31,
+        };
+        assert_eq!(read_focus(&block), Some(face));
+        block[13..16].copy_from_slice(&[0, 0, 100]);
+        assert_eq!(
+            read_focus(&block),
+            Some(Focus {
+                auto: false,
+                mode: FocusMode::Global,
+                position: 100,
+            })
+        );
+        for (offset, value) in [(13, 2), (14, 2), (15, 101), (15, 0xff)] {
+            let mut bad = block.clone();
+            bad[offset] = value;
+            assert_eq!(read_focus(&bad), None, "offset {offset} = {value}");
+        }
+        assert_eq!(read_focus(&block[..15]), None);
 
         assert_gimbal_write(&hand(Hand::Left), [0x44, 0x20], "0400000001");
         assert_gimbal_write(&hand(Hand::Right), [0x44, 0x20], "0400000000");

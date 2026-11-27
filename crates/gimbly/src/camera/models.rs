@@ -39,6 +39,7 @@ pub const MODELS: &[Model] = &[Model {
         Feature::ZoneTracking,
         Feature::Hdr,
         Feature::Focus,
+        Feature::Exposure,
     ],
     standby_picture: true,
 }];
@@ -88,10 +89,12 @@ pub enum Feature {
     Hdr,
     /// The Focus section on the Image tab: Auto Focus, its mode, manual focus.
     Focus,
+    /// The Exposure section and Anti-Flicker on the Image tab.
+    Exposure,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 16] = [
+    pub const ALL: [Feature; 17] = [
         Self::Gimbal,
         Self::Zoom,
         Self::FieldOfView,
@@ -108,6 +111,7 @@ impl Feature {
         Self::ZoneTracking,
         Self::Hdr,
         Self::Focus,
+        Self::Exposure,
     ];
 
     /// The name the UI and `docs/devices.md` use.
@@ -129,6 +133,7 @@ impl Feature {
             Self::ZoneTracking => "Zone Tracking",
             Self::Hdr => "HDR",
             Self::Focus => "Focus",
+            Self::Exposure => "Exposure",
         }
     }
 }
@@ -162,6 +167,10 @@ impl GimbalCommand {
             SetSoundSource(_) => &[Feature::SoundSource],
             SetHdr(_) => &[Feature::Hdr],
             SetAutoFocus(_) | SetFocusMode(_) | SetFocusPosition(_) => &[Feature::Focus],
+            SetAutoExposure(_) | SetExposureMode(_) | SetShutter(_) | SetIso(_)
+            | SetCompensation(_) | SetIsoLimits(..) | SetExposureCurve(_) | SetAntiFlicker(_) => {
+                &[Feature::Exposure]
+            }
             SelectPoint { .. } | SelectObject(_) | CancelTarget | SetObjectFraming(_) => {
                 &[Feature::ObjectTracking]
             }

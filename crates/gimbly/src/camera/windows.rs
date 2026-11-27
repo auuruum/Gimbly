@@ -7,7 +7,7 @@
 //! Standard zoom uses `IAMCameraControl`. The Tiny 3 Lite uses vendor
 //! controls through the camera's UVC extension unit.
 
-use super::control::{AbsoluteZoom, Channel, Transport, control_loop, zoom_loop};
+use super::control::{AbsoluteZoom, Channel, Processing, Transport, control_loop, zoom_loop};
 use super::preview::YuvRange;
 use super::{CaptureConfig, DeviceInfo, Shared, VideoMode, Worker, ZoomRange, parse_usb_ids};
 use super::{frames::Frames, mjpeg, queue, vendor};
@@ -15,7 +15,8 @@ use gimbly_vcam_shm::Nv12View;
 use std::time::Instant;
 use windows::Win32::Media::DirectShow::{
     CameraControl_Flags_Auto, CameraControl_Flags_Manual, CameraControl_Focus, CameraControl_Zoom,
-    IAMCameraControl,
+    IAMCameraControl, IAMVideoProcAmp, VideoProcAmp_BacklightCompensation,
+    VideoProcAmp_Flags_Manual, VideoProcAmp_Gain,
 };
 use windows::Win32::Media::KernelStreaming::{
     IKsControl, IKsTopologyInfo, KSIDENTIFIER_0_0, KSNODETYPE_DEV_SPECIFIC, KSP_NODE,
@@ -550,9 +551,11 @@ struct Xu {
     node: u32,
     /// Standard camera-terminal controls (focus).
     camera: Option<IAMCameraControl>,
+    /// Standard processing-unit controls (exposure).
+    video: Option<IAMVideoProcAmp>,
 }
 
-// SAFETY: both controls come from a media source opened on a thread in the
+// SAFETY: all controls come from a media source opened on a thread in the
 // multithreaded apartment and are only used from threads that joined it
 // (see `control_loop`); kernel-streaming property calls are free-threaded.
 unsafe impl Send for Xu {}
@@ -563,6 +566,7 @@ impl Xu {
         let control: IKsControl = source.cast().ok()?;
         let topology: IKsTopologyInfo = source.cast().ok()?;
         let camera: Option<IAMCameraControl> = source.cast().ok();
+        let video: Option<IAMVideoProcAmp> = source.cast().ok();
         // SAFETY: plain topology queries.
         let nodes = unsafe { topology.NumNodes() }.ok()?;
         (0..nodes)
@@ -571,6 +575,7 @@ impl Xu {
                 control: control.clone(),
                 node,
                 camera: camera.clone(),
+                video: video.clone(),
             })
             .find_map(|xu| Channel::open(xu).ok())
     }
@@ -646,6 +651,39 @@ impl Transport for Xu {
             )
         }
         .map_err(|e| format!("Focus failed: {e}"))
+    }
+
+    fn get_processing(&mut self, control: Processing) -> Result<i32, String> {
+        let video = self
+            .video
+            .as_ref()
+            .ok_or("The camera has no exposure control")?;
+        let (mut value, mut flags) = (0, 0);
+        // SAFETY: out-pointers are valid locals.
+        unsafe { video.Get(video_property(control), &mut value, &mut flags) }
+            .map_err(|e| format!("Exposure read failed: {e}"))?;
+        Ok(value)
+    }
+
+    fn set_processing(&mut self, control: Processing, value: i32) -> Result<(), String> {
+        let video = self
+            .video
+            .as_ref()
+            .ok_or("The camera has no exposure control")?;
+        // SAFETY: plain value call; the driver rejects values out of range.
+        unsafe { video.Set(video_property(control), value, VideoProcAmp_Flags_Manual.0) }
+            .map_err(|e| format!("Exposure failed: {e}"))
+    }
+}
+
+/// The `IAMVideoProcAmp` property for a processing unit control. DirectShow
+/// names no power line property; the proxy passes the kernel-streaming id
+/// `KSPROPERTY_VIDEOPROCAMP_POWERLINE_FREQUENCY` (13) through.
+fn video_property(control: Processing) -> i32 {
+    match control {
+        Processing::Backlight => VideoProcAmp_BacklightCompensation.0,
+        Processing::Gain => VideoProcAmp_Gain.0,
+        Processing::PowerLine => 13,
     }
 }
 

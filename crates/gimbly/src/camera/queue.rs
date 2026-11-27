@@ -43,6 +43,11 @@ fn continuous(command: &Command) -> Option<u8> {
         Command::SetZoom(_) => Some(2),
         Command::SetTransform(_) => Some(3),
         Command::Gimbal(GimbalCommand::SetFocusPosition(_)) => Some(4),
+        Command::Gimbal(GimbalCommand::SetShutter(_)) => Some(5),
+        Command::Gimbal(GimbalCommand::SetIso(_)) => Some(6),
+        Command::Gimbal(GimbalCommand::SetCompensation(_)) => Some(7),
+        Command::Gimbal(GimbalCommand::SetIsoLimits(..)) => Some(8),
+        Command::Gimbal(GimbalCommand::SetExposureCurve(_)) => Some(9),
         _ => None,
     }
 }

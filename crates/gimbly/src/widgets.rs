@@ -9,6 +9,8 @@ use egui_phosphor::regular as icon;
 
 pub const BUTTON_HEIGHT: f32 = 40.0;
 const SLIDER_TRACK: Color32 = Color32::from_rgb(0x08, 0x0A, 0x0B);
+const SPIN_EDGE: Color32 = Color32::from_rgb(0x0F, 0x0F, 0x11);
+const SPIN_ARROW_BOX: Color32 = Color32::from_rgb(0x37, 0x3A, 0x3D);
 
 fn hovered(ui: &Ui, response: &Response) -> bool {
     ui.is_enabled() && response.hovered()
@@ -469,4 +471,165 @@ pub fn band(ui: &mut Ui, color: Color32, margin: egui::Margin, add: impl FnOnce(
             ui.set_width(ui.available_width());
             add(ui);
         });
+}
+
+/// Read-only number field with up/down arrows. Returns +1 or -1 when an
+/// arrow is clicked or the mouse wheel turns over it.
+pub fn spin_box(ui: &mut Ui, rect: Rect, text: &str) -> Option<f32> {
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        CornerRadius::same(5),
+        SECTION,
+        Stroke::new(1.0, SPIN_EDGE),
+        StrokeKind::Inside,
+    );
+    painter.text(
+        pos2(rect.left() + 10.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        text,
+        font(13.0),
+        if ui.is_enabled() { TEXT } else { TEXT_FAINT },
+    );
+    let mut step = None;
+    for (i, (glyph, direction)) in [(icon::CARET_UP, 1.0), (icon::CARET_DOWN, -1.0)]
+        .into_iter()
+        .enumerate()
+    {
+        let arrow = Rect::from_min_size(
+            pos2(rect.right() - 15.0, rect.top() + 3.0 + i as f32 * 10.0),
+            vec2(11.0, 9.0),
+        );
+        let response = ui.interact(arrow, ui.id().with(("spin", i)), Sense::click());
+        let fill = if ui.is_enabled() && response.hovered() {
+            BUTTON_HOVER
+        } else {
+            SPIN_ARROW_BOX
+        };
+        ui.painter().rect_filled(arrow, CornerRadius::same(2), fill);
+        ui.painter().text(
+            arrow.center(),
+            Align2::CENTER_CENTER,
+            glyph,
+            font(8.0),
+            TEXT_DIM,
+        );
+        if response.clicked() {
+            step = Some(direction);
+        }
+    }
+    let field = ui.interact(rect, ui.id().with("spin-field"), Sense::hover());
+    if field.hovered() && ui.is_enabled() {
+        let scroll = ui.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::MouseWheel { delta, .. } if delta.y != 0.0 => Some(delta.y),
+                _ => None,
+            })
+        });
+        if let Some(scroll) = scroll {
+            step = Some(scroll.signum());
+        }
+    }
+    step
+}
+
+/// What the user did in a [`number_box`].
+pub enum NumberInput {
+    /// An arrow or the mouse wheel: +1 or -1.
+    Step(f32),
+    /// Text typed and confirmed with Enter or by leaving the field.
+    Typed(String),
+}
+
+/// [`spin_box`] whose text can also be typed.
+pub fn number_box(ui: &mut Ui, rect: Rect, text: &str) -> Option<NumberInput> {
+    let step = spin_box(ui, rect, "");
+    let field = Rect::from_min_max(
+        pos2(rect.left() + 6.0, rect.top() + 2.0),
+        pos2(rect.right() - 18.0, rect.bottom() - 2.0),
+    );
+    let id = ui.id().with("number-box");
+    let mut buffer = ui
+        .data(|d| d.get_temp::<String>(id))
+        .unwrap_or_else(|| text.to_owned());
+    let color = if ui.is_enabled() { TEXT } else { TEXT_FAINT };
+    let response = ui.put(
+        field,
+        egui::TextEdit::singleline(&mut buffer)
+            .id(id)
+            .frame(egui::Frame::NONE)
+            .font(font(13.0))
+            .text_color(color)
+            .vertical_align(egui::Align::Center),
+    );
+    let typed = if response.has_focus() {
+        ui.data_mut(|d| d.insert_temp(id, buffer));
+        None
+    } else {
+        ui.data_mut(|d| d.remove::<String>(id));
+        response.lost_focus().then_some(NumberInput::Typed(buffer))
+    };
+    step.map(NumberInput::Step).or(typed)
+}
+
+/// Slider with two handles over `steps` evenly spaced stops; the upper
+/// handle always stays above the lower one. Returns the new stop indices
+/// while a handle is dragged or the track is clicked.
+pub fn range_slider(
+    ui: &mut Ui,
+    rect: Rect,
+    (lower, upper): (usize, usize),
+    steps: usize,
+    salt: &str,
+) -> Option<(usize, usize)> {
+    let enabled = ui.is_enabled();
+    let response = ui.interact(
+        rect,
+        ui.id().with(salt),
+        if enabled {
+            Sense::click_and_drag()
+        } else {
+            Sense::hover()
+        },
+    );
+    let radius = 6.5;
+    let (x0, x1) = (rect.left() + radius, rect.right() - radius);
+    let last = steps.saturating_sub(1).max(1) as f32;
+    let x = |i: usize| egui::lerp(x0..=x1, (i as f32 / last).clamp(0.0, 1.0));
+    let cy = rect.center().y;
+    let painter = ui.painter();
+    let track = Rect::from_min_max(pos2(rect.left(), cy - 2.0), pos2(rect.right(), cy + 2.0));
+    painter.rect_filled(track, CornerRadius::same(2), SLIDER_TRACK);
+    let fill = Rect::from_min_max(pos2(x(lower), track.top()), pos2(x(upper), track.bottom()));
+    painter.rect_filled(
+        fill,
+        CornerRadius::same(2),
+        if enabled { ACCENT } else { TEXT_FAINT },
+    );
+    for i in [lower, upper] {
+        painter.circle_filled(
+            pos2(x(i), cy),
+            radius,
+            if enabled { Color32::WHITE } else { TEXT_FAINT },
+        );
+    }
+    let pointer = response.interact_pointer_pos()?;
+    let handle_id = response.id.with("handle");
+    if ui.input(|i| i.pointer.primary_pressed()) {
+        // The nearer handle; past either end, that end's handle.
+        let upper_handle =
+            (pointer.x - x(upper)).abs() < (pointer.x - x(lower)).abs() || pointer.x > x(upper);
+        ui.data_mut(|d| d.insert_temp(handle_id, upper_handle && pointer.x >= x(lower)));
+    }
+    if !(response.dragged() || response.clicked()) || steps < 2 {
+        return None;
+    }
+    let upper_handle = ui.data(|d| d.get_temp::<bool>(handle_id)).unwrap_or(false);
+    let stop = (((pointer.x - x0) / (x1 - x0)).clamp(0.0, 1.0) * last).round() as usize;
+    let next = if upper_handle {
+        (lower, stop.max(lower + 1).min(steps - 1))
+    } else {
+        (stop.min(upper.saturating_sub(1)), upper)
+    };
+    (next != (lower, upper)).then_some(next)
 }

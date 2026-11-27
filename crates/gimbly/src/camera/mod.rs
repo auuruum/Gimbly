@@ -243,6 +243,15 @@ pub struct SessionStatus {
     pub frame_rate: Option<u8>,
     /// Focus settings the camera reports; `None` until read.
     pub focus: Option<Focus>,
+    /// Auto Exposure, the manual shutter and ISO, compensation and the ISO
+    /// limits; `None` until read.
+    pub exposure: Option<Exposure>,
+    /// What Auto Exposure meters on; `None` until read.
+    pub exposure_mode: Option<FocusMode>,
+    /// The manual exposure curve points; `None` until read.
+    pub exposure_curve: Option<Vec<[u8; 2]>>,
+    /// The Anti-Flicker setting the camera reports; `None` until read.
+    pub anti_flicker: Option<AntiFlicker>,
     /// The hand Hand Tracking follows; `None` until read.
     pub hand: Option<Hand>,
     /// The Hand Tracking range being edited. `Some` exactly while the camera
@@ -345,6 +354,21 @@ pub enum GimbalCommand {
     SetFocusMode(FocusMode),
     /// Manual focus position, 0 to [`FOCUS_MAX`].
     SetFocusPosition(u8),
+    /// Auto Exposure on, or off at the camera's stored manual shutter.
+    SetAutoExposure(bool),
+    /// What Auto Exposure meters on (the same Global/Face choice as focus).
+    SetExposureMode(FocusMode),
+    /// Manual shutter in the camera's units of 100 µs (see [`SHUTTER_SPEEDS`]).
+    SetShutter(u32),
+    /// Manual ISO, 100 to [`ISO_MAX`].
+    SetIso(u16),
+    /// Exposure compensation, 0 to [`COMPENSATION_MAX`] (thirds of a stop; 9 is 0 EV).
+    SetCompensation(u8),
+    /// The ISO range Auto Exposure stays in, from [`ISO_LIMITS`].
+    SetIsoLimits(u16, u16),
+    /// Manual exposure curve points between the fixed ends (0, 0) and (255, 255).
+    SetExposureCurve(Vec<[u8; 2]>),
+    SetAntiFlicker(AntiFlicker),
     SetHand(Hand),
     /// Read the Hand Tracking range and put the camera in its edit state.
     OpenHandRange,
@@ -533,6 +557,61 @@ pub enum AiMode {
 
 /// The highest manual focus position (UVC focus range of the Tiny 3 Lite).
 pub const FOCUS_MAX: u8 = 100;
+
+/// Manual shutter speeds the official app offers on the Tiny 3 Lite at
+/// 60 fps, slowest first: the denominator shown (1/x s) and the value sent,
+/// in units of 100 µs.
+pub const SHUTTER_SPEEDS: [(u16, u32); 20] = [
+    (60, 167),
+    (80, 125),
+    (100, 100),
+    (120, 83),
+    (160, 63),
+    (200, 50),
+    (240, 42),
+    (320, 31),
+    (400, 25),
+    (500, 20),
+    (640, 16),
+    (800, 13),
+    (1000, 10),
+    (1250, 8),
+    (1600, 6),
+    (2000, 5),
+    (2500, 4),
+    (3200, 3),
+    (5000, 2),
+    (6400, 1),
+];
+
+/// The highest manual ISO (the UVC gain is ISO / 100).
+pub const ISO_MAX: u16 = 6400;
+/// The steps of the Auto Exposure ISO limits.
+pub const ISO_LIMITS: [u16; 8] = [100, 200, 400, 800, 1600, 3200, 6400, 12800];
+/// The highest compensation value (+3 EV); 9 is 0 EV, each step a third of a stop.
+pub const COMPENSATION_MAX: u8 = 18;
+pub const COMPENSATION_ZERO: u8 = 9;
+
+/// Exposure settings read from the camera.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Exposure {
+    pub auto: bool,
+    /// Manual shutter in units of 100 µs, kept while Auto Exposure is on.
+    pub shutter: u32,
+    /// Manual ISO, kept while Auto Exposure is on.
+    pub iso: u16,
+    pub compensation: u8,
+    /// Auto Exposure's ISO range (lower, upper).
+    pub iso_limits: (u16, u16),
+}
+
+/// Anti-Flicker: the mains frequency exposure avoids beating with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AntiFlicker {
+    Off,
+    Hz50,
+    Hz60,
+}
 
 /// What Auto Focus looks at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

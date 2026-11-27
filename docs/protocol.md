@@ -21,6 +21,7 @@ Every block is 60 bytes.
 | --- | --- |
 | 2 | Framed messages (below): `SET_CUR` sends one, `GET_CUR` reads the reply |
 | 6 | Plain blocks: `SET_CUR` for view and AI settings, `GET_CUR` for the status block |
+| 16 | `GET_CUR`: the exposure curve (see [Exposure](#exposure)) |
 
 Framed message on selector 2 (little-endian):
 
@@ -56,7 +57,9 @@ bytes. `u32`, `i16` and `f32` are little-endian.
 | --- | --- | --- |
 | 0-1 | block marker | `2e 00` |
 | 2 | asleep | 0 awake, 1 asleep |
+| 3 | Anti-Flicker | 0 off, 1 50 Hz, 2 60 Hz |
 | 6 | HDR | 0 off, 1 on |
+| 7 | Auto Exposure Mode | 0 Global, 1 Face |
 | 13 | Auto Focus Mode | 0 Global, 1 Face |
 | 14 | Auto Focus | 0 off, 1 on |
 | 15 | Manual Focus position | 0 to 100 |
@@ -192,6 +195,35 @@ plain UVC requests on macOS.
 | Read | status block offsets 13, 14 and 15 | |
 
 Note: [focus](clean-room/2026-11-26-focus.md).
+
+## Exposure
+
+Shutter, the ISO limits and Auto Exposure are vendor messages to the camera
+(`02`). Manual ISO, compensation and Anti-Flicker are the standard UVC
+processing unit controls, written through `IAMVideoProcAmp` on Windows, V4L2
+on Linux and plain UVC requests on macOS.
+
+| Action | Message | Data |
+| --- | --- | --- |
+| Auto Exposure on | `82 29 → 02` | u8 `02`, u32 `1` |
+| Auto Exposure off | `42 24 → 02` (meaning unknown), read `42 29`, then `82 29` | `42 24`: u32 `1`; `82 29`: u8 `01`, u32 the shutter read back |
+| Read exposure | `42 29 → 02`, reply | u8 1 manual or 2 auto, u32 shutter in 100 µs (kept while auto) |
+| Shutter | `82 29 → 02` | u8 `01`, u32 shutter in 100 µs |
+| ISO limits | `c2 3d → 02` | u32 lower, u32 upper (100, 200 … 12800), 8 more bytes (Gimbly sends u32 100, u32 6400) |
+| Read ISO limits | `82 3d → 02`, reply | u32 lower, u32 upper, u32 100, u32 6400 |
+| Auto Exposure Mode | selector 6 block `03 01 vv` | 0 Global, 1 Face; status offset 7 |
+| Exposure curve | selector 6 block `26 LL 01 NN` + NN points | `LL` = 2 + 2·NN; each point u8 x, u8 y (0–255) between the fixed ends |
+| Read curve | selector 16 `GET_CUR` | u8 version (0 or 1), u8 NN, the points |
+| Manual ISO | UVC `PU_GAIN_CONTROL` | u16 ISO / 100, 1 to 64 |
+| Compensation | UVC `PU_BACKLIGHT_COMPENSATION_CONTROL` | u16 0 to 18, 9 is 0 EV, steps of 1/3 EV; applied only with Auto Exposure on |
+| Anti-Flicker | UVC `PU_POWER_LINE_FREQUENCY_CONTROL` | 0 off, 1 50 Hz, 2 60 Hz; applied only with Auto Exposure on; status offset 3 |
+
+Shutter speeds the official app offers at 60 fps and their values: 1/60
+167, 1/80 125, 1/100 100, 1/120 83, 1/160 63, 1/200 50, 1/240 42, 1/320
+31, 1/400 25, 1/500 20, 1/640 16, 1/800 13, 1/1000 10, 1/1250 8, 1/1600 6,
+1/2000 5, 1/2500 4, 1/3200 3, 1/5000 2, 1/6400 1.
+
+Note: [exposure](clean-room/2026-11-27-exposure.md).
 
 ## Zone Tracking
 

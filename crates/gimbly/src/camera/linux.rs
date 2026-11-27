@@ -1,7 +1,7 @@
 //! V4L2 capture and UVC controls. The capture and control handles use
 //! separate file descriptors so slow USB transactions never hold up frames.
 
-use super::control::{self, AbsoluteZoom, Channel, Transport};
+use super::control::{self, AbsoluteZoom, Channel, Processing, Transport};
 use super::frames::Frames;
 use super::preview::YuvRange;
 use super::{CaptureConfig, DeviceInfo, VideoMode, Worker, ZoomRange, queue, vendor};
@@ -262,6 +262,28 @@ impl Transport for Xu {
         self.device
             .write_control_raw(Cid::FOCUS_ABSOLUTE, position.into())
             .map_err(|e| format!("Focus failed: {e}"))
+    }
+
+    // uvcvideo maps the processing unit's controls to V4L2 controls with the
+    // same values.
+    fn get_processing(&mut self, control: Processing) -> Result<i32, String> {
+        self.device
+            .read_control_raw(processing_cid(control))
+            .map_err(|e| format!("Exposure read failed: {e}"))
+    }
+
+    fn set_processing(&mut self, control: Processing, value: i32) -> Result<(), String> {
+        self.device
+            .write_control_raw(processing_cid(control), value)
+            .map_err(|e| format!("Exposure failed: {e}"))
+    }
+}
+
+fn processing_cid(control: Processing) -> Cid {
+    match control {
+        Processing::Backlight => Cid::BACKLIGHT_COMPENSATION,
+        Processing::Gain => Cid::GAIN,
+        Processing::PowerLine => Cid::POWER_LINE_FREQUENCY,
     }
 }
 

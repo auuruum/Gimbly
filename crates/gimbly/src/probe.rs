@@ -12,8 +12,8 @@
 //! mkv|mp4|mov`.
 
 use crate::camera::{
-    self, AiMode, AutoZoom, CaptureConfig, Command, FocusMode, Fov, GimbalCommand, Hand,
-    SessionState, TrackingMode, TrackingSpeed, VoiceRange,
+    self, AiMode, AntiFlicker, AutoZoom, CaptureConfig, Command, FocusMode, Fov, GimbalCommand,
+    Hand, SessionState, TrackingMode, TrackingSpeed, VoiceRange,
 };
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -69,6 +69,35 @@ fn control_step(step: &str) -> Option<Command> {
         ["af", "global"] => GimbalCommand::SetFocusMode(FocusMode::Global),
         ["af", "face"] => GimbalCommand::SetFocusMode(FocusMode::Face),
         ["focus", position] => GimbalCommand::SetFocusPosition(position.parse().ok()?),
+        ["ae", "on"] => GimbalCommand::SetAutoExposure(true),
+        ["ae", "off"] => GimbalCommand::SetAutoExposure(false),
+        ["ae", "global"] => GimbalCommand::SetExposureMode(FocusMode::Global),
+        ["ae", "face"] => GimbalCommand::SetExposureMode(FocusMode::Face),
+        // Shutter by its denominator, e.g. `shutter:240` for 1/240 s.
+        ["shutter", speed] => {
+            let speed: u16 = speed.parse().ok()?;
+            let (_, units) = camera::SHUTTER_SPEEDS.iter().find(|(s, _)| *s == speed)?;
+            GimbalCommand::SetShutter(*units)
+        }
+        ["iso", iso] => GimbalCommand::SetIso(iso.parse().ok()?),
+        ["ev", value] => GimbalCommand::SetCompensation(value.parse().ok()?),
+        ["isolimits", lower, upper] => {
+            GimbalCommand::SetIsoLimits(lower.parse().ok()?, upper.parse().ok()?)
+        }
+        ["flicker", "off"] => GimbalCommand::SetAntiFlicker(AntiFlicker::Off),
+        ["flicker", "50"] => GimbalCommand::SetAntiFlicker(AntiFlicker::Hz50),
+        ["flicker", "60"] => GimbalCommand::SetAntiFlicker(AntiFlicker::Hz60),
+        // Curve points as `curve:x,y;x,y`; `curve` alone clears it.
+        ["curve"] => GimbalCommand::SetExposureCurve(Vec::new()),
+        ["curve", points] => GimbalCommand::SetExposureCurve(
+            points
+                .split(';')
+                .map(|p| {
+                    let (x, y) = p.split_once(',')?;
+                    Some([x.parse().ok()?, y.parse().ok()?])
+                })
+                .collect::<Option<_>>()?,
+        ),
         ["left"] => GimbalCommand::SetHand(Hand::Left),
         ["right"] => GimbalCommand::SetHand(Hand::Right),
         ["range"] => GimbalCommand::OpenHandRange,
@@ -123,7 +152,7 @@ fn gimbal(session: &camera::Session, args: &[String], virtual_camera: bool) -> i
             .and_then(|f| crate::snapshot::save(&f, Path::new(dir), [0, 0, 0, 0, 0, step as u16]));
         let status = session.status();
         println!(
-            "step {step}: {saved:?}, vendor control {}, sleeping {}, AI mode {:?} {:?}, auto zoom {:?}, speed {:?}, voice range {:?}, sound source {:?}, HDR {:?}, focus {:?}, hand {:?} {:?}, zone {:?} {:?}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
+            "step {step}: {saved:?}, vendor control {}, sleeping {}, AI mode {:?} {:?}, auto zoom {:?}, speed {:?}, voice range {:?}, sound source {:?}, HDR {:?}, focus {:?}, exposure {:?} mode {:?} curve {:?} anti-flicker {:?}, hand {:?} {:?}, zone {:?} {:?}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
             status.vendor_control,
             status.sleeping,
             status.ai_mode,
@@ -134,6 +163,10 @@ fn gimbal(session: &camera::Session, args: &[String], virtual_camera: bool) -> i
             status.sound_source,
             status.hdr,
             status.focus,
+            status.exposure,
+            status.exposure_mode,
+            status.exposure_curve,
+            status.anti_flicker,
             status.hand,
             status.hand_range,
             status.zone_tracking,

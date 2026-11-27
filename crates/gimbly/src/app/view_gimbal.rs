@@ -15,8 +15,7 @@ use crate::joystick::{self, Drag, DragState};
 use crate::theme::*;
 use crate::widgets::*;
 use eframe::egui::{
-    self, Align, Align2, Color32, CornerRadius, Layout, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
-    pos2, vec2,
+    self, Align, Align2, Color32, CornerRadius, Layout, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2,
 };
 use egui_phosphor::regular as icon;
 use std::time::{Duration, Instant};
@@ -27,8 +26,6 @@ const ZOOM_HOLD: Duration = Duration::from_millis(1500);
 /// Zoom hotkeys and the spin box arrows change the ratio by this much.
 pub const ZOOM_STEP: f32 = 0.1;
 
-const SPIN_EDGE: Color32 = Color32::from_rgb(0x0F, 0x0F, 0x11);
-const SPIN_ARROW_BOX: Color32 = Color32::from_rgb(0x37, 0x3A, 0x3D);
 const SIDE_TAB: Color32 = Color32::from_rgb(0x2B, 0x2D, 0x2F);
 
 /// UI state of the gimbal sections.
@@ -982,66 +979,6 @@ pan {:.1}°, tilt {:.1}°, zoom {:.2}x",
             self.set_zoom_ratio(ratio + direction * ZOOM_STEP);
         }
     }
-}
-
-/// Read-only number field with up/down arrows. Returns +1 or -1 when an
-/// arrow is clicked or the mouse wheel turns over it.
-fn spin_box(ui: &mut Ui, rect: Rect, text: &str) -> Option<f32> {
-    let painter = ui.painter();
-    painter.rect(
-        rect,
-        CornerRadius::same(5),
-        SECTION,
-        Stroke::new(1.0, SPIN_EDGE),
-        StrokeKind::Inside,
-    );
-    painter.text(
-        pos2(rect.left() + 10.0, rect.center().y),
-        Align2::LEFT_CENTER,
-        text,
-        font(13.0),
-        if ui.is_enabled() { TEXT } else { TEXT_FAINT },
-    );
-    let mut step = None;
-    for (i, (glyph, direction)) in [(icon::CARET_UP, 1.0), (icon::CARET_DOWN, -1.0)]
-        .into_iter()
-        .enumerate()
-    {
-        let arrow = Rect::from_min_size(
-            pos2(rect.right() - 15.0, rect.top() + 3.0 + i as f32 * 10.0),
-            vec2(11.0, 9.0),
-        );
-        let response = ui.interact(arrow, ui.id().with(("spin", i)), Sense::click());
-        let fill = if ui.is_enabled() && response.hovered() {
-            BUTTON_HOVER
-        } else {
-            SPIN_ARROW_BOX
-        };
-        ui.painter().rect_filled(arrow, CornerRadius::same(2), fill);
-        ui.painter().text(
-            arrow.center(),
-            Align2::CENTER_CENTER,
-            glyph,
-            font(8.0),
-            TEXT_DIM,
-        );
-        if response.clicked() {
-            step = Some(direction);
-        }
-    }
-    let field = ui.interact(rect, ui.id().with("spin-field"), Sense::hover());
-    if field.hovered() && ui.is_enabled() {
-        let scroll = ui.input(|i| {
-            i.events.iter().find_map(|e| match e {
-                egui::Event::MouseWheel { delta, .. } if delta.y != 0.0 => Some(delta.y),
-                _ => None,
-            })
-        });
-        if let Some(scroll) = scroll {
-            step = Some(scroll.signum());
-        }
-    }
-    step
 }
 
 /// The small rounded button in a section header, e.g. Coarse/Fine.

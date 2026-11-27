@@ -3,7 +3,7 @@
 //! `super::mjpeg`. USB endpoint-zero control uses
 //! IOKit through nusb and does not claim the video interface from AVFoundation.
 
-use super::control::{self, AbsoluteZoom, Channel, Transport};
+use super::control::{self, AbsoluteZoom, Channel, Processing, Transport};
 use super::frames::Frames;
 use super::{
     CaptureConfig, DeviceInfo, VideoMode, Worker, YuvRange, ZoomRange, mjpeg, queue, vendor,
@@ -233,6 +233,8 @@ struct Xu {
     index: u16,
     /// The camera terminal's control index (focus), if the camera has one.
     terminal: Option<u16>,
+    /// The processing unit's control index (exposure), if the camera has one.
+    processing: Option<u16>,
 }
 
 impl Xu {
@@ -243,10 +245,13 @@ impl Xu {
             .ok_or("UVC vendor extension unit not found")?;
         let terminal = control::camera_terminal(config.as_bytes())
             .map(|(interface, terminal)| u16::from_be_bytes([terminal, interface]));
+        let processing = control::processing_unit(config.as_bytes())
+            .map(|(interface, unit)| u16::from_be_bytes([unit, interface]));
         Channel::open(Self {
             usb,
             index: u16::from_be_bytes([unit, interface]),
             terminal,
+            processing,
         })
     }
 
@@ -283,6 +288,45 @@ impl Transport for Xu {
         let terminal = self.terminal.ok_or("The camera has no focus control")?;
         self.usb
             .write(terminal, 6, &u16::from(position).to_le_bytes())
+    }
+
+    // Plain UVC processing unit requests: 2-byte backlight and gain, 1-byte
+    // power line frequency.
+    fn get_processing(&mut self, control: Processing) -> Result<i32, String> {
+        let unit = self
+            .processing
+            .ok_or("The camera has no exposure control")?;
+        let mut bytes = [0; 2];
+        let len = processing_len(control);
+        let read = self
+            .usb
+            .read(unit, control.selector().into(), 0x81, &mut bytes[..len])?;
+        if read != len {
+            return Err("Exposure read returned a short value".into());
+        }
+        Ok(i32::from(u16::from_le_bytes(bytes)))
+    }
+
+    fn set_processing(&mut self, control: Processing, value: i32) -> Result<(), String> {
+        let unit = self
+            .processing
+            .ok_or("The camera has no exposure control")?;
+        let bytes = u16::try_from(value)
+            .map_err(|_| "Exposure value out of range")?
+            .to_le_bytes();
+        self.usb.write(
+            unit,
+            control.selector().into(),
+            &bytes[..processing_len(control)],
+        )
+    }
+}
+
+fn processing_len(control: Processing) -> usize {
+    if control == Processing::PowerLine {
+        1
+    } else {
+        2
     }
 }
 

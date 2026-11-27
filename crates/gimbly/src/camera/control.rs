@@ -4,9 +4,10 @@
 use super::queue::Receiver;
 use super::sleep::SleepReadback;
 use super::{
-    AiMode, Area, AutoZoom, Command, Composition, FOCUS_MAX, Feature, Focus, GimbalCommand, Hand,
-    ObjectFraming, PRESET_SLOTS, Preset, RangeField, Shared, TrackingMode, TrackingRange,
-    TrackingSpeed, VoiceRange, ZONE_AREAS, Zone, serial, vendor,
+    AiMode, AntiFlicker, Area, AutoZoom, COMPENSATION_MAX, Command, Composition, Exposure,
+    FOCUS_MAX, Feature, Focus, GimbalCommand, Hand, ISO_MAX, ObjectFraming, PRESET_SLOTS, Preset,
+    RangeField, Shared, TrackingMode, TrackingRange, TrackingSpeed, VoiceRange, ZONE_AREAS, Zone,
+    serial, vendor,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -21,6 +22,37 @@ pub(super) trait Transport {
     /// Standard UVC focus position (`CT_FOCUS_ABSOLUTE_CONTROL`).
     fn set_focus_position(&mut self, _position: u8) -> Result<(), String> {
         Err("Focus is not supported on this system".into())
+    }
+    /// Reads a standard UVC processing unit control.
+    fn get_processing(&mut self, _control: Processing) -> Result<i32, String> {
+        Err("Exposure is not supported on this system".into())
+    }
+    /// Writes a standard UVC processing unit control.
+    fn set_processing(&mut self, _control: Processing, _value: i32) -> Result<(), String> {
+        Err("Exposure is not supported on this system".into())
+    }
+}
+
+/// The UVC processing unit controls the Exposure section uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Processing {
+    /// `PU_BACKLIGHT_COMPENSATION_CONTROL` (1): exposure compensation, 0 to 18.
+    Backlight,
+    /// `PU_GAIN_CONTROL` (4): manual ISO / 100.
+    Gain,
+    /// `PU_POWER_LINE_FREQUENCY_CONTROL` (5): Anti-Flicker, 0 off, 1 50 Hz, 2 60 Hz.
+    PowerLine,
+}
+
+impl Processing {
+    /// The UVC control selector.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(super) fn selector(self) -> u8 {
+        match self {
+            Self::Backlight => 1,
+            Self::Gain => 4,
+            Self::PowerLine => 5,
+        }
     }
 }
 
@@ -49,6 +81,8 @@ impl<T: Transport> Channel<T> {
         let tracking_speed = self.read_tracking_speed().ok();
         let hand = self.read_hand().ok();
         let zone_tracking = self.read_zone_tracking().ok();
+        let exposure = self.read_exposure().ok();
+        let exposure_curve = self.read_exposure_curve().ok();
         let mut status = shared.status();
         status.ai_mode = view.and_then(|view| view.ai_mode);
         status.auto_zoom = view.and_then(|view| view.auto_zoom);
@@ -57,6 +91,10 @@ impl<T: Transport> Channel<T> {
         status.hdr = view.and_then(|view| view.hdr);
         status.frame_rate = view.and_then(|view| view.frame_rate);
         status.focus = view.and_then(|view| view.focus);
+        status.exposure_mode = view.and_then(|view| view.exposure_mode);
+        status.anti_flicker = view.and_then(|view| view.anti_flicker);
+        status.exposure = exposure;
+        status.exposure_curve = exposure_curve;
         status.object_framing = view.and_then(|view| view.object_framing);
         status.tracking_speed = tracking_speed;
         status.hand = hand;
@@ -147,8 +185,39 @@ impl<T: Transport> Channel<T> {
             hdr: vendor::read_hdr(block),
             frame_rate: vendor::read_frame_rate(block),
             focus: vendor::read_focus(block),
+            exposure_mode: vendor::read_exposure_mode(block),
+            anti_flicker: vendor::read_anti_flicker(block),
             object_framing: vendor::read_object_framing(block),
         })
+    }
+
+    /// Auto Exposure and the shutter (vendor), manual ISO and compensation
+    /// (UVC), and the ISO limits (vendor).
+    pub(super) fn read_exposure(&mut self) -> Result<Exposure, String> {
+        let state = self.request_from(vendor::CAMERA, vendor::READ_EXPOSURE, Vec::new())?;
+        let (auto, shutter) =
+            vendor::read_exposure(&state).ok_or("Camera returned an unknown exposure state")?;
+        let limits = self.request_from(vendor::CAMERA, vendor::READ_ISO_LIMITS, Vec::new())?;
+        let iso_limits =
+            vendor::read_iso_limits(&limits).ok_or("Camera returned unknown ISO limits")?;
+        let gain = self.transport.get_processing(Processing::Gain)?;
+        let iso = u16::try_from(gain.clamp(1, i32::from(ISO_MAX / 100)) * 100).unwrap_or(100);
+        let compensation = self.transport.get_processing(Processing::Backlight)?;
+        let compensation =
+            u8::try_from(compensation.clamp(0, i32::from(COMPENSATION_MAX))).unwrap_or(0);
+        Ok(Exposure {
+            auto,
+            shutter,
+            iso,
+            compensation,
+            iso_limits,
+        })
+    }
+
+    fn read_exposure_curve(&self) -> Result<Vec<[u8; 2]>, String> {
+        let (block, len) = self.get(vendor::SELECTOR_CURVE)?;
+        vendor::read_exposure_curve(&block[..len])
+            .ok_or_else(|| "Camera returned an invalid exposure curve".into())
     }
 
     /// Sets the camera's target report for the serial port (see
@@ -676,6 +745,79 @@ impl<T: Transport> Channel<T> {
                     focus.position = position;
                 }
             }
+            GimbalCommand::SetAutoExposure(on) => {
+                let shutter = if on {
+                    self.send(vendor::exposure(true, 1))?;
+                    None
+                } else {
+                    // Like the official app: read the stored shutter and send it back.
+                    self.send(vendor::before_manual_exposure())?;
+                    let state =
+                        self.request_from(vendor::CAMERA, vendor::READ_EXPOSURE, Vec::new())?;
+                    let (_, shutter) = vendor::read_exposure(&state)
+                        .ok_or("Camera returned an unknown exposure state")?;
+                    self.send(vendor::exposure(false, shutter))?;
+                    Some(shutter)
+                };
+                if let Some(exposure) = &mut shared.status().exposure {
+                    exposure.auto = on;
+                    exposure.shutter = shutter.unwrap_or(exposure.shutter);
+                }
+            }
+            GimbalCommand::SetExposureMode(mode) => {
+                self.set(vendor::SELECTOR_VIEW, &mut vendor::exposure_mode(mode))?;
+                shared.status().exposure_mode = Some(mode);
+            }
+            GimbalCommand::SetShutter(shutter) => {
+                let shutter = shutter.clamp(1, 10_000);
+                self.send(vendor::exposure(false, shutter))?;
+                if let Some(exposure) = &mut shared.status().exposure {
+                    exposure.shutter = shutter;
+                }
+            }
+            GimbalCommand::SetIso(iso) => {
+                let iso = iso.clamp(100, ISO_MAX) / 100 * 100;
+                self.transport
+                    .set_processing(Processing::Gain, i32::from(iso / 100))?;
+                if let Some(exposure) = &mut shared.status().exposure {
+                    exposure.iso = iso;
+                }
+            }
+            GimbalCommand::SetCompensation(value) => {
+                let value = value.min(COMPENSATION_MAX);
+                self.transport
+                    .set_processing(Processing::Backlight, i32::from(value))?;
+                if let Some(exposure) = &mut shared.status().exposure {
+                    exposure.compensation = value;
+                }
+            }
+            GimbalCommand::SetIsoLimits(lower, upper) => {
+                if !(super::ISO_LIMITS.contains(&lower)
+                    && super::ISO_LIMITS.contains(&upper)
+                    && lower < upper)
+                {
+                    return Err("Invalid ISO limits".into());
+                }
+                self.send(vendor::iso_limits(lower, upper))?;
+                if let Some(exposure) = &mut shared.status().exposure {
+                    exposure.iso_limits = (lower, upper);
+                }
+            }
+            GimbalCommand::SetExposureCurve(points) => {
+                let points = &points[..points.len().min(vendor::CURVE_POINTS_MAX)];
+                self.set(vendor::SELECTOR_VIEW, &mut vendor::exposure_curve(points))?;
+                shared.status().exposure_curve = Some(points.to_vec());
+            }
+            GimbalCommand::SetAntiFlicker(flicker) => {
+                let value = match flicker {
+                    AntiFlicker::Off => 0,
+                    AntiFlicker::Hz50 => 1,
+                    AntiFlicker::Hz60 => 2,
+                };
+                self.transport
+                    .set_processing(Processing::PowerLine, value)?;
+                shared.status().anti_flicker = Some(flicker);
+            }
             GimbalCommand::SetHand(hand) => {
                 self.send(vendor::hand(hand))?;
                 shared.status().hand = Some(hand);
@@ -924,6 +1066,8 @@ fn commands_loop(
                             | GimbalCommand::SetAutoFocus(_)
                             | GimbalCommand::SetFocusMode(_)
                             | GimbalCommand::SetFocusPosition(_)
+                            | GimbalCommand::SetExposureMode(_)
+                            | GimbalCommand::SetAntiFlicker(_)
                             | GimbalCommand::SelectPoint { .. }
                             | GimbalCommand::SelectObject(_)
                             | GimbalCommand::CancelTarget
@@ -958,6 +1102,8 @@ fn commands_loop(
                     status.hdr,
                     status.frame_rate,
                     status.focus,
+                    status.exposure_mode,
+                    status.anti_flicker,
                     status.object_framing,
                 );
                 // Unknown values (such as the switching value 6) keep the old state.
@@ -968,6 +1114,8 @@ fn commands_loop(
                 status.hdr = view.hdr.or(status.hdr);
                 status.frame_rate = view.frame_rate.or(status.frame_rate);
                 status.focus = view.focus.or(status.focus);
+                status.exposure_mode = view.exposure_mode.or(status.exposure_mode);
+                status.anti_flicker = view.anti_flicker.or(status.anti_flicker);
                 // Another app may turn tracking on later in a mode we cannot read.
                 if view.ai_mode.is_some_and(|mode| mode != AiMode::Human) {
                     status.tracking_mode = None;
@@ -987,6 +1135,8 @@ fn commands_loop(
                         status.hdr,
                         status.frame_rate,
                         status.focus,
+                        status.exposure_mode,
+                        status.anti_flicker,
                         status.object_framing,
                     );
                 drop(status);
@@ -1009,12 +1159,14 @@ fn commands_loop(
             }
             sleep_polled = Instant::now();
             // Opening or waking the stream can briefly interrupt replies.
-            let (retry_presets, retry_speed, retry_hand, retry_zone) = {
+            let (retry_presets, retry_speed, retry_hand, retry_zone, retry_exposure) = {
                 let status = shared.status();
                 if status.presets.is_some()
                     && status.tracking_speed.is_some()
                     && status.hand.is_some()
                     && status.zone_tracking.is_some()
+                    && status.exposure.is_some()
+                    && status.exposure_curve.is_some()
                 {
                     preset_retries = 0;
                 }
@@ -1024,10 +1176,21 @@ fn commands_loop(
                     retry && status.tracking_speed.is_none(),
                     retry && status.hand.is_none(),
                     retry && status.zone_tracking.is_none(),
+                    retry && (status.exposure.is_none() || status.exposure_curve.is_none()),
                 )
             };
-            if retry_presets || retry_speed || retry_hand || retry_zone {
+            if retry_presets || retry_speed || retry_hand || retry_zone || retry_exposure {
                 preset_retries += 1;
+            }
+            if retry_exposure {
+                if let Ok(exposure) = xu.read_exposure() {
+                    shared.status().exposure = Some(exposure);
+                    repaint();
+                }
+                if let Ok(curve) = xu.read_exposure_curve() {
+                    shared.status().exposure_curve = Some(curve);
+                    repaint();
+                }
             }
             if retry_zone && let Ok(on) = xu.read_zone_tracking() {
                 shared.status().zone_tracking = Some(on);
@@ -1090,6 +1253,8 @@ pub(super) struct View {
     pub hdr: Option<bool>,
     pub frame_rate: Option<u8>,
     pub focus: Option<Focus>,
+    pub exposure_mode: Option<super::FocusMode>,
+    pub anti_flicker: Option<AntiFlicker>,
     pub object_framing: Option<ObjectFraming>,
 }
 
@@ -1124,6 +1289,15 @@ pub(super) fn zoom_terminal(descriptors: &[u8]) -> Option<(u8, u8)> {
 pub(super) fn camera_terminal(descriptors: &[u8]) -> Option<(u8, u8)> {
     video_control_entities(descriptors, |descriptor| match descriptor {
         [_, 0x24, 2, terminal, 1, 2, ..] => Some(*terminal),
+        _ => None,
+    })
+}
+
+/// The processing unit (exposure, gain and the other picture controls).
+#[cfg(target_os = "macos")]
+pub(super) fn processing_unit(descriptors: &[u8]) -> Option<(u8, u8)> {
+    video_control_entities(descriptors, |descriptor| match descriptor {
+        [_, 0x24, 5, unit, ..] => Some(*unit),
         _ => None,
     })
 }
@@ -1227,6 +1401,13 @@ pub(super) fn report(xu: &mut Channel<impl Transport>) -> Vec<String> {
                 view.map(|v| v.frame_rate)
             ),
             Feature::Focus => format!("{:?}", view.map(|v| v.focus)),
+            Feature::Exposure => format!(
+                "{:?}, mode {:?}, anti-flicker {:?}, curve {:?}",
+                xu.read_exposure(),
+                view.map(|v| v.exposure_mode),
+                view.map(|v| v.anti_flicker),
+                xu.read_exposure_curve()
+            ),
             Feature::ObjectTracking => format!(
                 "{:?} (None unless an object is tracked)",
                 view.map(|v| v.object_framing)
@@ -1326,5 +1507,17 @@ mod tests {
         // An input terminal of another type (0x0202) is not the camera.
         descriptors[13] = 2;
         assert_eq!(camera_terminal(&descriptors), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn finds_the_processing_unit() {
+        use super::processing_unit;
+        // Interface 0, then a processing unit (id 3, source 1).
+        let mut descriptors = vec![9, 4, 0, 0, 0, 0x0e, 1, 0, 0];
+        descriptors.extend_from_slice(&[13, 0x24, 5, 3, 1, 0, 0, 3, 0x5f, 0x17, 0, 0, 0]);
+        assert_eq!(processing_unit(&descriptors), Some((0, 3)));
+        descriptors[11] = 6;
+        assert_eq!(processing_unit(&descriptors), None);
     }
 }

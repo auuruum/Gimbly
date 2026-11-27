@@ -26,9 +26,9 @@
 //! | 16.. | data, then padding |
 
 use super::{
-    AiMode, AutoZoom, FOCUS_MAX, Focus, FocusMode, Fov, GimbalCommand, Hand, ObjectFraming,
-    PRESET_NAME_MAX, PRESET_SLOTS, PresetPosition, TargetBox, TrackingMode, TrackingRange,
-    TrackingSpeed, VoiceRange, ZONE_AREAS, ZOOM_RATIO_MAX, Zone,
+    AiMode, AntiFlicker, AutoZoom, FOCUS_MAX, Focus, FocusMode, Fov, GimbalCommand, Hand,
+    ObjectFraming, PRESET_NAME_MAX, PRESET_SLOTS, PresetPosition, TargetBox, TrackingMode,
+    TrackingRange, TrackingSpeed, VoiceRange, ZONE_AREAS, ZOOM_RATIO_MAX, Zone,
 };
 
 /// GUID of the extension unit, as the UVC descriptor stores it.
@@ -53,7 +53,8 @@ const FLAG_REPLY: u8 = 0x08;
 pub const HOST: u8 = 0x0a;
 /// The gimbal's address.
 pub const GIMBAL: u8 = 0x04;
-const CAMERA: u8 = 0x02;
+/// The camera's (image pipeline's) address.
+pub const CAMERA: u8 = 0x02;
 
 /// Begins (data `0`) or ends (data `1`) manual gimbal movement.
 pub const CMD_MANUAL_MOVE: [u8; 2] = [0x44, 0x02];
@@ -876,6 +877,114 @@ pub fn read_focus(data: &[u8]) -> Option<Focus> {
     })
 }
 
+/// Sent before the manual exposure with data `1`; meaning unknown (see
+/// `docs/clean-room/2026-11-27-exposure.md`).
+const BEFORE_MANUAL_EXPOSURE: [u8; 2] = [0x42, 0x24];
+/// Reads the exposure state: u8 1 manual or 2 auto, u32 shutter (100 µs).
+pub const READ_EXPOSURE: [u8; 2] = [0x42, 0x29];
+const WRITE_EXPOSURE: [u8; 2] = [0x82, 0x29];
+/// Reads the ISO limits: u32 lower, u32 upper, then u32 100 and 6400.
+pub const READ_ISO_LIMITS: [u8; 2] = [0x82, 0x3d];
+const WRITE_ISO_LIMITS: [u8; 2] = [0xc2, 0x3d];
+/// The extension unit selector that returns the exposure curve.
+pub const SELECTOR_CURVE: u32 = 16;
+/// The most curve points one block holds.
+pub const CURVE_POINTS_MAX: usize = (MESSAGE_LEN - 4) / 2;
+
+pub fn before_manual_exposure() -> Message {
+    Message::new(CAMERA, BEFORE_MANUAL_EXPOSURE, 1u32.to_le_bytes().to_vec())
+}
+
+/// Auto Exposure on, or off with a manual shutter in units of 100 µs. The
+/// official app sends shutter 1 with Auto Exposure on; the camera keeps its
+/// stored manual shutter.
+pub fn exposure(auto: bool, shutter: u32) -> Message {
+    let mut data = vec![if auto { 2 } else { 1 }];
+    data.extend_from_slice(&if auto { 1 } else { shutter }.to_le_bytes());
+    Message::new(CAMERA, WRITE_EXPOSURE, data)
+}
+
+/// The reply to [`READ_EXPOSURE`]: Auto Exposure and the manual shutter.
+pub fn read_exposure(data: &[u8]) -> Option<(bool, u32)> {
+    let auto = match *data.first()? {
+        1 => false,
+        2 => true,
+        _ => return None,
+    };
+    let shutter = u32::from_le_bytes(data.get(1..5)?.try_into().ok()?);
+    (1..=10_000).contains(&shutter).then_some((auto, shutter))
+}
+
+/// The ISO range Auto Exposure stays in. The official app sends 8 more
+/// bytes that differ on every write; Gimbly sends the manual range the
+/// camera reports there (100 and 6400).
+pub fn iso_limits(lower: u16, upper: u16) -> Message {
+    let data = [u32::from(lower), u32::from(upper), 100, 6400]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+    Message::new(CAMERA, WRITE_ISO_LIMITS, data)
+}
+
+/// The reply to [`READ_ISO_LIMITS`]: (lower, upper), both from
+/// [`ISO_LIMITS`](super::ISO_LIMITS), lower below upper.
+pub fn read_iso_limits(data: &[u8]) -> Option<(u16, u16)> {
+    let value = |at: usize| -> Option<u16> {
+        let v = u32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?);
+        let v = u16::try_from(v).ok()?;
+        super::ISO_LIMITS.contains(&v).then_some(v)
+    };
+    let (lower, upper) = (value(0)?, value(4)?);
+    (lower < upper).then_some((lower, upper))
+}
+
+/// What Auto Exposure meters on (selector 6 key `03`).
+pub fn exposure_mode(mode: FocusMode) -> [u8; MESSAGE_LEN] {
+    view_block(&[0x03, 1, (mode == FocusMode::Face).into()])
+}
+
+/// Auto Exposure Mode: status offset 7, 0 Global and 1 Face.
+pub fn read_exposure_mode(data: &[u8]) -> Option<FocusMode> {
+    sleeping(data)?;
+    match *data.get(7)? {
+        0 => Some(FocusMode::Global),
+        1 => Some(FocusMode::Face),
+        _ => None,
+    }
+}
+
+/// Anti-Flicker: status offset 3, 0 off, 1 50 Hz, 2 60 Hz (the UVC power
+/// line frequency values).
+pub fn read_anti_flicker(data: &[u8]) -> Option<AntiFlicker> {
+    sleeping(data)?;
+    match *data.get(3)? {
+        0 => Some(AntiFlicker::Off),
+        1 => Some(AntiFlicker::Hz50),
+        2 => Some(AntiFlicker::Hz60),
+        _ => None,
+    }
+}
+
+/// The manual exposure curve (selector 6 key `26`): `01`, the point count,
+/// then each point's x and y. Points beyond [`CURVE_POINTS_MAX`] are dropped.
+pub fn exposure_curve(points: &[[u8; 2]]) -> [u8; MESSAGE_LEN] {
+    let points = &points[..points.len().min(CURVE_POINTS_MAX)];
+    let mut bytes = vec![0x26, (2 + 2 * points.len()) as u8, 1, points.len() as u8];
+    bytes.extend(points.iter().flatten());
+    view_block(&bytes)
+}
+
+/// The curve from [`SELECTOR_CURVE`]: a version byte (0 or 1), the point
+/// count, then the points.
+pub fn read_exposure_curve(data: &[u8]) -> Option<Vec<[u8; 2]>> {
+    let count = usize::from(*data.get(1)?);
+    if count > CURVE_POINTS_MAX {
+        return None;
+    }
+    let points = data.get(2..2 + 2 * count)?;
+    Some(points.as_chunks::<2>().0.to_vec())
+}
+
 fn hand_setting(key: u32, value: &[u8]) -> Message {
     let mut data = key.to_le_bytes().to_vec();
     data.extend_from_slice(value);
@@ -1576,6 +1685,111 @@ mod tests {
     }
 
     /// Checks a gimbal write the way the 2026-11-22 capture showed it.
+    #[test]
+    fn exposure_matches_capture() {
+        // Writes from the 2026-11-27 capture, with their sequence numbers.
+        let numbered = |mut message: Message, seq: u8, channel: u8| {
+            (message.seq, message.channel) = (seq, channel);
+            message.encode().to_vec()
+        };
+        assert_eq!(
+            numbered(before_manual_exposure(), 0x5a, 1),
+            padded("aa255a010c00062f0a0242240400bffb01000000")
+        );
+        assert_eq!(
+            numbered(exposure(false, 0xa7), 0x74, 1),
+            padded("aa2574010c00f7750a0282290500d4eb01a7000000")
+        );
+        assert_eq!(
+            numbered(exposure(false, 3), 0x75, 1),
+            padded("aa2575010c00a6b00a0282290500f7db0103000000")
+        );
+        assert_eq!(
+            numbered(exposure(true, 0x2a), 0x86, 4),
+            padded("aa2586040c006c2c0a0282290500b2630201000000")
+        );
+        let mut read = Message::new(CAMERA, READ_EXPOSURE, Vec::new()).requesting_reply();
+        (read.seq, read.channel) = (0x5b, 1);
+        assert_eq!(read.encode()[..12], hex("aa015b010c0028df0a024229")[..]);
+
+        // Replies.
+        let reply = Message::decode(&padded("aa291e010c003819020a4229050090eb02a7000000")).unwrap();
+        assert_eq!(read_exposure(&reply.data), Some((true, 0xa7)));
+        assert_eq!(read_exposure(&hex("012a000000")), Some((false, 0x2a)));
+        for bad in ["032a000000", "0100000000", "0111270000", "012a0000"] {
+            assert_eq!(read_exposure(&hex(bad)), None, "{bad}");
+        }
+        let reply = Message::decode(&padded(
+            "aa291d010c009819020a823d10009fdc64000000001900006400000000190000",
+        ))
+        .unwrap();
+        assert_eq!(read_iso_limits(&reply.data), Some((100, 6400)));
+        assert_eq!(read_iso_limits(&hex("2003000040060000")), Some((800, 1600)));
+        for bad in [
+            "4006000020030000",
+            "2003000020030000",
+            "6300000000190000",
+            "64000000",
+        ] {
+            assert_eq!(read_iso_limits(&hex(bad)), None, "{bad}");
+        }
+        let limits = iso_limits(100, 12800);
+        assert_eq!((limits.flags, limits.destination), (0x25, CAMERA));
+        assert_eq!(limits.command, [0xc2, 0x3d]);
+        assert_eq!(limits.data, hex("64000000003200006400000000190000"));
+
+        // Selector 6 writes.
+        assert_eq!(exposure_mode(FocusMode::Global).to_vec(), padded("030100"));
+        assert_eq!(exposure_mode(FocusMode::Face).to_vec(), padded("030101"));
+        assert_eq!(exposure_curve(&[]).to_vec(), padded("26020100"));
+        assert_eq!(
+            exposure_curve(&[[0x33, 0x5e], [0x7e, 0xcc]]).to_vec(),
+            padded("26060102335e7ecc")
+        );
+        let nine = [
+            [0x18, 0x18],
+            [0x33, 0x32],
+            [0x4d, 0x4c],
+            [0x67, 0x66],
+            [0x81, 0x81],
+            [0x9c, 0x9b],
+            [0xb6, 0xb6],
+            [0xd0, 0xd0],
+            [0xe7, 0xe7],
+        ];
+        assert_eq!(
+            exposure_curve(&nine).to_vec(),
+            padded("26140109181833324d4c676681819c9bb6b6d0d0e7e7")
+        );
+        assert_eq!(exposure_curve(&[[1, 2]; 40])[3], CURVE_POINTS_MAX as u8);
+
+        // Selector 16 reads.
+        assert_eq!(
+            read_exposure_curve(&hex("01017ebd")),
+            Some(vec![[0x7e, 0xbd]])
+        );
+        assert_eq!(read_exposure_curve(&hex("0000")), Some(vec![]));
+        assert_eq!(read_exposure_curve(&hex("010233")), None);
+        assert_eq!(read_exposure_curve(&hex("01ff")), None);
+        assert_eq!(read_exposure_curve(&[]), None);
+
+        // Status offsets 3 and 7.
+        let mut block = hex(
+            "2e00000100000001000178000001015a00000000017f000000004b030000553c00031000000000000800000003010100000000000000000000000000",
+        );
+        assert_eq!(read_anti_flicker(&block), Some(AntiFlicker::Hz50));
+        assert_eq!(read_exposure_mode(&block), Some(FocusMode::Face));
+        (block[3], block[7]) = (2, 0);
+        assert_eq!(read_anti_flicker(&block), Some(AntiFlicker::Hz60));
+        assert_eq!(read_exposure_mode(&block), Some(FocusMode::Global));
+        block[3] = 0;
+        assert_eq!(read_anti_flicker(&block), Some(AntiFlicker::Off));
+        (block[3], block[7]) = (3, 2);
+        assert_eq!(read_anti_flicker(&block), None);
+        assert_eq!(read_exposure_mode(&block), None);
+        assert_eq!(read_exposure_mode(&block[..7]), None);
+    }
+
     fn assert_gimbal_write(message: &Message, command: [u8; 2], data: &str) {
         assert_eq!(message.flags, 0x25);
         assert_eq!((message.source, message.destination), (HOST, GIMBAL));

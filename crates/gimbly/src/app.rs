@@ -1,5 +1,6 @@
 //! The control panel window; the video preview lives in `preview_window`.
 
+mod view_exposure;
 mod view_gimbal;
 
 use crate::branding::Branding;
@@ -66,6 +67,10 @@ pub struct GimblyApp {
     focus_open: bool,
     /// Manual focus position the user dragged to, until the camera reports it.
     focus_target: Option<u8>,
+    exposure_open: bool,
+    /// Exposure values the user picked, until the camera reports them.
+    exposure_target: Option<(camera::Exposure, Instant)>,
+    curve_ui: view_exposure::CurveUi,
     /// UVC zoom value the user asked for (cameras without vendor control);
     /// the camera's own reading lags behind while it zooms smoothly.
     zoom_target: Option<i32>,
@@ -122,6 +127,9 @@ impl GimblyApp {
             ai_open: true,
             focus_open: true,
             focus_target: None,
+            exposure_open: true,
+            exposure_target: None,
+            curve_ui: Default::default(),
             zoom_target: None,
             gimbal_ui: view_gimbal::GimbalUi::default(),
             virtual_camera: false,
@@ -1049,7 +1057,7 @@ impl GimblyApp {
         }
     }
 
-    /// The Image tab: HDR and Focus. Exposure and white balance are not there yet.
+    /// The Image tab: HDR, Focus, Exposure and Anti-Flicker. White balance is not there yet.
     fn image(&mut self, ui: &mut Ui) {
         let margin = egui::Margin {
             left: PADDING as i8,
@@ -1086,12 +1094,13 @@ impl GimblyApp {
         divider(ui);
         self.focus(ui);
         divider(ui);
+        self.exposure(ui);
+        divider(ui);
+        self.anti_flicker(ui);
+        divider(ui);
         ui.add_space(40.0);
         ui.vertical_centered(|ui| {
-            ui.label(
-                egui::RichText::new(format!("Exposure and white balance: {NOT_YET}"))
-                    .color(TEXT_DIM),
-            );
+            ui.label(egui::RichText::new(format!("White balance: {NOT_YET}")).color(TEXT_DIM));
         });
     }
 

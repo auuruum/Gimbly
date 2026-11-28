@@ -41,6 +41,8 @@ pub const MODELS: &[Model] = &[Model {
         Feature::Image,
         Feature::DeviceSleep,
         Feature::Gestures,
+        Feature::VoiceControl,
+        Feature::Audio,
     ],
 }];
 
@@ -100,10 +102,16 @@ pub enum Feature {
     DeviceSleep,
     /// The Gesture Control section on the More tab.
     Gestures,
+    /// The Voice Control section on the More tab: the spoken commands, their
+    /// language, Voice Locator and the voice Zoom Factor.
+    VoiceControl,
+    /// The Audio section on the More tab and the microphone switch on the
+    /// sleep screen.
+    Audio,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 21] = [
+    pub const ALL: [Feature; 23] = [
         Self::Gimbal,
         Self::Zoom,
         Self::FieldOfView,
@@ -125,6 +133,8 @@ impl Feature {
         Self::Image,
         Self::DeviceSleep,
         Self::Gestures,
+        Self::VoiceControl,
+        Self::Audio,
     ];
 
     /// The name the UI and `docs/devices.md` use.
@@ -151,6 +161,8 @@ impl Feature {
             Self::Image => "Image",
             Self::DeviceSleep => "Device Sleep",
             Self::Gestures => "Gesture Control",
+            Self::VoiceControl => "Voice Control",
+            Self::Audio => "Audio",
         }
     }
 }
@@ -192,6 +204,12 @@ impl GimbalCommand {
             SetImage(_) => &[Feature::Image],
             SetSleepTime(_) | SetSleepBackground(_) | SetSleepMirror(_) => &[Feature::DeviceSleep],
             SetGesture(..) | SetGestureZoom(_) => &[Feature::Gestures],
+            SetVoiceCommand(..) | SetVoiceLocator(_) | SetVoiceEnglish(_) | SetVoiceZoom(_) => {
+                &[Feature::VoiceControl]
+            }
+            SetAudioInput(_) | SetAudioMode(_) | SetSleepMic(_) | SetMicrophone(_) | PairVox(_) => {
+                &[Feature::Audio]
+            }
             SelectPoint { .. } | SelectObject(_) | CancelTarget | SetObjectFraming(_) => {
                 &[Feature::ObjectTracking]
             }

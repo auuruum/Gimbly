@@ -1,10 +1,11 @@
-//! The More tab: Device Sleep and Gesture Control.
+//! The More tab: Device Sleep, Gesture Control, Voice Control and Audio.
 
 use super::view_exposure::slider_row;
-use super::view_gimbal::{menu_entry, menu_frame};
+use super::view_gimbal::{menu_entry, menu_frame, question};
 use super::{GimblyApp, tips};
 use crate::camera::{
-    DeviceSleep, Feature, GESTURE_ZOOM, Gesture, GimbalCommand, SLEEP_BACKGROUNDS, SLEEP_TIMES,
+    Audio, AudioInput, AudioMode, DeviceSleep, Feature, GESTURE_ZOOM, Gesture, GimbalCommand,
+    SLEEP_BACKGROUNDS, SLEEP_TIMES, VOICE_ZOOM_MAX, VOICE_ZOOM_STEP, VoiceCommand, VoiceControl,
 };
 use crate::theme::*;
 use crate::widgets::*;
@@ -26,6 +27,34 @@ const GESTURE_TIPS: &str = "Show a gesture to the camera to control it without t
     3. Dynamic Zoom: hold up both hands and move them apart or together to zoom.";
 const GESTURE_NOTICE: &str = "Gesture turned on. If people in the shot often use their hands \
     while talking or presenting, turn it off to avoid accidental triggers.";
+const VOICE_TIPS: &str = "Say a command to the camera to control it without the app. \
+    Each switch turns one command on or off; Language sets the language the camera listens for.\n\n\
+    Position One/Two/Three only works once presets are stored.";
+const VOICE_LOCATOR_TIPS: &str = "With Voice Locator on, \"Hi, Tiny\" also wakes a sleeping \
+    camera and turns it toward your voice. It works only in landscape and not at 1080P 120.";
+const VOICE_NOTICE: &str = "Voice command turned on. Where there is loud background noise, \
+    or everyday speech sounds like the command phrases, turn it off to avoid accidental triggers.";
+const AUDIO_MODE_TIPS: &str = "1. Pure Audio Mode: left and right channels as recorded, with \
+    no processing.\n\n\
+    2. Spatial Audio Mode: left and right channels with a stronger sense of direction, AI noise \
+    reduction and automatic gain.\n\n\
+    3. Smart Omni Mode: picks up sound from every direction and balances voices with the room, \
+    for meetings with several people.\n\n\
+    4. Directional Mode: picks up the front and suppresses voices and noise around it, for \
+    meetings and live streams.\n\n\
+    5. Dual-Directional Mode: picks up the front and back and filters the sides, for interviews \
+    face to face.\n\n\
+    At 1080P 120 only Smart Omni Mode is available.";
+const PAIRING_TIPS: &str = "Pairing. With the Vox Wireless Mic transmitter turned off, hold its \
+    button for about 6 seconds until the light flashes green quickly, and keep holding it \
+    until pairing succeeds.";
+/// The camera's audio inputs, in the official app's order.
+const AUDIO_INPUTS: [(AudioInput, &str); 2] = [
+    (AudioInput::Camera, "Cam Built-in Mic"),
+    (AudioInput::Vox, "Vox Wireless Mic"),
+];
+/// Audio Mode only offers Smart Omni at this frame rate and above.
+const OMNI_ONLY_FPS: u8 = 120;
 /// The sleep pictures' names, in the camera's order.
 const BACKGROUNDS: [&str; SLEEP_BACKGROUNDS as usize] = ["Black", "Night", "Dusk", "Gimbly"];
 const TILES_PER_ROW: usize = 4;
@@ -41,6 +70,17 @@ pub(super) struct MoreUi {
     notice: Option<bool>,
     /// The gesture settings changed and are saved once the pointer is released.
     unsaved: bool,
+    pub voice_closed: bool,
+    pub audio_closed: bool,
+    voice_tips: bool,
+    locator_tips: bool,
+    audio_mode_tips: bool,
+    /// The notice after a voice command was turned on, and its "Don't show again" box.
+    voice_notice: Option<bool>,
+    /// Turning the microphone on (`true`) or off waits for the user's OK.
+    microphone_question: Option<bool>,
+    /// A Vox transmitter is pairing; the dialog ends it.
+    pairing: bool,
     /// Thumbnails of the Sleep Background pictures, made when first shown.
     thumbs: Option<Thumbs>,
 }
@@ -91,6 +131,10 @@ impl GimblyApp {
         self.device_sleep(ui);
         divider(ui);
         self.gestures(ui);
+        divider(ui);
+        self.voice_control(ui);
+        divider(ui);
+        self.audio(ui);
         divider(ui);
         if self.more_ui.unsaved && !ui.input(|i| i.pointer.any_down()) {
             self.more_ui.unsaved = false;
@@ -432,6 +476,214 @@ impl GimblyApp {
         }
     }
 
+    fn voice_control(&mut self, ui: &mut Ui) {
+        let (open, help) = section_header_help(ui, "Voice Control", !self.more_ui.voice_closed);
+        self.more_ui.voice_closed = !open;
+        if help {
+            self.more_ui.voice_tips = true;
+        }
+        if !open {
+            return;
+        }
+        let shown = self
+            .status
+            .voice_control
+            .filter(|_| self.ready(Feature::VoiceControl));
+        let voice = shown.unwrap_or(VoiceControl {
+            english: true,
+            commands: 0x7f,
+            locator: true,
+            zoom: 0,
+        });
+        let tip = self.gimbal_tip(Feature::VoiceControl);
+        let mut command = None;
+        band(ui, CARD, more_margin(), |ui| {
+            ui.push_id("voice-control", |ui| {
+                ui.spacing_mut().item_spacing = vec2(8.0, 16.0);
+                ui.add_enabled_ui(shown.is_some(), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.set_height(30.0);
+                        ui.label(egui::RichText::new("Language").size(15.0));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            // Gimbly's fonts have no Chinese glyphs, so the names are in English.
+                            let labels = ["Chinese", "English"];
+                            let current = labels[usize::from(voice.english)];
+                            if let Some(i) = dropdown(ui, current, &labels, vec2(108.0, 30.0))
+                                && (i == 1) != voice.english
+                            {
+                                command = Some(GimbalCommand::SetVoiceEnglish(i == 1));
+                            }
+                        });
+                    });
+                    for phrase in VoiceCommand::ALL {
+                        let on = voice.on(phrase);
+                        if plain_switch(ui, voice_label(phrase), on).clicked() {
+                            command = Some(GimbalCommand::SetVoiceCommand(phrase, !on));
+                        }
+                        // Like the official app, Voice Locator shows only while "Hi, Tiny" is on.
+                        if phrase == VoiceCommand::HiTiny && on {
+                            ui.horizontal(|ui| {
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    if help_button(ui).clicked() {
+                                        self.more_ui.locator_tips = true;
+                                    }
+                                    let mut locator = voice.locator;
+                                    if ui.checkbox(&mut locator, "Voice Locator").changed() {
+                                        command = Some(GimbalCommand::SetVoiceLocator(locator));
+                                    }
+                                });
+                            });
+                        }
+                        if phrase == VoiceCommand::ZoomOut {
+                            let (dragged, input) = slider_row(
+                                ui,
+                                "Zoom Factor",
+                                f32::from(voice.zoom) / f32::from(VOICE_ZOOM_MAX),
+                                &format!("{:.2} x", voice.zoom_ratio()),
+                            );
+                            let steps = dragged
+                                .map(|t| {
+                                    (t.clamp(0.0, 1.0) * f32::from(VOICE_ZOOM_MAX)).round() as u8
+                                })
+                                .or_else(|| match input? {
+                                    NumberInput::Step(step) if step > 0.0 => {
+                                        Some(voice.zoom.saturating_add(1).min(VOICE_ZOOM_MAX))
+                                    }
+                                    NumberInput::Step(_) => Some(voice.zoom.saturating_sub(1)),
+                                    NumberInput::Typed(text) => {
+                                        parse_zoom(&text).map(voice_zoom_steps)
+                                    }
+                                })
+                                .filter(|&steps| steps != voice.zoom);
+                            if let Some(steps) = steps {
+                                command = Some(GimbalCommand::SetVoiceZoom(steps));
+                            }
+                        }
+                    }
+                })
+                .response
+                .on_disabled_hover_text(&tip);
+            });
+        });
+        if let Some(command) = command {
+            if matches!(command, GimbalCommand::SetVoiceCommand(_, true))
+                && !self.settings.voice_notice_off
+            {
+                self.more_ui.voice_notice = Some(false);
+            }
+            self.gimbal(command);
+        }
+    }
+
+    fn audio(&mut self, ui: &mut Ui) {
+        let open;
+        (open, _) = section_header(ui, "Audio", !self.more_ui.audio_closed, None);
+        self.more_ui.audio_closed = !open;
+        if !open {
+            return;
+        }
+        let shown = self.status.audio.filter(|_| self.ready(Feature::Audio));
+        let audio = shown.unwrap_or(Audio {
+            input: AudioInput::Camera,
+            mode: AudioMode::Spatial,
+            sleep_mic: true,
+            microphone: true,
+        });
+        let omni_only = self
+            .status
+            .frame_rate
+            .is_some_and(|fps| fps >= OMNI_ONLY_FPS);
+        let tip = self.gimbal_tip(Feature::Audio);
+        let mut command = None;
+        band(ui, CARD, more_margin(), |ui| {
+            ui.push_id("audio", |ui| {
+                ui.spacing_mut().item_spacing = vec2(8.0, 16.0);
+                ui.add_enabled_ui(shown.is_some(), |ui| {
+                    ui.horizontal(|ui| {
+                        ui.set_height(30.0);
+                        ui.label(egui::RichText::new("Audio Input").size(15.0));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let labels = AUDIO_INPUTS.map(|(_, label)| label);
+                            let current = AUDIO_INPUTS
+                                .iter()
+                                .find(|(input, _)| *input == audio.input)
+                                .map_or("", |(_, label)| label);
+                            if let Some(i) = dropdown(ui, current, &labels, vec2(150.0, 30.0))
+                                && let Some(&(input, _)) = AUDIO_INPUTS.get(i)
+                                && input != audio.input
+                            {
+                                command = Some(GimbalCommand::SetAudioInput(input));
+                            }
+                        });
+                    });
+                    match audio.input {
+                        AudioInput::Camera => {
+                            ui.horizontal(|ui| {
+                                ui.set_height(30.0);
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                ui.label(egui::RichText::new("Audio Mode").size(15.0));
+                                if help_button(ui).clicked() {
+                                    self.more_ui.audio_mode_tips = true;
+                                }
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    let modes: Vec<AudioMode> = AudioMode::ALL
+                                        .into_iter()
+                                        .filter(|&m| !omni_only || m == AudioMode::SmartOmni)
+                                        .collect();
+                                    let labels: Vec<&str> =
+                                        modes.iter().map(|m| m.name()).collect();
+                                    if let Some(i) =
+                                        dropdown(ui, audio.mode.name(), &labels, vec2(170.0, 30.0))
+                                        && let Some(&mode) = modes.get(i)
+                                        && mode != audio.mode
+                                    {
+                                        command = Some(GimbalCommand::SetAudioMode(mode));
+                                    }
+                                });
+                            });
+                            let label = "Microphone Status During Sleep";
+                            if plain_switch(ui, label, audio.sleep_mic).clicked() {
+                                command = Some(GimbalCommand::SetSleepMic(!audio.sleep_mic));
+                            }
+                            if plain_switch(ui, "Disable Microphone", !audio.microphone).clicked() {
+                                self.more_ui.microphone_question = Some(!audio.microphone);
+                            }
+                        }
+                        AudioInput::Vox => {
+                            ui.horizontal(|ui| {
+                                let width = (ui.available_width() - 8.0) / 2.0;
+                                for tx in 1..=2u8 {
+                                    let label = format!("{} AddTX{tx}", icon::PLUS);
+                                    if pill(ui, &label, false, vec2(width, 34.0)).clicked() {
+                                        command = Some(GimbalCommand::PairVox(Some(tx)));
+                                        self.more_ui.pairing = true;
+                                    }
+                                }
+                            });
+                            // Shown greyed out, as in the official app.
+                            ui.add_enabled_ui(false, |ui| {
+                                plain_switch(ui, "Microphone Status During Sleep", false);
+                                ui.horizontal(|ui| {
+                                    ui.set_height(30.0);
+                                    ui.label(egui::RichText::new("Noise Reduction").size(15.0));
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        dropdown(ui, "Off", &["Off"], vec2(90.0, 30.0));
+                                    });
+                                });
+                            });
+                        }
+                    }
+                })
+                .response
+                .on_disabled_hover_text(&tip);
+            });
+        });
+        if let Some(command) = command {
+            self.gimbal(command);
+        }
+    }
+
     fn more_dialogs(&mut self, ctx: &egui::Context) {
         if self.more_ui.background_tips
             && tips(ctx, "sleep-background-tips", SLEEP_BACKGROUND_TIPS, "OK").is_some()
@@ -441,8 +693,63 @@ impl GimblyApp {
         if self.more_ui.gesture_tips && tips(ctx, "gesture-tips", GESTURE_TIPS, "OK").is_some() {
             self.more_ui.gesture_tips = false;
         }
+        if self.more_ui.voice_tips && tips(ctx, "voice-tips", VOICE_TIPS, "OK").is_some() {
+            self.more_ui.voice_tips = false;
+        }
+        if self.more_ui.locator_tips
+            && tips(ctx, "voice-locator-tips", VOICE_LOCATOR_TIPS, "Got it").is_some()
+        {
+            self.more_ui.locator_tips = false;
+        }
+        if self.more_ui.audio_mode_tips
+            && tips(ctx, "audio-mode-tips", AUDIO_MODE_TIPS, "Got it").is_some()
+        {
+            self.more_ui.audio_mode_tips = false;
+        }
+        if self.more_ui.pairing && tips(ctx, "vox-pairing", PAIRING_TIPS, "End Pairing").is_some() {
+            self.more_ui.pairing = false;
+            self.gimbal(GimbalCommand::PairVox(None));
+        }
+        if let Some(on) = self.more_ui.microphone_question {
+            let text = if on {
+                "The camera restarts to turn the microphone on. Turn it on?"
+            } else {
+                "The camera restarts to turn the microphone off. Turn it off?"
+            };
+            if let Some(answer) = question(ctx, "microphone-question", text) {
+                self.more_ui.microphone_question = None;
+                if answer {
+                    self.gimbal(GimbalCommand::SetMicrophone(on));
+                    self.camera_restart =
+                        Some(super::CameraRestart::new(std::time::Instant::now()));
+                }
+            }
+        }
+        if let Some(mut never) = self.more_ui.voice_notice {
+            let done = notice(
+                ctx,
+                "voice-notice",
+                "Voice Command On",
+                VOICE_NOTICE,
+                &mut never,
+            );
+            self.more_ui.voice_notice = Some(never);
+            if done {
+                self.more_ui.voice_notice = None;
+                if never {
+                    self.settings.voice_notice_off = true;
+                    self.save_settings();
+                }
+            }
+        }
         if let Some(mut never) = self.more_ui.notice {
-            let done = notice(ctx, &mut never);
+            let done = notice(
+                ctx,
+                "gesture-notice",
+                "Gesture On",
+                GESTURE_NOTICE,
+                &mut never,
+            );
             self.more_ui.notice = Some(never);
             if done {
                 self.more_ui.notice = None;
@@ -578,11 +885,31 @@ fn gesture_row(ui: &mut Ui, glyph: &str, title: &str, hint: &str, on: bool) -> e
     .inner
 }
 
-/// The notice after a gesture is turned on. Returns true once dismissed;
-/// `never` is the "Don't show again" box.
-fn notice(ctx: &egui::Context, never: &mut bool) -> bool {
+/// The phrase the user says for a voice command.
+fn voice_label(command: VoiceCommand) -> &'static str {
+    match command {
+        VoiceCommand::HiTiny => "Hi, Tiny",
+        VoiceCommand::SleepTiny => "Sleep, Tiny",
+        VoiceCommand::TrackMe => "Track Me",
+        VoiceCommand::UnlockMe => "Unlock Me",
+        VoiceCommand::ZoomIn => "Zoom in Closer",
+        VoiceCommand::ZoomOut => "Zoom out Further",
+        VoiceCommand::Positions => "Position One/Two/Three",
+    }
+}
+
+/// A typed voice Zoom Factor in steps of [`VOICE_ZOOM_STEP`], rounded down
+/// as the camera stores it (2.00 becomes 1.99).
+fn voice_zoom_steps(ratio: f32) -> u8 {
+    let steps = ((ratio - 1.0) / VOICE_ZOOM_STEP + 1e-3).floor();
+    steps.clamp(0.0, f32::from(VOICE_ZOOM_MAX)) as u8
+}
+
+/// The notice after a gesture or voice command is turned on. Returns true
+/// once dismissed; `never` is the "Don't show again" box.
+fn notice(ctx: &egui::Context, id: &str, title: &str, text: &str, never: &mut bool) -> bool {
     let mut done = false;
-    let modal = egui::Modal::new(egui::Id::new("gesture-notice"))
+    let modal = egui::Modal::new(egui::Id::new(id))
         .backdrop_color(Color32::from_black_alpha(120))
         .frame(
             egui::Frame::new()
@@ -595,9 +922,9 @@ fn notice(ctx: &egui::Context, never: &mut bool) -> bool {
             ui.set_width(270.0);
             ui.spacing_mut().item_spacing = vec2(8.0, 14.0);
             ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new("Gesture On").size(15.0).color(TEXT));
+                ui.label(egui::RichText::new(title).size(15.0).color(TEXT));
             });
-            ui.label(egui::RichText::new(GESTURE_NOTICE).size(13.0).color(TEXT));
+            ui.label(egui::RichText::new(text).size(13.0).color(TEXT));
             ui.checkbox(never, "Don't show again");
             ui.vertical_centered(|ui| {
                 if pill(ui, "Got it", false, vec2(85.0, 31.0)).clicked() {
@@ -633,5 +960,21 @@ mod tests {
         assert_eq!(parse_zoom("abc"), None);
         assert_eq!(zoom_t(1.0), 0.0);
         assert_eq!(zoom_t(4.0), 1.0);
+    }
+
+    #[test]
+    fn typed_voice_zoom_rounds_down_like_the_camera() {
+        // Typed values and the steps the official app sent (2026-11-28 capture).
+        assert_eq!(voice_zoom_steps(1.0), 0);
+        assert_eq!(voice_zoom_steps(1.23), 7);
+        assert_eq!(voice_zoom_steps(2.0), 33);
+        assert_eq!(voice_zoom_steps(2.5), 50);
+        assert_eq!(voice_zoom_steps(4.0), VOICE_ZOOM_MAX);
+        assert_eq!(voice_zoom_steps(9.0), VOICE_ZOOM_MAX);
+        assert_eq!(voice_zoom_steps(f32::NAN), 0);
+        assert_eq!(
+            voice_label(VoiceCommand::Positions),
+            "Position One/Two/Three"
+        );
     }
 }

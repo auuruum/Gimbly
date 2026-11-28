@@ -261,6 +261,10 @@ pub struct SessionStatus {
     pub device_sleep: Option<DeviceSleep>,
     /// The Locked Target gesture the camera reports; `None` until read.
     pub locked_target: Option<bool>,
+    /// Voice Control settings the camera reports; `None` until read.
+    pub voice_control: Option<VoiceControl>,
+    /// Audio settings the camera reports; `None` until read.
+    pub audio: Option<Audio>,
     /// The hand Hand Tracking follows; `None` until read.
     pub hand: Option<Hand>,
     /// The Hand Tracking range being edited. `Some` exactly while the camera
@@ -390,6 +394,21 @@ pub enum GimbalCommand {
     SetGesture(Gesture, bool),
     /// The ratio the Zoom gesture zooms to, in [`GESTURE_ZOOM`].
     SetGestureZoom(f32),
+    SetVoiceCommand(VoiceCommand, bool),
+    /// "Hi, Tiny" also wakes the camera and turns it to the voice.
+    SetVoiceLocator(bool),
+    /// The language the camera listens for: English or Chinese.
+    SetVoiceEnglish(bool),
+    /// The voice Zoom Factor in steps of [`VOICE_ZOOM_STEP`], 0 to [`VOICE_ZOOM_MAX`].
+    SetVoiceZoom(u8),
+    SetAudioInput(AudioInput),
+    SetAudioMode(AudioMode),
+    /// Keep the microphone working while the camera sleeps.
+    SetSleepMic(bool),
+    /// Turn the microphone on or off; the camera restarts.
+    SetMicrophone(bool),
+    /// Start pairing Vox Wireless Mic transmitter 1 or 2, or end it with `None`.
+    PairVox(Option<u8>),
     SetHand(Hand),
     /// Read the Hand Tracking range and put the camera in its edit state.
     OpenHandRange,
@@ -732,6 +751,115 @@ pub enum Gesture {
 /// The Zoom gesture's ratio range and default.
 pub const GESTURE_ZOOM: std::ops::RangeInclusive<f32> = 1.0..=4.0;
 pub const GESTURE_ZOOM_DEFAULT: f32 = 2.0;
+
+/// The Voice Control commands in the official app's order. The value is
+/// the camera's key and the bit in the status block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VoiceCommand {
+    HiTiny = 0,
+    SleepTiny = 1,
+    TrackMe = 2,
+    UnlockMe = 3,
+    ZoomIn = 4,
+    ZoomOut = 5,
+    Positions = 6,
+}
+
+impl VoiceCommand {
+    pub const ALL: [Self; 7] = [
+        Self::HiTiny,
+        Self::SleepTiny,
+        Self::TrackMe,
+        Self::UnlockMe,
+        Self::ZoomIn,
+        Self::ZoomOut,
+        Self::Positions,
+    ];
+}
+
+/// The voice Zoom Factor is 1.0 plus this many steps of [`VOICE_ZOOM_STEP`].
+pub const VOICE_ZOOM_MAX: u8 = 100;
+pub const VOICE_ZOOM_STEP: f32 = 0.03;
+
+/// The Voice Control section as the camera reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VoiceControl {
+    pub english: bool,
+    /// One bit per [`VoiceCommand`].
+    pub commands: u8,
+    pub locator: bool,
+    /// Steps above 1.0x, 0 to [`VOICE_ZOOM_MAX`].
+    pub zoom: u8,
+}
+
+impl VoiceControl {
+    pub fn on(self, command: VoiceCommand) -> bool {
+        self.commands & (1 << command as u8) != 0
+    }
+
+    pub fn set(&mut self, command: VoiceCommand, on: bool) {
+        let bit = 1 << command as u8;
+        self.commands = if on {
+            self.commands | bit
+        } else {
+            self.commands & !bit
+        };
+    }
+
+    pub fn zoom_ratio(self) -> f32 {
+        1.0 + f32::from(self.zoom.min(VOICE_ZOOM_MAX)) * VOICE_ZOOM_STEP
+    }
+}
+
+/// Where the camera's audio comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioInput {
+    Camera,
+    /// OBSBOT's Vox Wireless Mic receiver.
+    Vox,
+}
+
+/// How the built-in microphones are processed. The value is the camera's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioMode {
+    SmartOmni = 0,
+    Spatial = 1,
+    Directional = 2,
+    DualDirectional = 4,
+    Pure = 5,
+}
+
+impl AudioMode {
+    /// In the official app's order.
+    pub const ALL: [Self; 5] = [
+        Self::Pure,
+        Self::Spatial,
+        Self::SmartOmni,
+        Self::Directional,
+        Self::DualDirectional,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Pure => "Pure Audio Mode",
+            Self::Spatial => "Spatial Audio Mode",
+            Self::SmartOmni => "Smart Omni Mode",
+            Self::Directional => "Directional Mode",
+            Self::DualDirectional => "Dual-Directional Mode",
+        }
+    }
+}
+
+/// The Audio section as the camera reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Audio {
+    pub input: AudioInput,
+    pub mode: AudioMode,
+    /// Microphone Status During Sleep.
+    pub sleep_mic: bool,
+    /// The microphone is on (Disable Microphone is off).
+    pub microphone: bool,
+}
 
 /// Anti-Flicker: the mains frequency exposure avoids beating with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

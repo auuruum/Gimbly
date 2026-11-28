@@ -103,6 +103,8 @@ pub struct GimblyApp {
     high_fps_tips: bool,
     /// Asking before a 720P recording.
     confirm_low_res: bool,
+    /// The camera restarts by itself (Disable Microphone); reopen it once it is back.
+    camera_restart: Option<CameraRestart>,
     settings: Settings,
     settings_window: SettingsWindow,
     hotkeys: Option<GlobalHotkeys>,
@@ -141,6 +143,7 @@ impl GimblyApp {
             preview: None,
             preview_window,
             snapshot_requested: false,
+            camera_restart: None,
             snapshot_results: channel(),
             always_on_top: false,
             wayland,
@@ -434,6 +437,29 @@ impl GimblyApp {
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
+        if let Some(restart) = &mut self.camera_restart {
+            // Only the OBSBOT camera coming back ends the wait, not another camera.
+            let streaming =
+                self.status.state == SessionState::Streaming && self.status.model.is_some();
+            match restart.step(streaming, Instant::now()) {
+                RestartStep::Wait => ctx.request_repaint_after(RESTART_RETRY),
+                RestartStep::Reopen => {
+                    // Reopen only once the camera is listed again, so Gimbly
+                    // does not switch to another camera meanwhile.
+                    let back = camera::list_devices()
+                        .is_ok_and(|devices| devices.iter().any(DeviceInfo::is_obsbot));
+                    if back {
+                        self.refresh_devices(ctx);
+                    }
+                    ctx.request_repaint_after(RESTART_RETRY);
+                }
+                RestartStep::Done => self.camera_restart = None,
+                RestartStep::GiveUp => {
+                    self.camera_restart = None;
+                    self.notify("The camera did not come back after restarting. Reconnect it.");
+                }
+            }
+        }
         while let Ok(result) = self.snapshot_results.1.try_recv() {
             self.notify(match result {
                 Ok(path) => format!("Snapshot saved to {}", path.display()),
@@ -1503,10 +1529,24 @@ impl GimblyApp {
                 );
                 let toggle_rect =
                     Rect::from_center_size(pos2(rect.center().x, toggle_y), vec2(40.0, 22.0));
-                place(ui, toggle_rect, Layout::default(), "sleep-mic", |ui| {
-                    ui.disable();
-                    toggle(ui, true).on_disabled_hover_text(NOT_YET);
+                // The same setting as Microphone Status During Sleep on the More tab.
+                let sleep_mic = self
+                    .status
+                    .audio
+                    .filter(|_| self.ready(Feature::Audio))
+                    .map(|audio| audio.sleep_mic);
+                let tip = self.gimbal_tip(Feature::Audio);
+                let clicked = place(ui, toggle_rect, Layout::default(), "sleep-mic", |ui| {
+                    ui.add_enabled_ui(sleep_mic.is_some(), |ui| {
+                        toggle(ui, sleep_mic.unwrap_or(true))
+                            .on_disabled_hover_text(&tip)
+                            .clicked()
+                    })
+                    .inner
                 });
+                if clicked && let Some(on) = sleep_mic {
+                    self.gimbal(GimbalCommand::SetSleepMic(!on));
+                }
 
                 // The toolbar button stays on top so it can wake the camera.
                 let tip = self.sleep_tip();
@@ -1700,6 +1740,55 @@ fn switch_row(
     .inner
 }
 
+/// How often Gimbly looks for a restarting camera, and how long it waits.
+const RESTART_RETRY: Duration = Duration::from_secs(3);
+const RESTART_WAIT: Duration = Duration::from_secs(60);
+
+/// Follows a camera that restarts by itself: first it goes away, then
+/// Gimbly reopens it every [`RESTART_RETRY`] until it streams again.
+#[derive(Clone, Copy, Debug)]
+struct CameraRestart {
+    deadline: Instant,
+    gone: bool,
+    tried: Option<Instant>,
+}
+
+#[derive(Debug, PartialEq)]
+enum RestartStep {
+    Wait,
+    Reopen,
+    Done,
+    GiveUp,
+}
+
+impl CameraRestart {
+    fn new(now: Instant) -> Self {
+        Self {
+            deadline: now + RESTART_WAIT,
+            gone: false,
+            tried: None,
+        }
+    }
+
+    fn step(&mut self, streaming: bool, now: Instant) -> RestartStep {
+        if now >= self.deadline {
+            return RestartStep::GiveUp;
+        }
+        if !self.gone {
+            self.gone = !streaming;
+            return RestartStep::Wait;
+        }
+        if streaming {
+            return RestartStep::Done;
+        }
+        if self.tried.is_some_and(|t| now < t + RESTART_RETRY) {
+            return RestartStep::Wait;
+        }
+        self.tried = Some(now);
+        RestartStep::Reopen
+    }
+}
+
 /// A "Tips" modal with one button: `Some(true)` for the button,
 /// `Some(false)` when dismissed.
 fn tips(ctx: &egui::Context, id: &str, text: &str, button: &str) -> Option<bool> {
@@ -1830,5 +1919,31 @@ impl eframe::App for GimblyApp {
         self.serial_access
             .show(&ctx, self.status.serial_denied.as_ref());
         self.toast(&ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_restarting_camera_is_reopened_once_it_went_away() {
+        let start = Instant::now();
+        let mut restart = CameraRestart::new(start);
+        // Still streaming right after the switch: wait for it to go away.
+        assert_eq!(restart.step(true, start), RestartStep::Wait);
+        assert_eq!(restart.step(false, start), RestartStep::Wait);
+        assert_eq!(restart.step(false, start), RestartStep::Reopen);
+        // Retries are spaced out, not tried every frame.
+        assert_eq!(
+            restart.step(false, start + Duration::from_secs(1)),
+            RestartStep::Wait
+        );
+        let later = start + RESTART_RETRY;
+        assert_eq!(restart.step(false, later), RestartStep::Reopen);
+        assert_eq!(restart.step(true, later), RestartStep::Done);
+
+        let mut lost = CameraRestart::new(start);
+        assert_eq!(lost.step(true, start + RESTART_WAIT), RestartStep::GiveUp);
     }
 }

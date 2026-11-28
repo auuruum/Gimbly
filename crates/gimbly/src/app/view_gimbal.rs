@@ -1083,7 +1083,7 @@ const WIDEN_QUESTION: &str =
     "The return position lies outside the tracking range. Widen the range to include it?";
 
 /// A small modal with No and OK; `Some(true)` for OK.
-fn question(ctx: &egui::Context, id: &str, text: &str) -> Option<bool> {
+pub(super) fn question(ctx: &egui::Context, id: &str, text: &str) -> Option<bool> {
     let mut answer = None;
     let modal = egui::Modal::new(egui::Id::new(id))
         .backdrop_color(Color32::from_black_alpha(120))

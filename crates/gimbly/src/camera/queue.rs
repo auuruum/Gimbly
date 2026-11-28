@@ -51,6 +51,7 @@ fn continuous(command: &Command) -> Option<u8> {
         Command::Gimbal(GimbalCommand::SetWhiteBalance(_)) => Some(10),
         Command::Gimbal(GimbalCommand::SetImage(_)) => Some(11),
         Command::Gimbal(GimbalCommand::SetGestureZoom(_)) => Some(12),
+        Command::Gimbal(GimbalCommand::SetVoiceZoom(_)) => Some(13),
         _ => None,
     }
 }

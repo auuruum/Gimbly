@@ -461,6 +461,9 @@ pub struct Settings {
     pub preview_hint_seen: bool,
     /// Gesture Control switches the camera does not report (More tab).
     pub gestures: Gestures,
+    /// "No more prompts" was ticked in the notice shown when a voice
+    /// command is turned on (More tab).
+    pub voice_notice_off: bool,
     /// The user's own Sleep Background picture files, at most
     /// [`crate::sleep_pictures::MAX`].
     pub sleep_pictures: Vec<String>,
@@ -515,6 +518,7 @@ impl Default for Settings {
             osc_port: 16284,
             preview_hint_seen: false,
             gestures: Gestures::default(),
+            voice_notice_off: false,
             sleep_pictures: Vec::new(),
             sleep_picture: None,
         }
@@ -647,6 +651,7 @@ impl Settings {
         s.gestures.dynamic_zoom = flag("DynamicZoom");
         s.gestures.direction_flip = flag("DirectionFlip");
         s.gestures.notice_off = flag("NoticeOff");
+        s.voice_notice_off = get("VoiceControl", "NoticeOff").is_some_and(|v| v == "true");
         if let Some(v) = get("Gestures", "ZoomFactor")
             .and_then(|v| v.parse::<f32>().ok())
             .filter(|v| crate::camera::GESTURE_ZOOM.contains(v))
@@ -698,6 +703,8 @@ impl Settings {
         out += &format!("DirectionFlip={}\n", self.gestures.direction_flip);
         out += &format!("ZoomFactor={:.2}\n", self.gestures.zoom_factor);
         out += &format!("NoticeOff={}\n", self.gestures.notice_off);
+        out += "\n[VoiceControl]\n";
+        out += &format!("NoticeOff={}\n", self.voice_notice_off);
         out += "\n[SleepPictures]\n";
         let selected = self.sleep_picture.map_or(0, |i| i + 1);
         out += &format!("Selected={selected}\n");
@@ -748,6 +755,7 @@ mod tests {
                 zoom_factor: 3.25,
                 notice_off: true,
             },
+            voice_notice_off: true,
             sleep_pictures: vec![r"C:\Picturesway.png".into(), "/home/me/brb.jpg".into()],
             sleep_picture: Some(1),
             ..Settings::default()

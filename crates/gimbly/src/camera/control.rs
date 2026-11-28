@@ -1060,6 +1060,18 @@ const ZOOM_FOLLOW_FOR: Duration = Duration::from_millis(2500);
 /// state within 2 s in the 2026-11-21 capture).
 const TRACKING_SETTLE: Duration = Duration::from_millis(2500);
 
+/// Human Tracking that runs in a mode Gimbly did not set (the Locked Target
+/// palm gesture, another app) shows as Single Mode, as in OBSBOT Center: the
+/// camera reports on/off only.
+fn assume_single_mode(status: &mut super::SessionStatus) {
+    if status.ai_mode == Some(AiMode::Human)
+        && status.object_framing.is_none()
+        && status.tracking_mode.is_none()
+    {
+        status.tracking_mode = Some(TrackingMode::Single);
+    }
+}
+
 pub(super) fn read_zoom_in(delay: Duration) -> ZoomRefresh {
     let at = Instant::now() + delay;
     Some((at, at))
@@ -1211,6 +1223,7 @@ fn commands_loop(
                     status.device_sleep,
                     status.locked_target,
                 );
+                let tracking_mode = status.tracking_mode;
                 // Unknown values (such as the switching value 6) keep the old state.
                 status.ai_mode = view.ai_mode.or(status.ai_mode);
                 status.auto_zoom = view.auto_zoom.or(status.auto_zoom);
@@ -1233,6 +1246,7 @@ fn commands_loop(
                 if status.object_framing.is_some() {
                     status.tracking_mode = None;
                 }
+                assume_single_mode(&mut status);
                 let changed = before
                     != (
                         status.ai_mode,
@@ -1247,7 +1261,8 @@ fn commands_loop(
                         status.object_framing,
                         status.device_sleep,
                         status.locked_target,
-                    );
+                    )
+                    || tracking_mode != status.tracking_mode;
                 drop(status);
                 if changed {
                     repaint();
@@ -1627,6 +1642,33 @@ pub(super) fn probe(
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::extension_unit;
+
+    #[test]
+    fn unknown_tracking_mode_shows_as_single() {
+        use super::{AiMode, ObjectFraming, TrackingMode, assume_single_mode};
+        let mut status = crate::camera::SessionStatus {
+            ai_mode: Some(AiMode::Human),
+            ..Default::default()
+        };
+        assume_single_mode(&mut status);
+        assert_eq!(status.tracking_mode, Some(TrackingMode::Single));
+        // Group Mode set by Gimbly stays.
+        status.tracking_mode = Some(TrackingMode::Group);
+        assume_single_mode(&mut status);
+        assert_eq!(status.tracking_mode, Some(TrackingMode::Group));
+        // Object tracking and other AI modes show no mode.
+        for (ai_mode, framing) in [
+            (AiMode::Human, Some(ObjectFraming::Normal)),
+            (AiMode::Hand, None),
+            (AiMode::Off, None),
+        ] {
+            status.ai_mode = Some(ai_mode);
+            status.object_framing = framing;
+            status.tracking_mode = None;
+            assume_single_mode(&mut status);
+            assert_eq!(status.tracking_mode, None);
+        }
+    }
 
     #[test]
     fn image_values_out_of_range_are_refused() {

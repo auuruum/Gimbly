@@ -260,3 +260,25 @@ video on Resume; after a Gimbly restart it was still chosen and shown
 while asleep; Remove from the right-click menu took it out of the list
 and the camera tile showed again. Linux (portal FileChooser through rfd)
 and macOS were compiled only by CI, not run.
+
+## Locked Target gesture and the Human Tracking buttons
+
+2026-11-28, reported by the owner from the visible OBSBOT Center UI (same
+camera, firmware and app version as above), not captured by Claude Code,
+which cannot make the hand gesture.
+
+- **Observed (owner):** with Locked Target on, raising a palm starts
+  tracking and OBSBOT Center highlights **Single Mode** under Human
+  Tracking. Gimbly highlighted nothing.
+- **Inferred:** the status block shows Human Tracking running (offset 24),
+  as for every other way of starting it, and has no Single/Group byte (see
+  [Group Mode](2026-11-21-group-mode-auto-zoom.md)). Gimbly kept the mode
+  only when it set it itself, so tracking started on the camera had no
+  mode to show.
+- **Gimbly:** when the status read shows Human Tracking with no object
+  tracking and no mode set by Gimbly, it shows Single Mode. Group Mode set
+  in Gimbly stays highlighted.
+- **Unknown:** whether the gesture switches a running Group Mode to Single
+  Mode, and what OBSBOT Center shows for Group Mode started elsewhere.
+- **Test:** `camera::control::tests::unknown_tracking_mode_shows_as_single`.
+  The gesture itself still needs a check on the camera with Gimbly running.

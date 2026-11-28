@@ -1331,6 +1331,21 @@ fn commands_loop(
                 shared.status().tracking_speed = Some(speed);
                 repaint();
             }
+            // Gestures, auto zoom and other apps zoom without telling us.
+            if zoom_refresh.is_none()
+                && !shared.status().sleeping
+                && let Ok(ratio) = xu.read_zoom()
+            {
+                let mut status = shared.status();
+                if status.zoom_ratio != Some(ratio) {
+                    if status.zoom_ratio.is_some() {
+                        status.fov = None;
+                    }
+                    status.zoom_ratio = Some(ratio);
+                    drop(status);
+                    repaint();
+                }
+            }
         }
         let (tracking, sleeping) = {
             let status = shared.status();

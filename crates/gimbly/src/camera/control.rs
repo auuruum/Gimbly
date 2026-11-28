@@ -124,6 +124,8 @@ impl<T: Transport> Channel<T> {
         status.exposure_curve = exposure_curve;
         status.white_balance = white_balance;
         status.image = image;
+        status.device_sleep = view.and_then(|view| view.device_sleep);
+        status.locked_target = view.and_then(|view| view.locked_target);
         status.object_framing = view.and_then(|view| view.object_framing);
         status.tracking_speed = tracking_speed;
         status.hand = hand;
@@ -217,6 +219,8 @@ impl<T: Transport> Channel<T> {
             exposure_mode: vendor::read_exposure_mode(block),
             anti_flicker: vendor::read_anti_flicker(block),
             object_framing: vendor::read_object_framing(block),
+            device_sleep: vendor::read_device_sleep(block),
+            locked_target: vendor::read_locked_target(block),
         })
     }
 
@@ -864,6 +868,34 @@ impl<T: Transport> Channel<T> {
                     .set_processing(Processing::PowerLine, value)?;
                 shared.status().anti_flicker = Some(flicker);
             }
+            GimbalCommand::SetSleepTime(seconds) => {
+                self.set(vendor::SELECTOR_VIEW, &mut vendor::sleep_time(seconds))?;
+                if let Some(sleep) = &mut shared.status().device_sleep {
+                    sleep.time = seconds;
+                }
+            }
+            GimbalCommand::SetSleepBackground(index) => {
+                if index >= super::SLEEP_BACKGROUNDS {
+                    return Err(format!("Unknown sleep background {index}"));
+                }
+                self.set(vendor::SELECTOR_VIEW, &mut vendor::sleep_background(index))?;
+                if let Some(sleep) = &mut shared.status().device_sleep {
+                    sleep.background = index;
+                }
+            }
+            GimbalCommand::SetSleepMirror(on) => {
+                self.set(vendor::SELECTOR_VIEW, &mut vendor::sleep_mirror(on))?;
+                if let Some(sleep) = &mut shared.status().device_sleep {
+                    sleep.mirror = on;
+                }
+            }
+            GimbalCommand::SetGesture(gesture, on) => {
+                self.send(vendor::gesture(gesture, on))?;
+                if gesture == super::Gesture::LockedTarget {
+                    shared.status().locked_target = Some(on);
+                }
+            }
+            GimbalCommand::SetGestureZoom(ratio) => self.send(vendor::gesture_zoom(ratio))?,
             GimbalCommand::SetImage(image) => {
                 let new = image.values().map(|v| v.min(IMAGE_MAX));
                 for (i, control) in IMAGE_CONTROLS.into_iter().enumerate() {
@@ -1135,6 +1167,10 @@ fn commands_loop(
                             | GimbalCommand::SetFocusPosition(_)
                             | GimbalCommand::SetExposureMode(_)
                             | GimbalCommand::SetAntiFlicker(_)
+                            | GimbalCommand::SetSleepTime(_)
+                            | GimbalCommand::SetSleepBackground(_)
+                            | GimbalCommand::SetSleepMirror(_)
+                            | GimbalCommand::SetGesture(..)
                             | GimbalCommand::SelectPoint { .. }
                             | GimbalCommand::SelectObject(_)
                             | GimbalCommand::CancelTarget
@@ -1172,6 +1208,8 @@ fn commands_loop(
                     status.exposure_mode,
                     status.anti_flicker,
                     status.object_framing,
+                    status.device_sleep,
+                    status.locked_target,
                 );
                 // Unknown values (such as the switching value 6) keep the old state.
                 status.ai_mode = view.ai_mode.or(status.ai_mode);
@@ -1183,6 +1221,8 @@ fn commands_loop(
                 status.focus = view.focus.or(status.focus);
                 status.exposure_mode = view.exposure_mode.or(status.exposure_mode);
                 status.anti_flicker = view.anti_flicker.or(status.anti_flicker);
+                status.device_sleep = view.device_sleep.or(status.device_sleep);
+                status.locked_target = view.locked_target.or(status.locked_target);
                 // Another app may turn tracking on later in a mode we cannot read.
                 if view.ai_mode.is_some_and(|mode| mode != AiMode::Human) {
                     status.tracking_mode = None;
@@ -1205,6 +1245,8 @@ fn commands_loop(
                         status.exposure_mode,
                         status.anti_flicker,
                         status.object_framing,
+                        status.device_sleep,
+                        status.locked_target,
                     );
                 drop(status);
                 if changed {
@@ -1337,6 +1379,8 @@ pub(super) struct View {
     pub exposure_mode: Option<super::FocusMode>,
     pub anti_flicker: Option<AntiFlicker>,
     pub object_framing: Option<ObjectFraming>,
+    pub device_sleep: Option<super::DeviceSleep>,
+    pub locked_target: Option<bool>,
 }
 
 /// Finds the control interface and unit by GUID in a USB descriptor stream.
@@ -1491,6 +1535,11 @@ pub(super) fn report(xu: &mut Channel<impl Transport>) -> Vec<String> {
             ),
             Feature::WhiteBalance => format!("{:?}", xu.read_white_balance()),
             Feature::Image => format!("{:?}", xu.read_image()),
+            Feature::DeviceSleep => format!("{:?}", view.map(|v| v.device_sleep)),
+            Feature::Gestures => format!(
+                "Locked Target {:?} (the other gestures are not reported)",
+                view.map(|v| v.locked_target)
+            ),
             Feature::ObjectTracking => format!(
                 "{:?} (None unless an object is tracked)",
                 view.map(|v| v.object_framing)

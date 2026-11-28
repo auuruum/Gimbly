@@ -256,6 +256,10 @@ pub struct SessionStatus {
     pub white_balance: Option<WhiteBalance>,
     /// The Image section the camera reports; `None` until read.
     pub image: Option<ImageAdjust>,
+    /// Device Sleep settings the camera reports; `None` until read.
+    pub device_sleep: Option<DeviceSleep>,
+    /// The Locked Target gesture the camera reports; `None` until read.
+    pub locked_target: Option<bool>,
     /// The hand Hand Tracking follows; `None` until read.
     pub hand: Option<Hand>,
     /// The Hand Tracking range being edited. `Some` exactly while the camera
@@ -377,6 +381,14 @@ pub enum GimbalCommand {
     SetWhiteBalance(WhiteBalance),
     /// The Image section; only the values that changed are written.
     SetImage(ImageAdjust),
+    /// Auto Sleep and its time in seconds; negative while Auto Sleep is off.
+    SetSleepTime(i16),
+    /// The picture shown while asleep, below [`SLEEP_BACKGROUNDS`].
+    SetSleepBackground(u8),
+    SetSleepMirror(bool),
+    SetGesture(Gesture, bool),
+    /// The ratio the Zoom gesture zooms to, in [`GESTURE_ZOOM`].
+    SetGestureZoom(f32),
     SetHand(Hand),
     /// Read the Hand Tracking range and put the camera in its edit state.
     OpenHandRange,
@@ -669,6 +681,41 @@ impl ImageAdjust {
         }
     }
 }
+
+/// The Sleep Time choices in seconds.
+pub const SLEEP_TIMES: [i16; 3] = [30, 120, 600];
+/// The number of built-in sleep pictures.
+pub const SLEEP_BACKGROUNDS: u8 = 4;
+
+/// The Device Sleep section as the camera reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceSleep {
+    /// Seconds without a video stream before the camera sleeps; negative
+    /// (the same time) while Auto Sleep is off.
+    pub time: i16,
+    /// The picture the camera streams while asleep, below [`SLEEP_BACKGROUNDS`].
+    pub background: u8,
+    pub mirror: bool,
+}
+
+impl DeviceSleep {
+    pub fn auto_sleep(self) -> bool {
+        self.time > 0
+    }
+}
+
+/// The Gesture Control switches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gesture {
+    LockedTarget,
+    Zoom,
+    DynamicZoom,
+    DirectionFlip,
+}
+
+/// The Zoom gesture's ratio range and default.
+pub const GESTURE_ZOOM: std::ops::RangeInclusive<f32> = 1.0..=4.0;
+pub const GESTURE_ZOOM_DEFAULT: f32 = 2.0;
 
 /// Anti-Flicker: the mains frequency exposure avoids beating with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

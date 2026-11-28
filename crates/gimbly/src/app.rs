@@ -3,6 +3,7 @@
 mod view_exposure;
 mod view_gimbal;
 mod view_image;
+mod view_more;
 mod view_white_balance;
 
 use crate::branding::Branding;
@@ -79,6 +80,7 @@ pub struct GimblyApp {
     image_open: bool,
     /// The Image values the user picked, until the camera reports them.
     image_target: Option<(camera::ImageAdjust, Instant)>,
+    more_ui: view_more::MoreUi,
     /// UVC zoom value the user asked for (cameras without vendor control);
     /// the camera's own reading lags behind while it zooms smoothly.
     zoom_target: Option<i32>,
@@ -142,6 +144,7 @@ impl GimblyApp {
             white_balance_target: None,
             image_open: true,
             image_target: None,
+            more_ui: Default::default(),
             zoom_target: None,
             gimbal_ui: view_gimbal::GimbalUi::default(),
             virtual_camera: false,
@@ -901,12 +904,7 @@ impl GimblyApp {
                         self.console(ui)
                     }
                     Tab::Image => self.image(ui),
-                    Tab::More => {
-                        ui.add_space(40.0);
-                        ui.vertical_centered(|ui| {
-                            ui.label(egui::RichText::new(NOT_YET).color(TEXT_DIM));
-                        });
-                    }
+                    Tab::More => self.more(ui),
                 }
             });
     }

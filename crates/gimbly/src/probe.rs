@@ -63,6 +63,28 @@ fn control_step(step: &str, wb: Option<camera::WhiteBalance>) -> Option<Command>
         ["forward"] => GimbalCommand::SetVoiceRange(VoiceRange::Forward),
         ["sound", "on"] => GimbalCommand::SetSoundSource(true),
         ["sound", "off"] => GimbalCommand::SetSoundSource(false),
+        // Device Sleep: `sleeptime:120` (negative: Auto Sleep off),
+        // `sleepbg:0` to `3`, `sleepmirror:on`.
+        ["sleeptime", seconds] => GimbalCommand::SetSleepTime(seconds.parse().ok()?),
+        ["sleepbg", index] => GimbalCommand::SetSleepBackground(index.parse().ok()?),
+        ["sleepmirror", "on"] => GimbalCommand::SetSleepMirror(true),
+        ["sleepmirror", "off"] => GimbalCommand::SetSleepMirror(false),
+        // Gestures: `gesture:locked:on`, `zoom`, `dynamic`, `flip`; `gesture:factor:2.5`.
+        ["gesture", "factor", ratio] => GimbalCommand::SetGestureZoom(ratio.parse().ok()?),
+        ["gesture", name, state] => GimbalCommand::SetGesture(
+            match *name {
+                "locked" => camera::Gesture::LockedTarget,
+                "zoom" => camera::Gesture::Zoom,
+                "dynamic" => camera::Gesture::DynamicZoom,
+                "flip" => camera::Gesture::DirectionFlip,
+                _ => return None,
+            },
+            match *state {
+                "on" => true,
+                "off" => false,
+                _ => return None,
+            },
+        ),
         ["hdr", "on"] => GimbalCommand::SetHdr(true),
         ["hdr", "off"] => GimbalCommand::SetHdr(false),
         ["af", "on"] => GimbalCommand::SetAutoFocus(true),
@@ -182,7 +204,7 @@ fn gimbal(session: &camera::Session, args: &[String], virtual_camera: bool) -> i
             .and_then(|f| crate::snapshot::save(&f, Path::new(dir), [0, 0, 0, 0, 0, step as u16]));
         let status = session.status();
         println!(
-            "step {step}: {saved:?}, vendor control {}, sleeping {}, AI mode {:?} {:?}, auto zoom {:?}, speed {:?}, voice range {:?}, sound source {:?}, HDR {:?}, focus {:?}, exposure {:?} mode {:?} curve {:?} anti-flicker {:?}, white balance {:?}, image {:?}, hand {:?} {:?}, zone {:?} {:?}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
+            "step {step}: {saved:?}, vendor control {}, sleeping {}, AI mode {:?} {:?}, auto zoom {:?}, speed {:?}, voice range {:?}, sound source {:?}, HDR {:?}, focus {:?}, exposure {:?} mode {:?} curve {:?} anti-flicker {:?}, white balance {:?}, image {:?}, device sleep {:?}, locked target {:?}, hand {:?} {:?}, zone {:?} {:?}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
             status.vendor_control,
             status.sleeping,
             status.ai_mode,
@@ -199,6 +221,8 @@ fn gimbal(session: &camera::Session, args: &[String], virtual_camera: bool) -> i
             status.anti_flicker,
             status.white_balance,
             status.image,
+            status.device_sleep,
+            status.locked_target,
             status.hand,
             status.hand_range,
             status.zone_tracking,

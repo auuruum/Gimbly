@@ -26,10 +26,11 @@
 //! | 16.. | data, then padding |
 
 use super::{
-    AiMode, AntiFlicker, AutoZoom, DeviceSleep, FOCUS_MAX, Focus, FocusMode, Fov, GESTURE_ZOOM,
-    Gesture, GimbalCommand, Hand, ObjectFraming, PRESET_NAME_MAX, PRESET_SLOTS, PresetPosition,
-    TargetBox, TrackingMode, TrackingRange, TrackingSpeed, VoiceRange, WB_SHIFT_MAX,
-    WB_TEMPERATURE, WhiteBalance, ZONE_AREAS, ZOOM_RATIO_MAX, Zone,
+    AiMode, AntiFlicker, Audio, AudioInput, AudioMode, AutoZoom, DeviceSleep, FOCUS_MAX, Focus,
+    FocusMode, Fov, GESTURE_ZOOM, Gesture, GimbalCommand, Hand, ObjectFraming, PRESET_NAME_MAX,
+    PRESET_SLOTS, PresetPosition, TargetBox, TrackingMode, TrackingRange, TrackingSpeed,
+    VOICE_ZOOM_MAX, VoiceCommand, VoiceControl, VoiceRange, WB_SHIFT_MAX, WB_TEMPERATURE,
+    WhiteBalance, ZONE_AREAS, ZOOM_RATIO_MAX, Zone,
 };
 
 /// GUID of the extension unit, as the UVC descriptor stores it.
@@ -920,6 +921,113 @@ pub fn gesture_zoom(ratio: f32) -> Message {
 pub fn read_locked_target(data: &[u8]) -> Option<bool> {
     sleeping(data)?;
     Some(*data.get(1)? == 1)
+}
+
+/// Voice Control settings: selector 6 `15 02 key value`.
+fn voice_block(key: u8, value: u8) -> [u8; MESSAGE_LEN] {
+    view_block(&[0x15, 2, key, value])
+}
+
+/// Turns one voice command on or off.
+pub fn voice_command(command: VoiceCommand, on: bool) -> [u8; MESSAGE_LEN] {
+    voice_block(command as u8, on.into())
+}
+
+/// The language the camera listens for (key `65`: 1 English, 0 Chinese).
+pub fn voice_language(english: bool) -> [u8; MESSAGE_LEN] {
+    voice_block(0x65, english.into())
+}
+
+/// The voice Zoom Factor (key `64`) in steps above 1.0x.
+pub fn voice_zoom(steps: u8) -> [u8; MESSAGE_LEN] {
+    voice_block(0x64, steps.min(VOICE_ZOOM_MAX))
+}
+
+/// Voice Locator (selector 6 `23 02 00 v`).
+pub fn voice_locator(on: bool) -> [u8; MESSAGE_LEN] {
+    view_block(&[0x23, 2, 0, on.into()])
+}
+
+/// Voice Control: status offset 20 the language (1 English, 0 Chinese),
+/// 21 one bit per command, 22 the Zoom Factor steps and bit 0 of 44
+/// Voice Locator. Other values were never seen.
+pub fn read_voice_control(data: &[u8]) -> Option<VoiceControl> {
+    sleeping(data)?;
+    let english = match *data.get(20)? {
+        value @ 0..=1 => value == 1,
+        _ => return None,
+    };
+    let commands = data.get(21).copied().filter(|c| c & 0x80 == 0)?;
+    let zoom = data.get(22).copied().filter(|&z| z <= VOICE_ZOOM_MAX)?;
+    Some(VoiceControl {
+        english,
+        commands,
+        locator: *data.get(44)? & 1 == 1,
+        zoom,
+    })
+}
+
+/// The Vox Wireless Mic receiver's address.
+pub const VOX: u8 = 0x13;
+
+/// Audio Input (`42 89` to the camera, u8 0 the built-in microphones, 3 Vox).
+pub fn audio_input(input: AudioInput) -> Message {
+    let value = match input {
+        AudioInput::Camera => 0,
+        AudioInput::Vox => 3,
+    };
+    Message::new(CAMERA, [0x42, 0x89], vec![value])
+}
+
+/// Starts pairing Vox transmitter 1 or 2 (`0e 0c` to the receiver), or
+/// ends pairing (`ce 0d`). The official app asks for a reply to both.
+pub fn vox_pairing(transmitter: Option<u8>) -> Message {
+    match transmitter {
+        Some(tx) => Message::new(VOX, [0x0e, 0x0c], vec![tx.clamp(1, 2)]),
+        None => Message::new(VOX, [0xce, 0x0d], Vec::new()),
+    }
+    .requesting_reply()
+}
+
+/// Audio Mode (selector 6 `22 02 00 m`).
+pub fn audio_mode(mode: AudioMode) -> [u8; MESSAGE_LEN] {
+    view_block(&[0x22, 2, 0, mode as u8])
+}
+
+/// Microphone Status During Sleep (selector 6 `13 01 v`).
+pub fn sleep_mic(on: bool) -> [u8; MESSAGE_LEN] {
+    view_block(&[0x13, 1, on.into()])
+}
+
+/// The microphone on or off (selector 6 `1c 01 v`); the camera restarts.
+pub fn microphone(on: bool) -> [u8; MESSAGE_LEN] {
+    view_block(&[0x1c, 1, on.into()])
+}
+
+/// Audio: status offset 40 bits 0-2 the input (0 built-in, 3 Vox) and bits
+/// 3-5 the mode, 16 Microphone Status During Sleep, and bit 4 of 34 the
+/// microphone. Other values were never seen.
+pub fn read_audio(data: &[u8]) -> Option<Audio> {
+    sleeping(data)?;
+    let value = *data.get(40)?;
+    let input = match value & 7 {
+        0 => AudioInput::Camera,
+        3 => AudioInput::Vox,
+        _ => return None,
+    };
+    let mode = AudioMode::ALL
+        .into_iter()
+        .find(|&mode| mode as u8 == value >> 3)?;
+    let sleep_mic = match *data.get(16)? {
+        value @ 0..=1 => value == 1,
+        _ => return None,
+    };
+    Some(Audio {
+        input,
+        mode,
+        sleep_mic,
+        microphone: *data.get(34)? & 0x10 != 0,
+    })
 }
 
 /// What Auto Focus looks at (`02 36` to the camera, u32 0 Global, 1 Face).
@@ -2565,6 +2673,99 @@ mod tests {
         (block[10], block[11]) = (0, 0);
         assert_eq!(read_device_sleep(&block), None);
         assert_eq!(read_device_sleep(&padded(BLACK_MIRRORED)[..29]), None);
+    }
+
+    /// Status blocks from the 2026-11-28 Voice Control and Audio capture.
+    const VOICE_DEFAULT: &str = "2e00000100000001000178000001015a01000000017f000000004b030000553c00031000000000000800000003010100";
+    const MIC_OFF: &str = "2e00000100000001000178000001015a01000000017f000000004b030000003c00030000000000000800000003010100";
+
+    #[test]
+    fn voice_control_matches_capture() {
+        assert_eq!(
+            voice_command(VoiceCommand::SleepTiny, false).to_vec(),
+            padded("15020100")
+        );
+        assert_eq!(
+            voice_command(VoiceCommand::HiTiny, true).to_vec(),
+            padded("15020001")
+        );
+        assert_eq!(
+            voice_command(VoiceCommand::Positions, true).to_vec(),
+            padded("15020601")
+        );
+        assert_eq!(voice_language(false).to_vec(), padded("15026500"));
+        assert_eq!(voice_language(true).to_vec(), padded("15026501"));
+        assert_eq!(voice_zoom(50).to_vec(), padded("15026432"));
+        assert_eq!(voice_zoom(255).to_vec(), padded("15026464"));
+        assert_eq!(voice_locator(false).to_vec(), padded("23020000"));
+        assert_eq!(voice_locator(true).to_vec(), padded("23020001"));
+
+        let voice = read_voice_control(&padded(VOICE_DEFAULT)).unwrap();
+        assert!(voice.english && voice.locator);
+        assert_eq!((voice.commands, voice.zoom), (0x7f, 0));
+        assert!(VoiceCommand::ALL.into_iter().all(|c| voice.on(c)));
+
+        let mut block = padded(VOICE_DEFAULT);
+        (block[20], block[21], block[22], block[44]) = (0, 0x7b, 33, 2);
+        let voice = read_voice_control(&block).unwrap();
+        assert!(!voice.english && !voice.locator && !voice.on(VoiceCommand::TrackMe));
+        assert!(voice.on(VoiceCommand::UnlockMe));
+        assert!((voice.zoom_ratio() - 1.99).abs() < 1e-4);
+        block[22] = 101;
+        assert_eq!(read_voice_control(&block), None);
+        block[22] = 0;
+        block[20] = 2;
+        assert_eq!(read_voice_control(&block), None);
+        assert_eq!(read_voice_control(&padded(VOICE_DEFAULT)[..44]), None);
+    }
+
+    #[test]
+    fn audio_matches_capture() {
+        let modes = [
+            (AudioMode::Pure, "22020005", 0x28),
+            (AudioMode::SmartOmni, "22020000", 0x00),
+            (AudioMode::Directional, "22020002", 0x10),
+            (AudioMode::DualDirectional, "22020004", 0x20),
+            (AudioMode::Spatial, "22020001", 0x08),
+        ];
+        let mut block = padded(VOICE_DEFAULT);
+        for (mode, sent, status) in modes {
+            assert_eq!(audio_mode(mode).to_vec(), padded(sent));
+            block[40] = status;
+            assert_eq!(read_audio(&block).map(|a| a.mode), Some(mode));
+        }
+        assert_eq!(sleep_mic(false).to_vec(), padded("130100"));
+        assert_eq!(microphone(false).to_vec(), padded("1c0100"));
+        assert_eq!(microphone(true).to_vec(), padded("1c0101"));
+        assert_eq!(audio_input(AudioInput::Vox).data, [3]);
+        assert_eq!(audio_input(AudioInput::Camera).data, [0]);
+        assert_eq!(audio_input(AudioInput::Vox).command, [0x42, 0x89]);
+        let pair = vox_pairing(Some(2));
+        assert_eq!(
+            (pair.destination, pair.command, pair.data),
+            (VOX, [0x0e, 0x0c], vec![2])
+        );
+        assert_eq!(vox_pairing(None).command, [0xce, 0x0d]);
+
+        let audio = read_audio(&padded(VOICE_DEFAULT)).unwrap();
+        assert_eq!(
+            audio,
+            Audio {
+                input: AudioInput::Camera,
+                mode: AudioMode::Spatial,
+                sleep_mic: true,
+                microphone: true,
+            }
+        );
+        assert!(!read_audio(&padded(MIC_OFF)).unwrap().microphone);
+        block[40] = 0x0b;
+        let vox = read_audio(&block).unwrap();
+        assert_eq!((vox.input, vox.mode), (AudioInput::Vox, AudioMode::Spatial));
+        block[40] = 0x18;
+        assert_eq!(read_audio(&block), None);
+        block[40] = 0x09;
+        assert_eq!(read_audio(&block), None);
+        assert_eq!(read_audio(&padded(VOICE_DEFAULT)[..40]), None);
     }
 
     #[test]

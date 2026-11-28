@@ -126,6 +126,8 @@ impl<T: Transport> Channel<T> {
         status.image = image;
         status.device_sleep = view.and_then(|view| view.device_sleep);
         status.locked_target = view.and_then(|view| view.locked_target);
+        status.voice_control = view.and_then(|view| view.voice_control);
+        status.audio = view.and_then(|view| view.audio);
         status.object_framing = view.and_then(|view| view.object_framing);
         status.tracking_speed = tracking_speed;
         status.hand = hand;
@@ -221,6 +223,8 @@ impl<T: Transport> Channel<T> {
             object_framing: vendor::read_object_framing(block),
             device_sleep: vendor::read_device_sleep(block),
             locked_target: vendor::read_locked_target(block),
+            voice_control: vendor::read_voice_control(block),
+            audio: vendor::read_audio(block),
         })
     }
 
@@ -896,6 +900,62 @@ impl<T: Transport> Channel<T> {
                 }
             }
             GimbalCommand::SetGestureZoom(ratio) => self.send(vendor::gesture_zoom(ratio))?,
+            GimbalCommand::SetVoiceCommand(command, on) => {
+                self.set(
+                    vendor::SELECTOR_VIEW,
+                    &mut vendor::voice_command(command, on),
+                )?;
+                if let Some(voice) = &mut shared.status().voice_control {
+                    voice.set(command, on);
+                }
+            }
+            GimbalCommand::SetVoiceLocator(on) => {
+                self.set(vendor::SELECTOR_VIEW, &mut vendor::voice_locator(on))?;
+                if let Some(voice) = &mut shared.status().voice_control {
+                    voice.locator = on;
+                }
+            }
+            GimbalCommand::SetVoiceEnglish(english) => {
+                self.set(vendor::SELECTOR_VIEW, &mut vendor::voice_language(english))?;
+                if let Some(voice) = &mut shared.status().voice_control {
+                    voice.english = english;
+                }
+            }
+            GimbalCommand::SetVoiceZoom(steps) => {
+                let steps = steps.min(super::VOICE_ZOOM_MAX);
+                self.set(vendor::SELECTOR_VIEW, &mut vendor::voice_zoom(steps))?;
+                if let Some(voice) = &mut shared.status().voice_control {
+                    voice.zoom = steps;
+                }
+            }
+            GimbalCommand::SetAudioInput(input) => {
+                self.send(vendor::audio_input(input))?;
+                if let Some(audio) = &mut shared.status().audio {
+                    audio.input = input;
+                }
+            }
+            GimbalCommand::SetAudioMode(mode) => {
+                self.set(vendor::SELECTOR_VIEW, &mut vendor::audio_mode(mode))?;
+                if let Some(audio) = &mut shared.status().audio {
+                    audio.mode = mode;
+                }
+            }
+            GimbalCommand::SetSleepMic(on) => {
+                self.set(vendor::SELECTOR_VIEW, &mut vendor::sleep_mic(on))?;
+                if let Some(audio) = &mut shared.status().audio {
+                    audio.sleep_mic = on;
+                }
+            }
+            GimbalCommand::SetMicrophone(on) => {
+                // The camera restarts and comes back as a new device.
+                self.set(vendor::SELECTOR_VIEW, &mut vendor::microphone(on))?;
+                if let Some(audio) = &mut shared.status().audio {
+                    audio.microphone = on;
+                }
+            }
+            GimbalCommand::PairVox(transmitter) => {
+                self.exchange(vendor::vox_pairing(transmitter))?;
+            }
             GimbalCommand::SetImage(image) => {
                 let new = image.values().map(|v| v.min(IMAGE_MAX));
                 for (i, control) in IMAGE_CONTROLS.into_iter().enumerate() {
@@ -1183,6 +1243,14 @@ fn commands_loop(
                             | GimbalCommand::SetSleepBackground(_)
                             | GimbalCommand::SetSleepMirror(_)
                             | GimbalCommand::SetGesture(..)
+                            | GimbalCommand::SetVoiceCommand(..)
+                            | GimbalCommand::SetVoiceLocator(_)
+                            | GimbalCommand::SetVoiceEnglish(_)
+                            | GimbalCommand::SetVoiceZoom(_)
+                            | GimbalCommand::SetAudioInput(_)
+                            | GimbalCommand::SetAudioMode(_)
+                            | GimbalCommand::SetSleepMic(_)
+                            | GimbalCommand::SetMicrophone(_)
                             | GimbalCommand::SelectPoint { .. }
                             | GimbalCommand::SelectObject(_)
                             | GimbalCommand::CancelTarget
@@ -1223,6 +1291,7 @@ fn commands_loop(
                     status.device_sleep,
                     status.locked_target,
                 );
+                let before_audio = (status.voice_control, status.audio);
                 let tracking_mode = status.tracking_mode;
                 // Unknown values (such as the switching value 6) keep the old state.
                 status.ai_mode = view.ai_mode.or(status.ai_mode);
@@ -1236,6 +1305,8 @@ fn commands_loop(
                 status.anti_flicker = view.anti_flicker.or(status.anti_flicker);
                 status.device_sleep = view.device_sleep.or(status.device_sleep);
                 status.locked_target = view.locked_target.or(status.locked_target);
+                status.voice_control = view.voice_control.or(status.voice_control);
+                status.audio = view.audio.or(status.audio);
                 // Another app may turn tracking on later in a mode we cannot read.
                 if view.ai_mode.is_some_and(|mode| mode != AiMode::Human) {
                     status.tracking_mode = None;
@@ -1262,6 +1333,7 @@ fn commands_loop(
                         status.device_sleep,
                         status.locked_target,
                     )
+                    || before_audio != (status.voice_control, status.audio)
                     || tracking_mode != status.tracking_mode;
                 drop(status);
                 if changed {
@@ -1411,6 +1483,8 @@ pub(super) struct View {
     pub object_framing: Option<ObjectFraming>,
     pub device_sleep: Option<super::DeviceSleep>,
     pub locked_target: Option<bool>,
+    pub voice_control: Option<super::VoiceControl>,
+    pub audio: Option<super::Audio>,
 }
 
 /// Finds the control interface and unit by GUID in a USB descriptor stream.
@@ -1566,6 +1640,8 @@ pub(super) fn report(xu: &mut Channel<impl Transport>) -> Vec<String> {
             Feature::WhiteBalance => format!("{:?}", xu.read_white_balance()),
             Feature::Image => format!("{:?}", xu.read_image()),
             Feature::DeviceSleep => format!("{:?}", view.map(|v| v.device_sleep)),
+            Feature::VoiceControl => format!("{:?}", view.map(|v| v.voice_control)),
+            Feature::Audio => format!("{:?}", view.map(|v| v.audio)),
             Feature::Gestures => format!(
                 "Locked Target {:?} (the other gestures are not reported)",
                 view.map(|v| v.locked_target)

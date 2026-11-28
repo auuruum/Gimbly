@@ -65,12 +65,19 @@ bytes. `u32`, `i16` and `f32` are little-endian.
 | 13 | Auto Focus Mode | 0 Global, 1 Face |
 | 14 | Auto Focus | 0 off, 1 on |
 | 15 | Manual Focus position | 0 to 100 |
+| 16 | Microphone Status During Sleep | 0 off, 1 on |
+| 20 | Voice Control language | 0 Chinese, 1 English |
+| 21 | voice commands | one bit per command key below |
+| 22 | voice Zoom Factor | steps of 0.03 above 1.0x, 0 to 100 |
 | 24 | AI mode | 0 off, 2 human, 3 hand, 7 voice, 6 switching (under 2 s) |
 | 27 | Sleep Background | 0 to 3 |
 | 28 | object framing, while AI mode is 2 | `14` Normal, `17` Close-up |
 | 29 | Sleep Background Mirror | 0 off, 1 on |
 | 31 | frame rate | fps the camera streams at: 30 (`1e`), 60 (`3c`) |
+| 34 | microphone | bit 4 set while the microphone is on |
+| 40 | audio | bits 0-2 the input (0 built-in, 3 Vox), bits 3-5 the Audio Mode |
 | 42 | Auto Zoom | as in [Auto Zoom](#auto-zoom) |
+| 44 | Voice Locator | bit 0 |
 | 46 | voice bits | bit 1 Forward range, bit 0 Sound Source |
 
 ## Gimbal
@@ -150,6 +157,34 @@ Note: [device sleep and gestures](clean-room/2026-11-28-device-sleep-gestures.md
 
 The camera reports no other gesture; the official app keeps them itself.
 Note: [device sleep and gestures](clean-room/2026-11-28-device-sleep-gestures.md).
+
+## Voice Control
+
+| Action | Message | Data |
+| --- | --- | --- |
+| Command on / off | `sel 6: 15 02 k v` | k: 0 Hi Tiny, 1 Sleep Tiny, 2 Track Me, 3 Unlock Me, 4 Zoom in Closer, 5 Zoom out Further, 6 Position One/Two/Three; v: 1 on, 0 off |
+| Language | `sel 6: 15 02 65 v` | v: 0 Chinese, 1 English |
+| Zoom Factor | `sel 6: 15 02 64 n` | n: 0 to 100, ratio 1.0 + 0.03 n; the camera zooms to it |
+| Voice Locator | `sel 6: 23 02 00 v` | v: 1 on, 0 off |
+| Read | status block offsets 20, 21, 22 and 44 | |
+
+Note: [voice control and audio](clean-room/2026-11-28-voice-control-audio.md).
+
+## Audio
+
+| Action | Message | Data |
+| --- | --- | --- |
+| Audio Input | `42 89 → 02` | u8: 0 built-in microphones, 3 Vox Wireless Mic |
+| Audio Mode | `sel 6: 22 02 00 m` | m: 0 Smart Omni, 1 Spatial, 2 Directional, 4 Dual-Directional, 5 Pure |
+| Microphone Status During Sleep | `sel 6: 13 01 v` | v: 1 on, 0 off |
+| Microphone on / off | `sel 6: 1c 01 v` | v: 1 on, 0 off; the camera restarts and comes back without (or with) its audio device |
+| Start Vox pairing | `0e 0c → 13`, reply wanted | u8 transmitter, 1 or 2; reply echoes it |
+| End Vox pairing | `ce 0d → 13`, reply wanted | none; reply `01` |
+| Read | status block offsets 16, 34 and 40 | |
+
+Destination `13` is the Vox receiver; the camera answered there without a
+Vox Wireless Mic attached. Note:
+[voice control and audio](clean-room/2026-11-28-voice-control-audio.md).
 
 ## Human Tracking
 

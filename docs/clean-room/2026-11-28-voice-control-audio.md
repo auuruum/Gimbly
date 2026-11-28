@@ -1,15 +1,21 @@
 # Voice Control and Audio (More tab)
 
-Status: **UI observed; a capture exists but is not decoded yet.** Nothing is implemented in
-Gimbly from this note yet; the messages are unknown.
-
 ## Source and method
 
-2026-11-28, 18:16-18:19. Claude Code looked at the **Voice Control** and
-**Audio** sections of the More tab in the visible OBSBOT Center UI: help
-icons, drop-downs, hover and right-click. The USB capture could not be
-started: the UAC prompt for USBPcap was not answered three times (18:12,
-18:14, 18:18), so no click below has its USB traffic recorded.
+2026-11-28. Claude Code went through every control of the **Voice
+Control** and **Audio** sections of the More tab in the visible OBSBOT
+Center UI, one action at a time, and checked the UI after each one:
+
+- 18:16-18:19 a first look without a capture (the UAC prompt for USBPcap
+  was not answered); a few clicks then were swallowed by a notice and not
+  applied.
+- 18:40-18:49 every control again with a USB capture (USBPcap, snap length
+  512, camera at address 1 on `\\.\USBPcap3`, Gimbly closed).
+- 18:59-19:00 a second capture: the sleep screen's microphone switch and
+  AddTX2.
+
+The captures stay outside the repository and were decoded with our own
+script.
 
 ## Setup
 
@@ -80,9 +86,7 @@ No hover text, no right-click menus.
 
 ## Observed: second pass, 18:40-18:49, with a USB capture running
 
-Capture on `\\.\USBPcap3`, snap length 512, started 18:40:22. It could
-not be stopped or read yet (it runs elevated; two later UAC prompts were
-not answered), so the USB side is still unknown. Actions, about 4 s apart:
+Capture started 18:40:22. Actions, about 4 s apart:
 
 | time | action |
 | --- | --- |
@@ -127,29 +131,119 @@ What the UI showed:
 - The Gesture Control section showed Dynamic Zoom on, which it was not
   on 13:11 earlier today; not touched in this session (unknown cause).
 
+Second capture, 18:59-19:00: the camera was asleep; the sleep screen's
+"MIC Status During Sleep" switch off and on, Resume, Audio Input Vox,
+AddTX2, the pairing box closed with its X, Cam Built-in Mic.
+
+## Observed: USB
+
+Voice Control, selector 6 blocks `15 02 key value`:
+
+| key | control | value |
+| --- | --- | --- |
+| 0 | Hi, Tiny | 0 off, 1 on |
+| 1 | Sleep, Tiny | |
+| 2 | Track Me | |
+| 3 | Unlock Me | |
+| 4 | Zoom in Closer | |
+| 5 | Zoom out Further | |
+| 6 | Position One/Two/Three | |
+| `65` | Language | 0 Chinese, 1 English |
+| `64` | Zoom Factor | 0 to 100 (`64`) |
+
+- Voice Locator: `23 02 00 v`.
+- Zoom Factor: 4.00 sent 100, 1.00 sent 0, one arrow step 1, typed 2.5
+  sent 50, 1.234 sent 7, 2 sent 33 (shown as 1.99 after the restart).
+  While typing the app also sent the partial value (`2` before `2.5`).
+  A refused value resent the old one. The camera zoomed to the factor
+  (status offset 4 followed it) without any zoom message from the app.
+- Audio Mode: `22 02 00 m`, m 5 Pure, 1 Spatial, 0 Smart Omni,
+  2 Directional, 4 Dual-Directional.
+- Microphone Status During Sleep: `13 01 v`, also from the sleep screen.
+- Disable Microphone: `1c 01 00` turns the microphone off, `1c 01 01` on;
+  the camera restarts and the app reopens it (the start-up reads follow).
+  "No" sent nothing.
+- Audio Input: `42 89` to the camera with u8 3 (Vox) or 0 (built-in).
+- AddTX1 / AddTX2: `0e 0c` to destination `13` with 1 or 2, reply
+  wanted; the reply echoed the number. End Pairing and the box's X both
+  sent `ce 0d` to `13` (reply `01`). Nothing was paired.
+
+Status block (the 60-byte block on selector 6):
+
+- 20: language (0 Chinese, 1 English).
+- 21: one bit per command key (`7f` with all on; Track Me off gave `7b`).
+- 22: Zoom Factor steps.
+- 44: bit 0 Voice Locator (`03` on, `02` off; bit 1 unknown).
+- 40: bits 0-2 the input (0 built-in, 3 Vox), bits 3-5 the mode (same
+  numbers as written): `08` Spatial, `28` Pure, `0b` Spatial with Vox.
+- 16: Microphone Status During Sleep.
+- 34: `10` with the microphone on, `00` after it was turned off and the
+  camera came back.
+
 ## Inferred
 
-- Voice commands are recognised by the camera, so each switch is most
-  likely a camera setting sent over USB; the Language drop-down too.
-- "Vox Wireless Mic" refers to a separate OBSBOT wireless microphone; the
-  owner has none, so that choice cannot be checked here.
+- The official app reads these settings from the status block, as
+  Gimbly does: after its restart it showed the camera's 1.99, not the 2
+  typed before.
+- Destination `13` is the Vox receiver built into the camera.
 
 ## Unknown
 
-- Every USB message: needs the capture (see the research loop).
-- Whether the camera reports any of these values in the status block.
-- Whether Sleep, Track Me and the others also show the notice.
-- Zoom Factor range and steps.
-- What Disable Microphone and Microphone Status During Sleep do to the
-  USB audio stream.
+- Bit 1 of offset 44 and the other bits of offset 34.
+- What Noise Reduction offers (greyed out without a paired Vox) and how a
+  paired transmitter is reported.
+- Whether the spoken commands work; none was tried by voice.
+- Whether Voice Locator is refused at 1080P 120 (the help text says so).
 
-## Next step
+## Gimbly
 
-Rerun with the USB capture: every switch off and on, both languages,
-all five audio modes, Zoom Factor at both ends, typed and stepped, both
-Audio Input choices, Voice Locator with Hi, Tiny on and off, and an app
-restart. Then implement in Gimbly from that capture.
+- More tab: both sections with the same controls, order, defaults,
+  dependencies (Voice Locator only with Hi, Tiny on; Vox hides Audio Mode
+  and Disable Microphone and shows AddTX1/AddTX2, a greyed sleep switch
+  and Noise Reduction), help texts in our own words, the notice with
+  "Don't show again" (`[VoiceControl] NoticeOff`), and the question before
+  the microphone switch. The sleep screen's switch is now live.
+- Every value is read from the status block.
+- Language names are "Chinese" and "English" and the rows keep their
+  English labels: Gimbly's fonts have no Chinese glyphs.
+- The Zoom Factor is sent once per change, not per keystroke; a typed
+  value is rounded down to a step, like the camera.
+- At 120 fps and above Audio Mode only offers Smart Omni (help text).
+- Gimbly had no way to reopen a camera that went away. After Disable
+  Microphone it now waits for the camera to drop, then looks for the
+  OBSBOT camera every 3 s and reopens it, for up to 60 s.
 
 ## Tests
 
-None yet.
+- `camera::vendor::tests::voice_control_matches_capture` and
+  `audio_matches_capture` use the captured bytes and status blocks.
+- `app::view_more::tests::typed_voice_zoom_rounds_down_like_the_camera`.
+- `app::tests::a_restarting_camera_is_reopened_once_it_went_away`.
+- `settings::tests::round_trips_through_ini` covers the notice setting.
+
+## Checked in Gimbly
+
+2026-11-28 19:05-19:21, same camera and OS, OBSBOT Center closed, with a
+USB capture:
+
+- `gimbly --probe --virtual-camera --gimbal DIR wake voice:2:off
+  voice:2:on voice:locator:off voice:locator:on voice:lang:zh
+  voice:lang:en voice:zoom:33 voice:zoom:0 audiomode:0 audiomode:2
+  audiomode:1 sleepmic:off sleepmic:on`: no errors; the status read after
+  each step showed the new value.
+- Running app: Track Me off and on (notice), Voice Locator, Hi, Tiny off
+  hides Voice Locator, Language both ways, Zoom Factor typed 2 (shows
+  1.99), arrow up (2.02), typed 1, arrow down at 1.00 stays; all three
+  help boxes; Audio Mode Directional and Spatial; Microphone Status
+  During Sleep both ways, here and on the sleep screen; Vox, AddTX1, End
+  Pairing, back to the built-in mic.
+- Disable Microphone with the virtual camera on: the first build lost the
+  camera for good; after the fix, off and on each restarted the camera
+  and Gimbly reopened it by itself, controls live again within the
+  minute.
+- The captured blocks and messages matched the official app's byte for
+  byte (Gimbly uses channel 1 in framed messages, as everywhere).
+- Linux and macOS: compiled by CI only, not run.
+
+The camera was left with every voice command on, English, Voice Locator
+on, Zoom Factor 1.00, Spatial, microphone on, sleep microphone on.

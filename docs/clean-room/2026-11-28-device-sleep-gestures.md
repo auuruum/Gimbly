@@ -152,5 +152,22 @@ captured blocks and messages matched the official app's byte for byte.
 The camera was left at 2min, picture 4, mirror off, zoom 1.0, all gestures
 off.
 
-The panel itself was not clicked through in the running app: the screen
-access to the Gimbly window was not granted in this session.
+Running app, 13:34-13:39, same camera, OBSBOT Center closed:
+
+- The More tab read the camera (2min, picture 4, mirror off).
+- Sleep Time 30s and 2min, Auto Sleep off (time hidden) and on, all four
+  tiles, mirror on and off: each value held after the next status poll.
+- Both `?` buttons opened their Tips; a click on the `?` did not fold the
+  section. Both sections fold and unfold; right-click does nothing.
+- Locked Target on showed the notice and stayed on after the poll (status
+  offset 1). Zoom on showed it again; with "Don't show again" ticked,
+  Dynamic Zoom and Direction Flip showed nothing.
+- Zoom Factor dragged to 1.00 and 4.00, up arrow at 4.00 stayed, down
+  arrow gave 3.99, typed `2.5` and `1.234` (1.23) taken, `5` refused. The
+  Console zoom showed 1.23x, so the camera zoomed with the factor.
+- After closing and starting Gimbly again, Zoom, Dynamic Zoom, Direction
+  Flip and 1.23 were restored from `[Gestures]`.
+- The first build showed a help icon after Direction Flip, which the
+  official app does not have; it was removed and the switch checked again.
+
+The camera and Gimbly's settings were left as they were before the test.

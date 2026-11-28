@@ -1,7 +1,7 @@
 //! The More tab: Device Sleep and Gesture Control.
 
 use super::view_exposure::slider_row;
-use super::{GimblyApp, switch_row, tips};
+use super::{GimblyApp, tips};
 use crate::camera::{
     DeviceSleep, Feature, GESTURE_ZOOM, Gesture, GimbalCommand, SLEEP_BACKGROUNDS, SLEEP_TIMES,
 };
@@ -77,18 +77,9 @@ impl GimblyApp {
         band(ui, CARD, more_margin(), |ui| {
             ui.spacing_mut().item_spacing = vec2(8.0, 16.0);
             ui.add_enabled_ui(shown.is_some(), |ui| {
-                ui.horizontal(|ui| {
-                    ui.set_height(24.0);
-                    ui.label(egui::RichText::new("Auto Sleep").size(15.0));
-                    let switch = ui
-                        .with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            toggle(ui, sleep.auto_sleep())
-                        })
-                        .inner;
-                    if switch.clicked() {
-                        command = Some(GimbalCommand::SetSleepTime(-sleep.time));
-                    }
-                });
+                if plain_switch(ui, "Auto Sleep", sleep.auto_sleep()).clicked() {
+                    command = Some(GimbalCommand::SetSleepTime(-sleep.time));
+                }
                 // Like the official app, the time is hidden while Auto Sleep is off.
                 if sleep.auto_sleep() {
                     ui.horizontal(|ui| {
@@ -127,18 +118,9 @@ impl GimblyApp {
                 {
                     command = Some(GimbalCommand::SetSleepBackground(index));
                 }
-                ui.horizontal(|ui| {
-                    ui.set_height(24.0);
-                    ui.label(egui::RichText::new("Sleep Background Mirror").size(15.0));
-                    let switch = ui
-                        .with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            toggle(ui, sleep.mirror)
-                        })
-                        .inner;
-                    if switch.clicked() {
-                        command = Some(GimbalCommand::SetSleepMirror(!sleep.mirror));
-                    }
-                });
+                if plain_switch(ui, "Sleep Background Mirror", sleep.mirror).clicked() {
+                    command = Some(GimbalCommand::SetSleepMirror(!sleep.mirror));
+                }
             })
             .response
             .on_disabled_hover_text(&tip);
@@ -215,14 +197,7 @@ impl GimblyApp {
                     changed = Some((Gesture::DynamicZoom, !dynamic));
                 }
                 let flip = gestures.direction_flip;
-                let (switch, _) = switch_row(
-                    ui,
-                    "Direction Flip",
-                    "Swaps left and right for the gestures",
-                    None,
-                    flip,
-                );
-                if switch.clicked() {
+                if plain_switch(ui, "Direction Flip", flip).clicked() {
                     changed = Some((Gesture::DirectionFlip, !flip));
                 }
             })
@@ -353,6 +328,17 @@ fn background_tiles(ui: &mut Ui, selected: u8) -> Option<u8> {
         }
     });
     clicked
+}
+
+/// A label and a switch, without the help icon of `switch_row`; returns the switch.
+fn plain_switch(ui: &mut Ui, label: &str, on: bool) -> egui::Response {
+    ui.horizontal(|ui| {
+        ui.set_height(24.0);
+        ui.label(egui::RichText::new(label).size(15.0));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| toggle(ui, on))
+            .inner
+    })
+    .inner
 }
 
 /// A gesture with its icon tile, title, hint and switch; returns the switch.

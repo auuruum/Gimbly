@@ -241,6 +241,24 @@ manual values while Auto WB is on and the shift while it is off.
 
 Note: [white balance](clean-room/2026-11-28-white-balance.md).
 
+## Image
+
+Contrast, saturation, sharpness and hue are standard UVC processing unit
+controls, written through `IAMVideoProcAmp` on Windows, V4L2 on Linux and
+plain UVC requests on macOS. Each is a u16 from 0 to 100; 50 is the default
+the official app's reset writes.
+
+| Control | UVC selector |
+| --- | --- |
+| Contrast | `PU_CONTRAST_CONTROL` (3) |
+| Hue | `PU_HUE_CONTROL` (6) |
+| Saturation | `PU_SATURATION_CONTROL` (7) |
+| Sharpness | `PU_SHARPNESS_CONTROL` (8) |
+
+A sleeping camera answers reads with `c0 63`, which is out of range.
+
+Note: [image](clean-room/2026-11-28-image.md).
+
 ## Zone Tracking
 
 Settings as in [Tracking Speed](#tracking-speed).

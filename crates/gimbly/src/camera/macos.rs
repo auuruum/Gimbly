@@ -290,7 +290,7 @@ impl Transport for Xu {
             .write(terminal, 6, &u16::from(position).to_le_bytes())
     }
 
-    // Plain UVC processing unit requests: 2-byte backlight and gain, 1-byte
+    // Plain UVC processing unit requests: 2-byte values except the 1-byte
     // power line frequency.
     fn get_processing(&mut self, control: Processing) -> Result<i32, String> {
         let unit = self

@@ -284,6 +284,10 @@ fn processing_cid(control: Processing) -> Cid {
         Processing::Backlight => Cid::BACKLIGHT_COMPENSATION,
         Processing::Gain => Cid::GAIN,
         Processing::PowerLine => Cid::POWER_LINE_FREQUENCY,
+        Processing::Contrast => Cid::CONTRAST,
+        Processing::Hue => Cid::HUE,
+        Processing::Saturation => Cid::SATURATION,
+        Processing::Sharpness => Cid::SHARPNESS,
     }
 }
 

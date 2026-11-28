@@ -108,6 +108,15 @@ fn control_step(step: &str, wb: Option<camera::WhiteBalance>) -> Option<Command>
             temperature: kelvin.parse().ok()?,
             ..wb?
         }),
+        // Image as `image:CONTRAST,SATURATION,SHARPNESS,HUE`, each 0 to 100.
+        ["image", values] => GimbalCommand::SetImage(camera::ImageAdjust::from_values(
+            values
+                .split(',')
+                .map(|v| v.parse().ok())
+                .collect::<Option<Vec<u8>>>()?
+                .try_into()
+                .ok()?,
+        )),
         // Curve points as `curve:x,y;x,y`; `curve` alone clears it.
         ["curve"] => GimbalCommand::SetExposureCurve(Vec::new()),
         ["curve", points] => GimbalCommand::SetExposureCurve(
@@ -173,7 +182,7 @@ fn gimbal(session: &camera::Session, args: &[String], virtual_camera: bool) -> i
             .and_then(|f| crate::snapshot::save(&f, Path::new(dir), [0, 0, 0, 0, 0, step as u16]));
         let status = session.status();
         println!(
-            "step {step}: {saved:?}, vendor control {}, sleeping {}, AI mode {:?} {:?}, auto zoom {:?}, speed {:?}, voice range {:?}, sound source {:?}, HDR {:?}, focus {:?}, exposure {:?} mode {:?} curve {:?} anti-flicker {:?}, white balance {:?}, hand {:?} {:?}, zone {:?} {:?}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
+            "step {step}: {saved:?}, vendor control {}, sleeping {}, AI mode {:?} {:?}, auto zoom {:?}, speed {:?}, voice range {:?}, sound source {:?}, HDR {:?}, focus {:?}, exposure {:?} mode {:?} curve {:?} anti-flicker {:?}, white balance {:?}, image {:?}, hand {:?} {:?}, zone {:?} {:?}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
             status.vendor_control,
             status.sleeping,
             status.ai_mode,
@@ -189,6 +198,7 @@ fn gimbal(session: &camera::Session, args: &[String], virtual_camera: bool) -> i
             status.exposure_curve,
             status.anti_flicker,
             status.white_balance,
+            status.image,
             status.hand,
             status.hand_range,
             status.zone_tracking,

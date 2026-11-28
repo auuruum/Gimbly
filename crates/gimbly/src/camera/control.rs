@@ -5,9 +5,9 @@ use super::queue::Receiver;
 use super::sleep::SleepReadback;
 use super::{
     AiMode, AntiFlicker, Area, AutoZoom, COMPENSATION_MAX, Command, Composition, Exposure,
-    FOCUS_MAX, Feature, Focus, GimbalCommand, Hand, ISO_MAX, ObjectFraming, PRESET_SLOTS, Preset,
-    RangeField, Shared, TrackingMode, TrackingRange, TrackingSpeed, VoiceRange, WhiteBalance,
-    ZONE_AREAS, Zone, serial, vendor,
+    FOCUS_MAX, Feature, Focus, GimbalCommand, Hand, IMAGE_MAX, ISO_MAX, ImageAdjust, ObjectFraming,
+    PRESET_SLOTS, Preset, RangeField, Shared, TrackingMode, TrackingRange, TrackingSpeed,
+    VoiceRange, WhiteBalance, ZONE_AREAS, Zone, serial, vendor,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -33,7 +33,7 @@ pub(super) trait Transport {
     }
 }
 
-/// The UVC processing unit controls the Exposure section uses.
+/// The UVC processing unit controls the Exposure and Image sections use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Processing {
     /// `PU_BACKLIGHT_COMPENSATION_CONTROL` (1): exposure compensation, 0 to 18.
@@ -42,6 +42,27 @@ pub(super) enum Processing {
     Gain,
     /// `PU_POWER_LINE_FREQUENCY_CONTROL` (5): Anti-Flicker, 0 off, 1 50 Hz, 2 60 Hz.
     PowerLine,
+    /// `PU_CONTRAST_CONTROL` (3), 0 to 100.
+    Contrast,
+    /// `PU_HUE_CONTROL` (6), 0 to 100.
+    Hue,
+    /// `PU_SATURATION_CONTROL` (7), 0 to 100.
+    Saturation,
+    /// `PU_SHARPNESS_CONTROL` (8), 0 to 100.
+    Sharpness,
+}
+
+/// The Image section's controls in [`ImageAdjust::values`] order.
+const IMAGE_CONTROLS: [Processing; 4] = [
+    Processing::Contrast,
+    Processing::Saturation,
+    Processing::Sharpness,
+    Processing::Hue,
+];
+
+/// An Image value read from the camera, or `None` past the range.
+fn image_value(read: i32) -> Option<u8> {
+    u8::try_from(read).ok().filter(|&v| v <= IMAGE_MAX)
 }
 
 impl Processing {
@@ -52,6 +73,10 @@ impl Processing {
             Self::Backlight => 1,
             Self::Gain => 4,
             Self::PowerLine => 5,
+            Self::Contrast => 3,
+            Self::Hue => 6,
+            Self::Saturation => 7,
+            Self::Sharpness => 8,
         }
     }
 }
@@ -84,6 +109,7 @@ impl<T: Transport> Channel<T> {
         let exposure = self.read_exposure().ok();
         let exposure_curve = self.read_exposure_curve().ok();
         let white_balance = self.read_white_balance().ok();
+        let image = self.read_image().ok();
         let mut status = shared.status();
         status.ai_mode = view.and_then(|view| view.ai_mode);
         status.auto_zoom = view.and_then(|view| view.auto_zoom);
@@ -97,6 +123,7 @@ impl<T: Transport> Channel<T> {
         status.exposure = exposure;
         status.exposure_curve = exposure_curve;
         status.white_balance = white_balance;
+        status.image = image;
         status.object_framing = view.and_then(|view| view.object_framing);
         status.tracking_speed = tracking_speed;
         status.hand = hand;
@@ -220,6 +247,17 @@ impl<T: Transport> Channel<T> {
         let data = self.request_from(vendor::CAMERA, vendor::READ_WHITE_BALANCE, Vec::new())?;
         vendor::read_white_balance(&data)
             .ok_or_else(|| "Camera returned an unknown white balance".into())
+    }
+
+    /// Contrast, saturation, sharpness and hue (UVC). A sleeping camera
+    /// answers garbage (`0x63c0`), so values past the range are refused.
+    pub(super) fn read_image(&mut self) -> Result<ImageAdjust, String> {
+        let mut values = [0; 4];
+        for (value, control) in values.iter_mut().zip(IMAGE_CONTROLS) {
+            let read = self.transport.get_processing(control)?;
+            *value = image_value(read).ok_or("Camera returned an unknown image value")?;
+        }
+        Ok(ImageAdjust::from_values(values))
     }
 
     fn read_exposure_curve(&self) -> Result<Vec<[u8; 2]>, String> {
@@ -826,6 +864,20 @@ impl<T: Transport> Channel<T> {
                     .set_processing(Processing::PowerLine, value)?;
                 shared.status().anti_flicker = Some(flicker);
             }
+            GimbalCommand::SetImage(image) => {
+                let new = image.values().map(|v| v.min(IMAGE_MAX));
+                for (i, control) in IMAGE_CONTROLS.into_iter().enumerate() {
+                    let old = shared.status().image.map(ImageAdjust::values);
+                    // Write only what changed, so one slider sends one request.
+                    if old.is_some_and(|old| old[i] == new[i]) {
+                        continue;
+                    }
+                    self.transport.set_processing(control, i32::from(new[i]))?;
+                    let mut values = old.unwrap_or(new);
+                    values[i] = new[i];
+                    shared.status().image = Some(ImageAdjust::from_values(values));
+                }
+            }
             GimbalCommand::SetWhiteBalance(wb) => {
                 let message = vendor::white_balance(&wb);
                 // The clamped values that were sent.
@@ -1183,6 +1235,7 @@ fn commands_loop(
                     && status.exposure.is_some()
                     && status.exposure_curve.is_some()
                     && status.white_balance.is_some()
+                    && status.image.is_some()
                 {
                     preset_retries = 0;
                 }
@@ -1195,7 +1248,8 @@ fn commands_loop(
                     retry
                         && (status.exposure.is_none()
                             || status.exposure_curve.is_none()
-                            || status.white_balance.is_none()),
+                            || status.white_balance.is_none()
+                            || status.image.is_none()),
                 )
             };
             if retry_presets || retry_speed || retry_hand || retry_zone || retry_exposure {
@@ -1212,6 +1266,10 @@ fn commands_loop(
                 }
                 if let Ok(wb) = xu.read_white_balance() {
                     shared.status().white_balance = Some(wb);
+                    repaint();
+                }
+                if let Ok(image) = xu.read_image() {
+                    shared.status().image = Some(image);
                     repaint();
                 }
             }
@@ -1432,6 +1490,7 @@ pub(super) fn report(xu: &mut Channel<impl Transport>) -> Vec<String> {
                 xu.read_exposure_curve()
             ),
             Feature::WhiteBalance => format!("{:?}", xu.read_white_balance()),
+            Feature::Image => format!("{:?}", xu.read_image()),
             Feature::ObjectTracking => format!(
                 "{:?} (None unless an object is tracked)",
                 view.map(|v| v.object_framing)
@@ -1504,6 +1563,18 @@ pub(super) fn probe(
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::extension_unit;
+
+    #[test]
+    fn image_values_out_of_range_are_refused() {
+        use super::image_value;
+        assert_eq!(image_value(0x32), Some(50));
+        assert_eq!(image_value(0), Some(0));
+        assert_eq!(image_value(100), Some(100));
+        // What a sleeping camera answered for all four.
+        assert_eq!(image_value(0x63c0), None);
+        assert_eq!(image_value(101), None);
+        assert_eq!(image_value(-1), None);
+    }
 
     #[test]
     fn matches_extension_guid_only_in_video_control_interface() {

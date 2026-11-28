@@ -2,6 +2,7 @@
 
 mod view_exposure;
 mod view_gimbal;
+mod view_image;
 mod view_white_balance;
 
 use crate::branding::Branding;
@@ -75,6 +76,9 @@ pub struct GimblyApp {
     white_balance_open: bool,
     /// The white balance the user picked, until the camera reports it.
     white_balance_target: Option<(camera::WhiteBalance, Instant)>,
+    image_open: bool,
+    /// The Image values the user picked, until the camera reports them.
+    image_target: Option<(camera::ImageAdjust, Instant)>,
     /// UVC zoom value the user asked for (cameras without vendor control);
     /// the camera's own reading lags behind while it zooms smoothly.
     zoom_target: Option<i32>,
@@ -136,6 +140,8 @@ impl GimblyApp {
             curve_ui: Default::default(),
             white_balance_open: true,
             white_balance_target: None,
+            image_open: true,
+            image_target: None,
             zoom_target: None,
             gimbal_ui: view_gimbal::GimbalUi::default(),
             virtual_camera: false,
@@ -1063,7 +1069,7 @@ impl GimblyApp {
         }
     }
 
-    /// The Image tab: HDR, Focus, Exposure, Anti-Flicker and White Balance.
+    /// The Image tab: HDR, Focus, Exposure, Anti-Flicker, White Balance and Image.
     fn image(&mut self, ui: &mut Ui) {
         let margin = egui::Margin {
             left: PADDING as i8,
@@ -1105,6 +1111,8 @@ impl GimblyApp {
         self.anti_flicker(ui);
         divider(ui);
         self.white_balance(ui);
+        divider(ui);
+        self.image_adjust(ui);
         divider(ui);
     }
 

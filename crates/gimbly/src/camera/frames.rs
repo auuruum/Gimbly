@@ -13,8 +13,9 @@ use std::time::{Duration, Instant};
 /// the preview and virtual camera (about every second frame at 120 fps).
 const PICTURE_INTERVAL: Duration = Duration::from_millis(15);
 
-/// Size, range, Sleep Background and mirror the cached picture was built for.
-type Placeholder = ((usize, usize, YuvRange, u8, bool), Vec<u8>);
+/// Size, range, Sleep Background, mirror and custom picture the cached
+/// picture was built for.
+type Placeholder = ((usize, usize, YuvRange, u8, bool, usize), Vec<u8>);
 
 pub(super) struct Frames<'a> {
     worker: &'a Worker,
@@ -322,9 +323,9 @@ impl<'a> Frames<'a> {
     }
 }
 
-/// Gimbly's picture for the Sleep Background tile the camera reports: black,
-/// two of Gimbly's own pictures, or the Gimbly icon. None of the camera's
-/// pictures are used.
+/// The user's own picture, or Gimbly's picture for the Sleep Background tile
+/// the camera reports: black, two of Gimbly's own pictures, or the Gimbly
+/// icon. None of the camera's pictures are used.
 fn placeholder(
     cache: &mut Option<Placeholder>,
     w: usize,
@@ -334,13 +335,18 @@ fn placeholder(
 ) -> Option<Nv12View<'_>> {
     let background = sleep.map_or(SLEEP_BACKGROUNDS - 1, |s| s.background);
     let mirror = sleep.is_some_and(|s| s.mirror);
-    let key = (w, h, range, background, mirror);
+    let custom = super::custom_sleep_picture();
+    let id = custom
+        .as_ref()
+        .map_or(0, |p| std::sync::Arc::as_ptr(p) as usize);
+    let key = (w, h, range, background, mirror, id);
     if cache.as_ref().is_none_or(|(built, _)| *built != key) {
-        let (image, share) = match background {
-            0 => (None, 0.0),
-            1 => (Some(crate::branding::sleep_picture(true)), 1.0),
-            2 => (Some(crate::branding::sleep_picture(false)), 1.0),
-            _ => (Some(crate::branding::window_icon()), 0.25),
+        let (image, share) = match (custom, background) {
+            (Some(custom), _) => (Some(custom), 1.0),
+            (None, 0) => (None, 0.0),
+            (None, 1) => (Some(crate::branding::sleep_picture(true)), 1.0),
+            (None, 2) => (Some(crate::branding::sleep_picture(false)), 1.0),
+            (None, _) => (Some(crate::branding::window_icon()), 0.25),
         };
         let mut frame = match image {
             Some(image) => preview::sleep_frame(

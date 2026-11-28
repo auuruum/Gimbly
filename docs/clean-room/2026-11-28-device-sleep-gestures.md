@@ -227,3 +227,36 @@ the camera's picture. The DirectShow output was not read by a separate
 client: FFmpeg could not open Gimbly Virtual Camera in this session
 ("Unable to BindToObject"), which needs its own look. The camera was left
 at tile 4, Mirror off.
+
+## The user's own pictures and tile thumbnails
+
+**Source and method:** 2026-11-28, the owner's request and a screenshot of
+Gimbly's More tab. No OBSBOT software was used; the official app's way of
+adding pictures to the camera (selector 4 file transfer) is still not
+studied and not used.
+
+**Decision:** Pictures of the user's own are a Gimbly feature: nothing is
+written to the camera. Gimbly shows the chosen picture instead of the
+camera's tile while it sleeps, in the preview, snapshots and virtual camera,
+fitted into the frame on black, with Mirror applied. Tiles show thumbnails
+of what the video shows, four per row; a `+` tile adds a PNG or JPEG
+(at most eight); right-click on a picture removes it from the list (the
+file stays). Clicking one of the four camera tiles goes back to it. The
+list and the choice are kept in `[SleepPictures]` in Gimbly's settings.
+
+**Limits:** Files over 64 MB or 16384 pixels a side are refused; kept
+pictures are scaled down to 3840 x 2160. Thumbnails of the user's
+pictures are decoded on the UI thread when the More tab is first shown.
+
+**Tests:** `sleep_pictures::tests` (PNG colour types, broken and other
+files, scaling), `settings::tests::round_trips_through_ini` and
+`a_sleep_picture_beyond_the_list_is_not_selected`.
+
+**Checked in Gimbly (2026-11-28):** same camera, Windows 10 Pro 19045,
+preview open: thumbnails of the four tiles shown; `+` opened the system
+picker with a PNG/JPEG filter; a 1280 x 720 JPEG test pattern made with
+FFmpeg was added and selected, shown while asleep and replaced by live
+video on Resume; after a Gimbly restart it was still chosen and shown
+while asleep; Remove from the right-click menu took it out of the list
+and the camera tile showed again. Linux (portal FileChooser through rfd)
+and macOS were compiled only by CI, not run.

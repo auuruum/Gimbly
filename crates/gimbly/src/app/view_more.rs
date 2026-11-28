@@ -1,6 +1,7 @@
 //! The More tab: Device Sleep and Gesture Control.
 
 use super::view_exposure::slider_row;
+use super::view_gimbal::{menu_entry, menu_frame};
 use super::{GimblyApp, tips};
 use crate::camera::{
     DeviceSleep, Feature, GESTURE_ZOOM, Gesture, GimbalCommand, SLEEP_BACKGROUNDS, SLEEP_TIMES,
@@ -8,14 +9,17 @@ use crate::camera::{
 use crate::theme::*;
 use crate::widgets::*;
 use eframe::egui::{
-    self, Align, Align2, Color32, CornerRadius, Layout, Sense, Stroke, StrokeKind, Ui, vec2,
+    self, Align, Align2, Color32, CornerRadius, IconData, Layout, Rect, Sense, Stroke, StrokeKind,
+    TextureHandle, Ui, pos2, vec2,
 };
 use egui_phosphor::regular as icon;
+use std::sync::Arc;
 
 const SLEEP_TIME_HINT: &str =
     "While no app is using the video, the camera goes to sleep after this time.";
 const SLEEP_BACKGROUND_TIPS: &str = "What the preview and the virtual camera show while the \
-    camera sleeps: black or one of Gimbly's own pictures. Custom pictures are not supported yet.";
+    camera sleeps: black, one of Gimbly's own pictures, or a PNG or JPEG picture of your own. \
+    Click + to add a picture; right-click it to remove it.";
 const GESTURE_TIPS: &str = "Show a gesture to the camera to control it without the app.\n\n\
     1. Locked Target: hold up an open palm to start or stop tracking.\n\
     2. Zoom: point up with one hand to zoom in to the Zoom Factor, or back out.\n\
@@ -23,12 +27,8 @@ const GESTURE_TIPS: &str = "Show a gesture to the camera to control it without t
 const GESTURE_NOTICE: &str = "Gesture turned on. If people in the shot often use their hands \
     while talking or presenting, turn it off to avoid accidental triggers.";
 /// The sleep pictures' names, in the camera's order.
-const BACKGROUNDS: [(&str, &str); SLEEP_BACKGROUNDS as usize] = [
-    ("Black", ""),
-    ("Picture 1", icon::IMAGE),
-    ("Animation", icon::FILM_STRIP),
-    ("Picture 2", icon::IMAGE_SQUARE),
-];
+const BACKGROUNDS: [&str; SLEEP_BACKGROUNDS as usize] = ["Black", "Night", "Dusk", "Gimbly"];
+const TILES_PER_ROW: usize = 4;
 
 /// Pop-ups of the More tab.
 #[derive(Default)]
@@ -41,6 +41,49 @@ pub(super) struct MoreUi {
     notice: Option<bool>,
     /// The gesture settings changed and are saved once the pointer is released.
     unsaved: bool,
+    /// Thumbnails of the Sleep Background pictures, made when first shown.
+    thumbs: Option<Thumbs>,
+}
+
+struct Thumbs {
+    night: TextureHandle,
+    dusk: TextureHandle,
+    icon: TextureHandle,
+    /// One per [`crate::settings::Settings::sleep_pictures`]; `None` if the
+    /// file could not be read.
+    custom: Vec<Option<TextureHandle>>,
+}
+
+/// What one Sleep Background tile shows.
+#[derive(Clone, Copy)]
+enum Tile<'a> {
+    Black,
+    Picture(&'a TextureHandle),
+    Icon(&'a TextureHandle),
+    Missing,
+    Add,
+}
+
+/// A tile clicked in the Sleep Background row.
+enum TileAction {
+    Camera(u8),
+    Custom(usize),
+    Add,
+    Remove(usize),
+}
+
+fn thumbnail(ctx: &egui::Context, name: &str, image: &IconData) -> TextureHandle {
+    let size = (image.width as usize, image.height as usize);
+    let (rgba, w, h) = crate::sleep_pictures::shrink(&image.rgba, size, (192, 108));
+    let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+    ctx.load_texture(name, image, egui::TextureOptions::LINEAR)
+}
+
+fn custom_thumbnail(ctx: &egui::Context, path: &str) -> Option<TextureHandle> {
+    // shortcut: decodes on the UI thread when the More tab is first shown;
+    // move to a worker if large pictures make that noticeable.
+    let picture = crate::sleep_pictures::load(path).ok()?;
+    Some(thumbnail(ctx, path, &picture))
 }
 
 impl GimblyApp {
@@ -113,10 +156,17 @@ impl GimblyApp {
                         self.more_ui.background_tips = true;
                     }
                 });
-                if let Some(index) = background_tiles(ui, sleep.background)
-                    && index != sleep.background
-                {
-                    command = Some(GimbalCommand::SetSleepBackground(index));
+                match self.background_tiles(ui, sleep.background) {
+                    Some(TileAction::Camera(index)) => {
+                        self.select_sleep_picture(None);
+                        if index != sleep.background {
+                            command = Some(GimbalCommand::SetSleepBackground(index));
+                        }
+                    }
+                    Some(TileAction::Custom(index)) => self.select_sleep_picture(Some(index)),
+                    Some(TileAction::Add) => self.add_sleep_picture(ui.ctx()),
+                    Some(TileAction::Remove(index)) => self.remove_sleep_picture(index),
+                    None => {}
                 }
                 if plain_switch(ui, "Sleep Background Mirror", sleep.mirror).clicked() {
                     command = Some(GimbalCommand::SetSleepMirror(!sleep.mirror));
@@ -128,6 +178,159 @@ impl GimblyApp {
         if let Some(command) = command {
             self.gimbal(command);
         }
+    }
+
+    /// The camera's four tiles, the user's pictures and an add tile, four
+    /// per row, each with a thumbnail of what the video shows.
+    fn background_tiles(&mut self, ui: &mut Ui, background: u8) -> Option<TileAction> {
+        let ctx = ui.ctx().clone();
+        let thumbs = self.more_ui.thumbs.get_or_insert_with(|| Thumbs {
+            night: thumbnail(&ctx, "sleep-night", &crate::branding::sleep_picture(true)),
+            dusk: thumbnail(&ctx, "sleep-dusk", &crate::branding::sleep_picture(false)),
+            icon: thumbnail(&ctx, "sleep-icon", &crate::branding::window_icon()),
+            custom: self
+                .settings
+                .sleep_pictures
+                .iter()
+                .map(|path| custom_thumbnail(&ctx, path))
+                .collect(),
+        });
+        let custom = self.settings.sleep_picture;
+        let mut tiles: Vec<(Tile, bool, String)> = [
+            Tile::Black,
+            Tile::Picture(&thumbs.night),
+            Tile::Picture(&thumbs.dusk),
+            Tile::Icon(&thumbs.icon),
+        ]
+        .into_iter()
+        .zip(0u8..)
+        .map(|(tile, i)| {
+            let name = BACKGROUNDS[usize::from(i)].to_string();
+            (tile, custom.is_none() && i == background, name)
+        })
+        .collect();
+        for (i, (thumb, path)) in thumbs
+            .custom
+            .iter()
+            .zip(&self.settings.sleep_pictures)
+            .enumerate()
+        {
+            let tile = thumb.as_ref().map_or(Tile::Missing, Tile::Picture);
+            let name = std::path::Path::new(path)
+                .file_name()
+                .map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
+            tiles.push((tile, custom == Some(i), name));
+        }
+        if self.settings.sleep_pictures.len() < crate::sleep_pictures::MAX {
+            tiles.push((Tile::Add, false, "Add a picture (PNG or JPEG)".into()));
+        }
+
+        let gap = 8.0;
+        let count = TILES_PER_ROW as f32;
+        let width = ((ui.available_width() - gap * (count - 1.0)) / count).max(20.0);
+        let cameras = usize::from(SLEEP_BACKGROUNDS);
+        let mut action = None;
+        ui.spacing_mut().item_spacing.y = gap;
+        for (row, chunk) in tiles.chunks(TILES_PER_ROW).enumerate() {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for (column, (tile, selected, name)) in chunk.iter().enumerate() {
+                    let index = row * TILES_PER_ROW + column;
+                    let response = background_tile(ui, *tile, *selected, width);
+                    let response = response.on_hover_text(name);
+                    if response.clicked() {
+                        action = Some(match (*tile, index.checked_sub(cameras)) {
+                            (Tile::Add, _) => TileAction::Add,
+                            (_, Some(i)) => TileAction::Custom(i),
+                            (_, None) => TileAction::Camera(index as u8),
+                        });
+                    }
+                    if let Some(i) = index.checked_sub(cameras)
+                        && !matches!(tile, Tile::Add)
+                    {
+                        egui::Popup::context_menu(&response)
+                            .width(134.0)
+                            .frame(menu_frame())
+                            .show(|ui| {
+                                ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                                if menu_entry(ui, "Remove").clicked() {
+                                    action = Some(TileAction::Remove(i));
+                                    ui.close();
+                                }
+                            });
+                    }
+                }
+            });
+        }
+        action
+    }
+
+    /// Shows the user's picture `index` while the camera sleeps, or the
+    /// camera's tile again for `None`.
+    pub(super) fn select_sleep_picture(&mut self, index: Option<usize>) {
+        let path = index.and_then(|i| self.settings.sleep_pictures.get(i));
+        let picture = match path.map(|path| crate::sleep_pictures::load(path)) {
+            Some(Ok(picture)) => Some(picture),
+            Some(Err(error)) => {
+                self.notify(error);
+                return;
+            }
+            None => None,
+        };
+        crate::camera::set_custom_sleep_picture(picture);
+        if self.settings.sleep_picture != index {
+            self.settings.sleep_picture = index;
+            self.save_settings();
+        }
+    }
+
+    fn add_sleep_picture(&mut self, ctx: &egui::Context) {
+        let start = self
+            .settings
+            .sleep_pictures
+            .last()
+            .and_then(|p| std::path::Path::new(p).parent())
+            .and_then(|p| p.to_str())
+            .unwrap_or(&self.settings.media_dir)
+            .to_string();
+        let Some(path) = crate::os::pick_image(&start) else {
+            return;
+        };
+        let picture: Arc<IconData> = match crate::sleep_pictures::load(&path) {
+            Ok(picture) => picture,
+            Err(error) => {
+                self.notify(error);
+                return;
+            }
+        };
+        if let Some(thumbs) = &mut self.more_ui.thumbs {
+            thumbs.custom.push(Some(thumbnail(ctx, &path, &picture)));
+        }
+        self.settings.sleep_pictures.push(path);
+        self.settings.sleep_picture = Some(self.settings.sleep_pictures.len() - 1);
+        crate::camera::set_custom_sleep_picture(Some(picture));
+        self.save_settings();
+    }
+
+    fn remove_sleep_picture(&mut self, index: usize) {
+        if index >= self.settings.sleep_pictures.len() {
+            return;
+        }
+        self.settings.sleep_pictures.remove(index);
+        if let Some(thumbs) = &mut self.more_ui.thumbs
+            && index < thumbs.custom.len()
+        {
+            thumbs.custom.remove(index);
+        }
+        match self.settings.sleep_picture {
+            Some(i) if i == index => {
+                self.settings.sleep_picture = None;
+                crate::camera::set_custom_sleep_picture(None);
+            }
+            Some(i) if i > index => self.settings.sleep_picture = Some(i - 1),
+            _ => {}
+        }
+        self.save_settings();
     }
 
     fn gestures(&mut self, ui: &mut Ui) {
@@ -284,50 +487,60 @@ fn parse_zoom(text: &str) -> Option<f32> {
         .then(|| (ratio * 100.0).round() / 100.0)
 }
 
-/// The four sleep pictures; returns the one clicked. Gimbly draws its own
-/// stand-ins, not the camera's pictures.
-fn background_tiles(ui: &mut Ui, selected: u8) -> Option<u8> {
-    let gap = 8.0;
-    let count = f32::from(SLEEP_BACKGROUNDS);
-    let width = ((ui.available_width() - gap * (count - 1.0)) / count).max(20.0);
-    let mut clicked = None;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = gap;
-        for (index, (name, glyph)) in (0..SLEEP_BACKGROUNDS).zip(BACKGROUNDS) {
-            let (rect, response) = ui.allocate_exact_size(vec2(width, 34.0), Sense::click());
-            let fill = if index == 0 { Color32::BLACK } else { FIELD };
-            let painter = ui.painter();
-            painter.rect_filled(rect.shrink(3.0), CornerRadius::same(3), fill);
-            if !glyph.is_empty() {
-                painter.text(
-                    rect.center(),
-                    Align2::CENTER_CENTER,
-                    glyph,
-                    font(16.0),
-                    TEXT_DIM,
-                );
-            }
-            if index == selected {
-                painter.rect_stroke(
-                    rect,
-                    CornerRadius::same(4),
-                    Stroke::new(1.5, ACCENT),
-                    StrokeKind::Inside,
-                );
-            } else if response.hovered() && ui.is_enabled() {
-                painter.rect_stroke(
-                    rect,
-                    CornerRadius::same(4),
-                    Stroke::new(1.0, FIELD_STROKE),
-                    StrokeKind::Inside,
-                );
-            }
-            if response.on_hover_text(name).clicked() {
-                clicked = Some(index);
-            }
+/// One Sleep Background tile with its thumbnail.
+fn background_tile(ui: &mut Ui, tile: Tile, selected: bool, width: f32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 34.0), Sense::click());
+    let painter = ui.painter();
+    let inner = rect.shrink(3.0);
+    let fill = if matches!(tile, Tile::Add | Tile::Missing) {
+        FIELD
+    } else {
+        Color32::BLACK
+    };
+    painter.rect_filled(inner, CornerRadius::same(3), fill);
+    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    match tile {
+        Tile::Black => {}
+        Tile::Picture(texture) => {
+            let shown = crate::preview_view::fit(texture.size_vec2(), inner);
+            painter.image(texture.id(), shown, uv, Color32::WHITE);
         }
-    });
-    clicked
+        Tile::Icon(texture) => {
+            let shown =
+                Rect::from_center_size(inner.center(), egui::Vec2::splat(inner.height() * 0.6));
+            painter.image(texture.id(), shown, uv, Color32::WHITE);
+        }
+        Tile::Missing | Tile::Add => {
+            let glyph = if matches!(tile, Tile::Add) {
+                icon::PLUS
+            } else {
+                icon::IMAGE_BROKEN
+            };
+            painter.text(
+                inner.center(),
+                Align2::CENTER_CENTER,
+                glyph,
+                font(16.0),
+                TEXT_DIM,
+            );
+        }
+    }
+    if selected {
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(4),
+            Stroke::new(1.5, ACCENT),
+            StrokeKind::Inside,
+        );
+    } else if response.hovered() && ui.is_enabled() {
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(4),
+            Stroke::new(1.0, FIELD_STROKE),
+            StrokeKind::Inside,
+        );
+    }
+    response
 }
 
 /// A label and a switch, without the help icon of `switch_row`; returns the switch.

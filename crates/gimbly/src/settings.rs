@@ -461,6 +461,12 @@ pub struct Settings {
     pub preview_hint_seen: bool,
     /// Gesture Control switches the camera does not report (More tab).
     pub gestures: Gestures,
+    /// The user's own Sleep Background picture files, at most
+    /// [`crate::sleep_pictures::MAX`].
+    pub sleep_pictures: Vec<String>,
+    /// The one of [`Self::sleep_pictures`] shown while the camera sleeps,
+    /// instead of the camera's Sleep Background tile.
+    pub sleep_picture: Option<usize>,
 }
 
 /// The Gesture Control values the camera takes but never reports, so Gimbly
@@ -509,6 +515,8 @@ impl Default for Settings {
             osc_port: 16284,
             preview_hint_seen: false,
             gestures: Gestures::default(),
+            sleep_pictures: Vec::new(),
+            sleep_picture: None,
         }
     }
 }
@@ -645,6 +653,15 @@ impl Settings {
         {
             s.gestures.zoom_factor = v;
         }
+        s.sleep_pictures = (1..=crate::sleep_pictures::MAX)
+            .filter_map(|i| get("SleepPictures", &format!("Picture{i}")))
+            .filter(|v| !v.is_empty())
+            .cloned()
+            .collect();
+        s.sleep_picture = get("SleepPictures", "Selected")
+            .and_then(|v| v.parse::<usize>().ok())
+            .and_then(|i| i.checked_sub(1))
+            .filter(|&i| i < s.sleep_pictures.len());
         s
     }
 
@@ -681,6 +698,12 @@ impl Settings {
         out += &format!("DirectionFlip={}\n", self.gestures.direction_flip);
         out += &format!("ZoomFactor={:.2}\n", self.gestures.zoom_factor);
         out += &format!("NoticeOff={}\n", self.gestures.notice_off);
+        out += "\n[SleepPictures]\n";
+        let selected = self.sleep_picture.map_or(0, |i| i + 1);
+        out += &format!("Selected={selected}\n");
+        for (i, path) in self.sleep_pictures.iter().enumerate() {
+            out += &format!("Picture{}={path}\n", i + 1);
+        }
         out
     }
 
@@ -725,12 +748,27 @@ mod tests {
                 zoom_factor: 3.25,
                 notice_off: true,
             },
+            sleep_pictures: vec![r"C:\Picturesway.png".into(), "/home/me/brb.jpg".into()],
+            sleep_picture: Some(1),
             ..Settings::default()
         };
         s.hotkeys
             .insert(HotkeyAction::ZoomIn, KeyCombo::parse("Ctrl + Alt + ="));
         s.hotkeys.insert(HotkeyAction::Device1, None);
         assert_eq!(Settings::from_ini(&s.to_ini()), s);
+    }
+
+    #[test]
+    fn a_sleep_picture_beyond_the_list_is_not_selected() {
+        let s = Settings::from_ini(
+            "[SleepPictures]
+Selected=3
+Picture1=a.png
+Picture2=
+",
+        );
+        assert_eq!(s.sleep_pictures, ["a.png"]);
+        assert_eq!(s.sleep_picture, None);
     }
 
     #[test]

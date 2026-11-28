@@ -11,6 +11,7 @@ mod imp {
         HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ, RRF_RT_REG_SZ, RegCloseKey,
         RegDeleteValueW, RegGetValueW, RegOpenKeyExW, RegSetValueExW,
     };
+    use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
     use windows::Win32::UI::Shell::{
         FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, IShellItem,
         SHCreateItemFromParsingName, SIGDN_FILESYSPATH, ShellExecuteW,
@@ -36,6 +37,15 @@ mod imp {
     /// Shows the system folder picker on a helper thread (it needs its own
     /// single-threaded COM apartment) and returns the chosen folder.
     pub fn pick_folder(start: &str) -> Option<String> {
+        pick(start, false)
+    }
+
+    /// The system file picker for a PNG or JPEG picture.
+    pub fn pick_image(start: &str) -> Option<String> {
+        pick(start, true)
+    }
+
+    fn pick(start: &str, image: bool) -> Option<String> {
         let start = start.to_string();
         std::thread::spawn(move || {
             // SAFETY: COM is initialised and released on this thread; all
@@ -45,9 +55,19 @@ mod imp {
                 let result = (|| -> windows::core::Result<String> {
                     let dialog: IFileOpenDialog =
                         CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
-                    dialog
-                        .SetOptions(dialog.GetOptions()? | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM)?;
-                    dialog.SetTitle(w!("Choose Storage Path"))?;
+                    if image {
+                        dialog.SetOptions(dialog.GetOptions()? | FOS_FORCEFILESYSTEM)?;
+                        dialog.SetTitle(w!("Add a Sleep Background picture"))?;
+                        dialog.SetFileTypes(&[COMDLG_FILTERSPEC {
+                            pszName: w!("Pictures (PNG, JPEG)"),
+                            pszSpec: w!("*.png;*.jpg;*.jpeg"),
+                        }])?;
+                    } else {
+                        dialog.SetOptions(
+                            dialog.GetOptions()? | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM,
+                        )?;
+                        dialog.SetTitle(w!("Choose Storage Path"))?;
+                    }
                     if let Ok(folder) =
                         SHCreateItemFromParsingName::<_, _, IShellItem>(&HSTRING::from(start), None)
                     {
@@ -172,6 +192,10 @@ mod imp {
     pub fn attach_parent_console() {}
 
     pub fn pick_folder(_start: &str) -> Option<String> {
+        None
+    }
+
+    pub fn pick_image(_start: &str) -> Option<String> {
         None
     }
 

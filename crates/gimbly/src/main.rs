@@ -20,6 +20,7 @@ mod record;
 mod serial_access;
 mod settings;
 mod settings_ui;
+mod sleep_pictures;
 mod snapshot;
 mod theme;
 mod vcam;

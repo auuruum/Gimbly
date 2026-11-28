@@ -687,6 +687,21 @@ pub const SLEEP_TIMES: [i16; 3] = [30, 120, 600];
 /// The number of built-in sleep pictures.
 pub const SLEEP_BACKGROUNDS: u8 = 4;
 
+/// The user's own picture shown while the camera sleeps, instead of the
+/// Sleep Background tile. Shared with every capture session.
+static CUSTOM_SLEEP: Mutex<Option<Arc<eframe::egui::IconData>>> = Mutex::new(None);
+
+pub fn set_custom_sleep_picture(picture: Option<Arc<eframe::egui::IconData>>) {
+    *CUSTOM_SLEEP.lock().unwrap_or_else(|e| e.into_inner()) = picture;
+}
+
+fn custom_sleep_picture() -> Option<Arc<eframe::egui::IconData>> {
+    CUSTOM_SLEEP
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
 /// The Device Sleep section as the camera reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeviceSleep {

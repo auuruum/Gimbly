@@ -1001,7 +1001,7 @@ fn small_button(ui: &mut Ui, text: &str, size: Vec2) -> egui::Response {
 }
 
 /// The popup frame of the preset and range menus.
-fn menu_frame() -> egui::Frame {
+pub(super) fn menu_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(FIELD)
         .stroke(Stroke::new(1.0, FIELD_STROKE))
@@ -1055,7 +1055,7 @@ fn note_with_reset(ui: &mut Ui, text: &str, tip: &str) -> bool {
     .inner
 }
 
-fn menu_entry(ui: &mut Ui, text: &str) -> egui::Response {
+pub(super) fn menu_entry(ui: &mut Ui, text: &str) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::click());
     if ui.is_enabled() && response.hovered() {
         ui.painter()

@@ -14,6 +14,17 @@ pub fn pick_folder(start: &str) -> Option<String> {
     dialog.pick_folder()?.into_os_string().into_string().ok()
 }
 
+/// The file picker for a PNG or JPEG picture (the portal on Linux).
+pub fn pick_image(start: &str) -> Option<String> {
+    let mut dialog = rfd::FileDialog::new()
+        .set_title("Add a Sleep Background picture")
+        .add_filter("Pictures (PNG, JPEG)", &["png", "jpg", "jpeg"]);
+    if Path::new(start).is_dir() {
+        dialog = dialog.set_directory(start);
+    }
+    dialog.pick_file()?.into_os_string().into_string().ok()
+}
+
 fn open(path: &str) -> Result<(), String> {
     let opener = if cfg!(target_os = "macos") {
         "/usr/bin/open"

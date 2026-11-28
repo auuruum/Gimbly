@@ -117,6 +117,17 @@ impl GimblyApp {
         theme::apply(&cc.egui_ctx);
         let branding = Branding::new(&cc.egui_ctx);
         let settings = Settings::load();
+        if let Some(path) = settings
+            .sleep_picture
+            .and_then(|i| settings.sleep_pictures.get(i))
+            .cloned()
+        {
+            std::thread::spawn(move || {
+                if let Ok(picture) = crate::sleep_pictures::load(&path) {
+                    crate::camera::set_custom_sleep_picture(Some(picture));
+                }
+            });
+        }
         let settings_window = SettingsWindow::new(&settings, branding.icon.clone());
         let wayland = os::is_wayland_window(cc);
         let mut preview_window = PreviewWindow::new(branding.icon.clone());

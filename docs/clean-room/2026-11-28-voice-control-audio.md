@@ -1,6 +1,6 @@
 # Voice Control and Audio (More tab)
 
-Status: **UI observed, USB not captured yet.** Nothing is implemented in
+Status: **UI observed; a capture exists but is not decoded yet.** Nothing is implemented in
 Gimbly from this note yet; the messages are unknown.
 
 ## Source and method
@@ -77,6 +77,55 @@ that describes each in a sentence (in our words):
 The box ends with: at 1080P 120 only Smart Omni is offered.
 
 No hover text, no right-click menus.
+
+## Observed: second pass, 18:40-18:49, with a USB capture running
+
+Capture on `\\.\USBPcap3`, snap length 512, started 18:40:22. It could
+not be stopped or read yet (it runs elevated; two later UAC prompts were
+not answered), so the USB side is still unknown. Actions, about 4 s apart:
+
+| time | action |
+| --- | --- |
+| 18:40:3x | Sleep, Tiny off, on (notice, Got it) |
+| 18:40:4x-18:41:3x | Track Me, Unlock Me, Zoom in Closer, Zoom out Further, Position One/Two/Three, Hi, Tiny: each off, on, Got it |
+| 18:41:4x | Voice Locator unticked; Hi, Tiny off, on (notice); Voice Locator ticked |
+| 18:42:0x-1x | Language 中文, then English |
+| 18:42:3x-18:43:2x | Zoom Factor dragged to 4.00 and 1.00, up arrow, down arrow twice, up; typed `2.5`, `5`, `0.5`, `1.234`, `1` |
+| 18:43:3x-18:44:0x | Audio Mode Pure, Smart Omni, Directional, Dual-Directional, Spatial |
+| 18:44:1x-2x | Microphone Status During Sleep off, on |
+| 18:44:3x-18:46:0x | Disable Microphone on, No; on, OK (camera restarts); off, OK (restarts again) |
+| 18:46:1x-5x | Audio Input Vox Wireless Mic, AddTX1, End Pairing, Cam Built-in Mic |
+| 18:47:0x-2x | Track Me off, Microphone Status During Sleep off, Zoom Factor `2`, Pure |
+| 18:47:32-18:48:0x | OBSBOT Center closed and started again, More tab opened |
+| 18:48:3x-5x | Track Me on (notice), Microphone Status During Sleep on, Zoom Factor `1`, Spatial |
+
+What the UI showed:
+
+- Every one of the seven command switches opens the same notice when
+  turned on; none when turned off. Voice Locator shows no notice.
+- Voice Locator stays unticked across Hi, Tiny off and on.
+- With 中文 the row labels become the Chinese command phrases (嗨, Tiny;
+  Tiny, 休眠; 开始跟踪; 取消跟踪; 拉近; 拉远; 预置位一/二/三). The switches
+  keep their state. With English they are the English labels above.
+- Zoom Factor: 1.00 to 4.00, two decimals; arrows step and stop at 1.00;
+  `2.5` taken, `5` and `0.5` refused (old value stays), `1.234` gave 1.23.
+  Same behaviour as the Gesture Control factor.
+- Disable Microphone on asks "the device will restart after turning off
+  the microphone"; No keeps it off. OK: the app shows "Device not found",
+  the camera comes back after about 20-30 s with the switch on, and
+  Windows lists only the camera, no OBSBOT audio device. Off asks the same
+  for turning on and restarts again; the audio device came back.
+- Audio Input Vox Wireless Mic replaces the rows below with AddTX1 and
+  AddTX2 buttons, a greyed Microphone Status During Sleep (off) and a
+  greyed Noise Reduction drop-down (Off); Audio Mode and Disable
+  Microphone are hidden. AddTX1 opens a "Pairing Prompt" (hold the
+  transmitter's button 6 s until it blinks green) with End Pairing.
+- After the restart every value was shown as set: Track Me off,
+  Microphone Status During Sleep off, Pure, and the voice Zoom Factor as
+  **1.99** (typed 2), which points to a value read back from the camera
+  as a float.
+- The Gesture Control section showed Dynamic Zoom on, which it was not
+  on 13:11 earlier today; not touched in this session (unknown cause).
 
 ## Inferred
 

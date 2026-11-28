@@ -66,6 +66,7 @@ bytes. `u32`, `i16` and `f32` are little-endian.
 | 14 | Auto Focus | 0 off, 1 on |
 | 15 | Manual Focus position | 0 to 100 |
 | 16 | Microphone Status During Sleep | 0 off, 1 on |
+| 19 | Mirror Image | 0 off, 1 on |
 | 20 | Voice Control language | 0 Chinese, 1 English |
 | 21 | voice commands | one bit per command key below |
 | 22 | voice Zoom Factor | steps of 0.03 above 1.0x, 0 to 100 |
@@ -74,10 +75,12 @@ bytes. `u32`, `i16` and `f32` are little-endian.
 | 28 | object framing, while AI mode is 2 | `14` Normal, `17` Close-up |
 | 29 | Sleep Background Mirror | 0 off, 1 on |
 | 31 | frame rate | fps the camera streams at: 30 (`1e`), 60 (`3c`) |
+| 33 | status light brightness | 1 to 3, kept while the light is off |
 | 34 | microphone | bit 4 set while the microphone is on |
 | 40 | audio | bits 0-2 the input (0 built-in, 3 Vox), bits 3-5 the Audio Mode |
 | 42 | Auto Zoom | as in [Auto Zoom](#auto-zoom) |
 | 44 | Voice Locator | bit 0 |
+| 45 | status light | 0 off, 1 on |
 | 46 | voice bits | bit 1 Forward range, bit 0 Sound Source |
 
 ## Gimbal
@@ -185,6 +188,18 @@ Note: [voice control and audio](clean-room/2026-11-28-voice-control-audio.md).
 Destination `13` is the Vox receiver; the camera answered there without a
 Vox Wireless Mic attached. Note:
 [voice control and audio](clean-room/2026-11-28-voice-control-audio.md).
+
+## Mirror, reversed turning and status light
+
+| Action | Message | Data |
+| --- | --- | --- |
+| Mirror Image | `sel 6: 14 01 v` | v: 1 on, 0 off; the camera mirrors its video |
+| View and Gimbal Reversed | `44 3f → 04` | u32 4, u8 1 on or 0 off; the gimbal turns left-right the other way, the video is unchanged |
+| Read View and Gimbal Reversed | `84 3f → 04`, reply wanted | u32 4; reply one byte, 0 or 1 |
+| Status Light | `sel 6: 1a 01 v` | v: 0 off, 1 to 3 on at that brightness |
+| Read | status block offsets 19, 33 and 45 | |
+
+Note: [mirror, reversed and indicator](clean-room/2026-11-28-mirror-reversed-indicator.md).
 
 ## Human Tracking
 

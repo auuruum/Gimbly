@@ -28,9 +28,9 @@
 use super::{
     AiMode, AntiFlicker, Audio, AudioInput, AudioMode, AutoZoom, DeviceSleep, FOCUS_MAX, Focus,
     FocusMode, Fov, GESTURE_ZOOM, Gesture, GimbalCommand, Hand, ObjectFraming, PRESET_NAME_MAX,
-    PRESET_SLOTS, PresetPosition, TargetBox, TrackingMode, TrackingRange, TrackingSpeed,
-    VOICE_ZOOM_MAX, VoiceCommand, VoiceControl, VoiceRange, WB_SHIFT_MAX, WB_TEMPERATURE,
-    WhiteBalance, ZONE_AREAS, ZOOM_RATIO_MAX, Zone,
+    PRESET_SLOTS, PresetPosition, StatusLight, TargetBox, TrackingMode, TrackingRange,
+    TrackingSpeed, VOICE_ZOOM_MAX, VoiceCommand, VoiceControl, VoiceRange, WB_SHIFT_MAX,
+    WB_TEMPERATURE, WhiteBalance, ZONE_AREAS, ZOOM_RATIO_MAX, Zone,
 };
 
 /// GUID of the extension unit, as the UVC descriptor stores it.
@@ -1002,6 +1002,62 @@ pub fn sleep_mic(on: bool) -> [u8; MESSAGE_LEN] {
 /// The microphone on or off (selector 6 `1c 01 v`); the camera restarts.
 pub fn microphone(on: bool) -> [u8; MESSAGE_LEN] {
     view_block(&[0x1c, 1, on.into()])
+}
+
+/// Mirror Image (selector 6 `14 01 v`).
+pub fn mirror(on: bool) -> [u8; MESSAGE_LEN] {
+    view_block(&[0x14, 1, on.into()])
+}
+
+/// Mirror Image: status offset 19, 0 off and 1 on.
+pub fn read_mirror(data: &[u8]) -> Option<bool> {
+    sleeping(data)?;
+    match *data.get(19)? {
+        value @ 0..=1 => Some(value == 1),
+        _ => None,
+    }
+}
+
+/// The status light (selector 6 `1a 01 v`): 0 turns it off, 1 to 3 turn it
+/// on at that brightness.
+pub fn status_light(brightness: u8) -> [u8; MESSAGE_LEN] {
+    view_block(&[0x1a, 1, brightness.min(super::STATUS_LIGHT_MAX)])
+}
+
+/// The status light: status offset 45 on (1) or off (0), 33 the brightness,
+/// which stays while the light is off.
+pub fn read_status_light(data: &[u8]) -> Option<StatusLight> {
+    sleeping(data)?;
+    let on = match *data.get(45)? {
+        value @ 0..=1 => value == 1,
+        _ => return None,
+    };
+    let brightness = data
+        .get(33)
+        .copied()
+        .filter(|b| (1..=super::STATUS_LIGHT_MAX).contains(b))?;
+    Some(StatusLight { on, brightness })
+}
+
+/// View and Gimbal Reversed: `44 3f` to the gimbal with u32 key 4 and a u8;
+/// read back with `84 3f` and the key.
+const GIMBAL_SETTING: [u8; 2] = [0x44, 0x3f];
+pub const READ_GIMBAL_SETTING: [u8; 2] = [0x84, 0x3f];
+pub const GIMBAL_REVERSED: u32 = 4;
+
+pub fn reversed(on: bool) -> Message {
+    let mut data = GIMBAL_REVERSED.to_le_bytes().to_vec();
+    data.push(on.into());
+    Message::new(GIMBAL, GIMBAL_SETTING, data)
+}
+
+/// The reply to reading [`GIMBAL_REVERSED`]: one byte, 0 or 1.
+pub fn read_reversed(data: &[u8]) -> Option<bool> {
+    match data {
+        [0] => Some(false),
+        [1] => Some(true),
+        _ => None,
+    }
 }
 
 /// Audio: status offset 40 bits 0-2 the input (0 built-in, 3 Vox) and bits
@@ -2717,6 +2773,48 @@ mod tests {
         block[20] = 2;
         assert_eq!(read_voice_control(&block), None);
         assert_eq!(read_voice_control(&padded(VOICE_DEFAULT)[..44]), None);
+    }
+
+    #[test]
+    fn mirror_reversed_and_status_light_match_capture() {
+        // Writes and the status block from the 2026-11-28 19:40 capture.
+        const FIRST: &str = "2e00000100000001000178000001015a01000000017f220000004b030000553c00031000000000000800000003010100000000000000000000000000";
+        assert_eq!(mirror(true).to_vec(), padded("140101"));
+        assert_eq!(mirror(false).to_vec(), padded("140100"));
+        assert_eq!(status_light(0).to_vec(), padded("1a0100"));
+        assert_eq!(status_light(2).to_vec(), padded("1a0102"));
+        assert_eq!(status_light(9).to_vec(), padded("1a0103"));
+        assert_gimbal_write(&reversed(true), [0x44, 0x3f], "0400000001");
+        assert_gimbal_write(&reversed(false), [0x44, 0x3f], "0400000000");
+        assert_eq!(read_reversed(&[1]), Some(true));
+        assert_eq!(read_reversed(&[0]), Some(false));
+        assert_eq!(read_reversed(&[2]), None);
+        assert_eq!(read_reversed(&[]), None);
+
+        let mut block = padded(FIRST);
+        assert_eq!(read_mirror(&block), Some(false));
+        let light = StatusLight {
+            on: true,
+            brightness: 3,
+        };
+        assert_eq!(read_status_light(&block), Some(light));
+        block[19] = 1;
+        assert_eq!(read_mirror(&block), Some(true));
+        // Light off keeps the brightness at offset 33.
+        block[45] = 0;
+        assert_eq!(
+            read_status_light(&block),
+            Some(StatusLight { on: false, ..light })
+        );
+        block[33] = 1;
+        assert_eq!(read_status_light(&block).map(|l| l.brightness), Some(1));
+        for (offset, value) in [(19, 2), (45, 2), (33, 0), (33, 4)] {
+            let mut bad = padded(FIRST);
+            bad[offset] = value;
+            assert!(read_mirror(&bad).is_none() || read_status_light(&bad).is_none());
+        }
+        assert_eq!(read_mirror(&block[..19]), None);
+        assert_eq!(read_status_light(&block[..40]), None);
     }
 
     #[test]

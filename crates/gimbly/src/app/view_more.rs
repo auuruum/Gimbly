@@ -1,11 +1,13 @@
-//! The More tab: Device Sleep, Gesture Control, Voice Control and Audio.
+//! The More tab: Device Sleep, Gesture Control, Voice Control, Audio,
+//! Mirror Image, View and Gimbal Reversed and Indicator Status.
 
 use super::view_exposure::slider_row;
 use super::view_gimbal::{menu_entry, menu_frame, question};
 use super::{GimblyApp, tips};
 use crate::camera::{
     Audio, AudioInput, AudioMode, DeviceSleep, Feature, GESTURE_ZOOM, Gesture, GimbalCommand,
-    SLEEP_BACKGROUNDS, SLEEP_TIMES, VOICE_ZOOM_MAX, VOICE_ZOOM_STEP, VoiceCommand, VoiceControl,
+    SLEEP_BACKGROUNDS, SLEEP_TIMES, STATUS_LIGHT_MAX, StatusLight, VOICE_ZOOM_MAX, VOICE_ZOOM_STEP,
+    VoiceCommand, VoiceControl,
 };
 use crate::theme::*;
 use crate::widgets::*;
@@ -48,6 +50,13 @@ const AUDIO_MODE_TIPS: &str = "1. Pure Audio Mode: left and right channels as re
 const PAIRING_TIPS: &str = "Pairing. With the Vox Wireless Mic transmitter turned off, hold its \
     button for about 6 seconds until the light flashes green quickly, and keep holding it \
     until pairing succeeds.";
+const MIRROR_TIPS: &str = "Mirrors the picture left to right in the camera itself, so the \
+    preview, the virtual camera and every other app see it mirrored.";
+const REVERSED_TIPS: &str = "Reverses which way the camera turns left and right. With it on, \
+    the gimbal turns the other way for the same joystick, gesture or tracking move. The picture \
+    is not changed.";
+const STATUS_LIGHT_QUESTION: &str =
+    "With the status light off it can be hard to tell what the camera is doing. Turn it off?";
 /// The camera's audio inputs, in the official app's order.
 const AUDIO_INPUTS: [(AudioInput, &str); 2] = [
     (AudioInput::Camera, "Cam Built-in Mic"),
@@ -79,6 +88,11 @@ pub(super) struct MoreUi {
     voice_notice: Option<bool>,
     /// Turning the microphone on (`true`) or off waits for the user's OK.
     microphone_question: Option<bool>,
+    pub indicator_closed: bool,
+    mirror_tips: bool,
+    reversed_tips: bool,
+    /// Turning the status light off waits for the user's OK.
+    light_question: bool,
     /// A Vox transmitter is pairing; the dialog ends it.
     pairing: bool,
     /// Thumbnails of the Sleep Background pictures, made when first shown.
@@ -135,6 +149,10 @@ impl GimblyApp {
         self.voice_control(ui);
         divider(ui);
         self.audio(ui);
+        divider(ui);
+        self.orientation(ui);
+        divider(ui);
+        self.indicator(ui);
         divider(ui);
         if self.more_ui.unsaved && !ui.input(|i| i.pointer.any_down()) {
             self.more_ui.unsaved = false;
@@ -684,7 +702,139 @@ impl GimblyApp {
         }
     }
 
+    /// Mirror Image and View and Gimbal Reversed: two rows without a header,
+    /// as in the official app.
+    fn orientation(&mut self, ui: &mut Ui) {
+        let mirror = self.status.mirror.filter(|_| self.ready(Feature::Mirror));
+        let reversed = self
+            .status
+            .reversed
+            .filter(|_| self.ready(Feature::Reversed));
+        let rows = [
+            (Feature::Mirror, "Mirror Image", mirror),
+            (Feature::Reversed, "View and Gimbal Reversed", reversed),
+        ];
+        let tips = rows.map(|(feature, ..)| self.gimbal_tip(feature));
+        let mut command = None;
+        let mut help = None;
+        band(ui, CARD, more_margin(), |ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 16.0);
+            ui.add_space(14.0);
+            for ((feature, label, on), tip) in rows.into_iter().zip(&tips) {
+                ui.horizontal(|ui| {
+                    ui.set_height(24.0);
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.label(egui::RichText::new(label).size(15.0));
+                    if help_button(ui).clicked() {
+                        help = Some(feature);
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let switch = ui
+                            .add_enabled_ui(on.is_some(), |ui| toggle(ui, on.unwrap_or(false)))
+                            .inner
+                            .on_disabled_hover_text(tip);
+                        if switch.clicked()
+                            && let Some(on) = on
+                        {
+                            command = Some(match feature {
+                                Feature::Mirror => GimbalCommand::SetMirror(!on),
+                                _ => GimbalCommand::SetReversed(!on),
+                            });
+                        }
+                    });
+                });
+            }
+        });
+        match help {
+            Some(Feature::Mirror) => self.more_ui.mirror_tips = true,
+            Some(_) => self.more_ui.reversed_tips = true,
+            None => {}
+        }
+        if let Some(command) = command {
+            self.gimbal(command);
+        }
+    }
+
+    fn indicator(&mut self, ui: &mut Ui) {
+        let open;
+        (open, _) = section_header(ui, "Indicator Status", !self.more_ui.indicator_closed, None);
+        self.more_ui.indicator_closed = !open;
+        if !open {
+            return;
+        }
+        let shown = self
+            .status
+            .status_light
+            .filter(|_| self.ready(Feature::StatusLight));
+        let light = shown.unwrap_or(StatusLight {
+            on: true,
+            brightness: STATUS_LIGHT_MAX,
+        });
+        let tip = self.gimbal_tip(Feature::StatusLight);
+        let mut command = None;
+        let mut question = false;
+        band(ui, CARD, more_margin(), |ui| {
+            ui.push_id("indicator", |ui| {
+                ui.spacing_mut().item_spacing = vec2(8.0, 16.0);
+                ui.add_enabled_ui(shown.is_some(), |ui| {
+                    if plain_switch(ui, "Status Light", light.on).clicked() {
+                        if light.on {
+                            question = true;
+                        } else {
+                            command = Some(GimbalCommand::SetStatusLight(light.brightness));
+                        }
+                    }
+                    // Like the official app, Brightness is greyed while the light is off.
+                    ui.add_enabled_ui(light.on, |ui| {
+                        let brightness = light.brightness;
+                        let (dragged, input) = slider_row(
+                            ui,
+                            "Brightness",
+                            brightness_t(brightness),
+                            &brightness.to_string(),
+                        );
+                        let new = dragged
+                            .map(brightness_from_t)
+                            .or_else(|| match input? {
+                                NumberInput::Step(step) if step > 0.0 => {
+                                    Some((brightness + 1).min(STATUS_LIGHT_MAX))
+                                }
+                                NumberInput::Step(_) => Some(brightness.saturating_sub(1).max(1)),
+                                NumberInput::Typed(text) => parse_brightness(&text),
+                            })
+                            .filter(|&b| b != brightness);
+                        if let Some(b) = new {
+                            command = Some(GimbalCommand::SetStatusLight(b));
+                        }
+                    });
+                })
+                .response
+                .on_disabled_hover_text(&tip);
+            });
+        });
+        if question {
+            self.more_ui.light_question = true;
+        }
+        if let Some(command) = command {
+            self.gimbal(command);
+        }
+    }
+
     fn more_dialogs(&mut self, ctx: &egui::Context) {
+        if self.more_ui.mirror_tips && tips(ctx, "mirror-tips", MIRROR_TIPS, "OK").is_some() {
+            self.more_ui.mirror_tips = false;
+        }
+        if self.more_ui.reversed_tips && tips(ctx, "reversed-tips", REVERSED_TIPS, "OK").is_some() {
+            self.more_ui.reversed_tips = false;
+        }
+        if self.more_ui.light_question
+            && let Some(answer) = question(ctx, "status-light-question", STATUS_LIGHT_QUESTION)
+        {
+            self.more_ui.light_question = false;
+            if answer {
+                self.gimbal(GimbalCommand::SetStatusLight(0));
+            }
+        }
         if self.more_ui.background_tips
             && tips(ctx, "sleep-background-tips", SLEEP_BACKGROUND_TIPS, "OK").is_some()
         {
@@ -778,6 +928,23 @@ fn sleep_time_label(seconds: i16) -> String {
     } else {
         format!("{seconds}s")
     }
+}
+
+fn brightness_t(brightness: u8) -> f32 {
+    f32::from(brightness.clamp(1, STATUS_LIGHT_MAX) - 1) / f32::from(STATUS_LIGHT_MAX - 1)
+}
+
+fn brightness_from_t(t: f32) -> u8 {
+    let max = f32::from(STATUS_LIGHT_MAX - 1);
+    1 + (t.clamp(0.0, 1.0) * max).round() as u8
+}
+
+/// A typed Brightness; outside 1 to 3 it is refused, as in the official app.
+fn parse_brightness(text: &str) -> Option<u8> {
+    text.trim()
+        .parse()
+        .ok()
+        .filter(|b| (1..=STATUS_LIGHT_MAX).contains(b))
 }
 
 fn zoom_t(ratio: f32) -> f32 {
@@ -960,6 +1127,23 @@ mod tests {
         assert_eq!(parse_zoom("abc"), None);
         assert_eq!(zoom_t(1.0), 0.0);
         assert_eq!(zoom_t(4.0), 1.0);
+    }
+
+    #[test]
+    fn brightness_steps_like_the_official_app() {
+        assert_eq!(brightness_t(1), 0.0);
+        assert_eq!(brightness_t(3), 1.0);
+        assert_eq!(brightness_t(0), 0.0);
+        assert_eq!(brightness_from_t(0.0), 1);
+        assert_eq!(brightness_from_t(0.5), 2);
+        assert_eq!(brightness_from_t(1.0), 3);
+        assert_eq!(brightness_from_t(f32::NAN), 1);
+        assert_eq!(brightness_from_t(-4.0), 1);
+        // Typed 5 and 0 were refused in the official app.
+        assert_eq!(parse_brightness(" 2 "), Some(2));
+        assert_eq!(parse_brightness("5"), None);
+        assert_eq!(parse_brightness("0"), None);
+        assert_eq!(parse_brightness("x"), None);
     }
 
     #[test]

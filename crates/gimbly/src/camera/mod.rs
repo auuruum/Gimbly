@@ -265,6 +265,12 @@ pub struct SessionStatus {
     pub voice_control: Option<VoiceControl>,
     /// Audio settings the camera reports; `None` until read.
     pub audio: Option<Audio>,
+    /// Mirror Image as the camera reports it; `None` until read.
+    pub mirror: Option<bool>,
+    /// View and Gimbal Reversed as the camera reports it; `None` until read.
+    pub reversed: Option<bool>,
+    /// The status light the camera reports; `None` until read.
+    pub status_light: Option<StatusLight>,
     /// The hand Hand Tracking follows; `None` until read.
     pub hand: Option<Hand>,
     /// The Hand Tracking range being edited. `Some` exactly while the camera
@@ -409,6 +415,12 @@ pub enum GimbalCommand {
     SetMicrophone(bool),
     /// Start pairing Vox Wireless Mic transmitter 1 or 2, or end it with `None`.
     PairVox(Option<u8>),
+    /// Mirror the picture left to right in the camera.
+    SetMirror(bool),
+    /// Reverse the picture and the gimbal's left-right turns in the camera.
+    SetReversed(bool),
+    /// Turn the status light off (0) or on at brightness 1 to [`STATUS_LIGHT_MAX`].
+    SetStatusLight(u8),
     SetHand(Hand),
     /// Read the Hand Tracking range and put the camera in its edit state.
     OpenHandRange,
@@ -848,6 +860,17 @@ impl AudioMode {
             Self::DualDirectional => "Dual-Directional Mode",
         }
     }
+}
+
+/// The brightest status light setting.
+pub const STATUS_LIGHT_MAX: u8 = 3;
+
+/// The Indicator Status section as the camera reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StatusLight {
+    pub on: bool,
+    /// 1 to [`STATUS_LIGHT_MAX`]; kept while the light is off.
+    pub brightness: u8,
 }
 
 /// The Audio section as the camera reports it.

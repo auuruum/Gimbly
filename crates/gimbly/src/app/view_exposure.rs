@@ -343,7 +343,12 @@ fn manual_rows(ui: &mut Ui, exposure: &mut Exposure, commands: &mut Vec<GimbalCo
 
 /// A label with a slider and a number field on the right. Returns the
 /// slider position (0–1) while dragged, and what was done in the field.
-fn slider_row(ui: &mut Ui, label: &str, t: f32, text: &str) -> (Option<f32>, Option<NumberInput>) {
+pub(super) fn slider_row(
+    ui: &mut Ui,
+    label: &str,
+    t: f32,
+    text: &str,
+) -> (Option<f32>, Option<NumberInput>) {
     ui.horizontal(|ui| {
         ui.set_height(30.0);
         ui.label(egui::RichText::new(label).size(15.0));
@@ -406,7 +411,7 @@ fn parse_compensation(text: &str) -> Option<u8> {
     Some(value.clamp(0.0, f32::from(COMPENSATION_MAX)) as u8)
 }
 
-fn step_u8(value: u8, step: f32, max: u8) -> u8 {
+pub(super) fn step_u8(value: u8, step: f32, max: u8) -> u8 {
     if step > 0.0 {
         value.saturating_add(1).min(max)
     } else {

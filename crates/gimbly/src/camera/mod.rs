@@ -252,6 +252,8 @@ pub struct SessionStatus {
     pub exposure_curve: Option<Vec<[u8; 2]>>,
     /// The Anti-Flicker setting the camera reports; `None` until read.
     pub anti_flicker: Option<AntiFlicker>,
+    /// White balance settings the camera reports; `None` until read.
+    pub white_balance: Option<WhiteBalance>,
     /// The hand Hand Tracking follows; `None` until read.
     pub hand: Option<Hand>,
     /// The Hand Tracking range being edited. `Some` exactly while the camera
@@ -369,6 +371,8 @@ pub enum GimbalCommand {
     /// Manual exposure curve points between the fixed ends (0, 0) and (255, 255).
     SetExposureCurve(Vec<[u8; 2]>),
     SetAntiFlicker(AntiFlicker),
+    /// The whole White Balance section; the camera takes it in one message.
+    SetWhiteBalance(WhiteBalance),
     SetHand(Hand),
     /// Read the Hand Tracking range and put the camera in its edit state.
     OpenHandRange,
@@ -603,6 +607,29 @@ pub struct Exposure {
     pub compensation: u8,
     /// Auto Exposure's ISO range (lower, upper).
     pub iso_limits: (u16, u16),
+}
+
+/// The manual color temperatures in kelvin, in steps of [`WB_TEMPERATURE_STEP`].
+pub const WB_TEMPERATURE: std::ops::RangeInclusive<u16> = 2000..=10000;
+pub const WB_TEMPERATURE_STEP: u16 = 100;
+/// The White Balance Shift runs from -7 to 7 in quarters: 0 to 56, 28 is 0.
+pub const WB_SHIFT_MAX: u8 = 56;
+pub const WB_SHIFT_ZERO: u8 = 28;
+
+/// White balance settings read from the camera. The manual values are kept
+/// while Auto WB is on, and the shift while it is off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WhiteBalance {
+    pub auto: bool,
+    /// Manual color temperature in kelvin, in [`WB_TEMPERATURE`].
+    pub temperature: u16,
+    /// Manual by red and blue gains instead of the temperature.
+    pub gains: bool,
+    pub red: u8,
+    pub blue: u8,
+    /// Auto WB's shift: B-A (blue to amber) and G-M (green to magenta),
+    /// each 0 to [`WB_SHIFT_MAX`].
+    pub shift: [u8; 2],
 }
 
 /// Anti-Flicker: the mains frequency exposure avoids beating with.

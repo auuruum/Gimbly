@@ -225,6 +225,22 @@ Shutter speeds the official app offers at 60 fps and their values: 1/60
 
 Note: [exposure](clean-room/2026-11-27-exposure.md).
 
+## White Balance
+
+One vendor message to the camera (`02`) carries the whole section; the
+official app always sends all seven values.
+
+| Action | Message | Data |
+| --- | --- | --- |
+| Write | `c2 2a → 02` | seven u32: Auto WB (0 on, `ff` off), temperature in kelvin (2000–10000), method (0 temperature, 1 R/B gains), B gain (0–255), R gain (0–255), B-A shift, G-M shift |
+| Read | `82 2a → 02`, reply | the same 28 bytes |
+
+The shift runs from -7 to 7 in quarters, sent as 0 to 56 (28 is 0); B-A
+goes from blue to amber, G-M from green to magenta. The camera keeps the
+manual values while Auto WB is on and the shift while it is off.
+
+Note: [white balance](clean-room/2026-11-28-white-balance.md).
+
 ## Zone Tracking
 
 Settings as in [Tracking Speed](#tracking-speed).

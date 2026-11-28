@@ -48,6 +48,7 @@ fn continuous(command: &Command) -> Option<u8> {
         Command::Gimbal(GimbalCommand::SetCompensation(_)) => Some(7),
         Command::Gimbal(GimbalCommand::SetIsoLimits(..)) => Some(8),
         Command::Gimbal(GimbalCommand::SetExposureCurve(_)) => Some(9),
+        Command::Gimbal(GimbalCommand::SetWhiteBalance(_)) => Some(10),
         _ => None,
     }
 }

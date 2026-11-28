@@ -28,7 +28,8 @@
 use super::{
     AiMode, AntiFlicker, AutoZoom, FOCUS_MAX, Focus, FocusMode, Fov, GimbalCommand, Hand,
     ObjectFraming, PRESET_NAME_MAX, PRESET_SLOTS, PresetPosition, TargetBox, TrackingMode,
-    TrackingRange, TrackingSpeed, VoiceRange, ZONE_AREAS, ZOOM_RATIO_MAX, Zone,
+    TrackingRange, TrackingSpeed, VoiceRange, WB_SHIFT_MAX, WB_TEMPERATURE, WhiteBalance,
+    ZONE_AREAS, ZOOM_RATIO_MAX, Zone,
 };
 
 /// GUID of the extension unit, as the UVC descriptor stores it.
@@ -985,6 +986,68 @@ pub fn read_exposure_curve(data: &[u8]) -> Option<Vec<[u8; 2]>> {
     Some(points.as_chunks::<2>().0.to_vec())
 }
 
+/// Reads the white balance: seven u32, as [`white_balance`] writes them.
+pub const READ_WHITE_BALANCE: [u8; 2] = [0x82, 0x2a];
+const WRITE_WHITE_BALANCE: [u8; 2] = [0xc2, 0x2a];
+/// The first u32 of the white balance message while Auto WB is off.
+const WB_MANUAL: u32 = 0xff;
+
+/// The whole White Balance section: Auto WB (0) or manual (`0xff`), the
+/// temperature in kelvin, the method (0 temperature, 1 gains), the blue
+/// gain, the red gain, then the B-A and G-M shift. Values out of range are
+/// clamped.
+pub fn white_balance(wb: &WhiteBalance) -> Message {
+    let shift = |i: usize| u32::from(wb.shift[i].min(WB_SHIFT_MAX));
+    let data = [
+        if wb.auto { 0 } else { WB_MANUAL },
+        u32::from(
+            wb.temperature
+                .clamp(*WB_TEMPERATURE.start(), *WB_TEMPERATURE.end()),
+        ),
+        wb.gains.into(),
+        wb.blue.into(),
+        wb.red.into(),
+        shift(0),
+        shift(1),
+    ]
+    .iter()
+    .flat_map(|v| v.to_le_bytes())
+    .collect();
+    Message::new(CAMERA, WRITE_WHITE_BALANCE, data)
+}
+
+/// The reply to [`READ_WHITE_BALANCE`]; `None` for values never seen.
+pub fn read_white_balance(data: &[u8]) -> Option<WhiteBalance> {
+    let value = |i: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(
+            data.get(i * 4..i * 4 + 4)?.try_into().ok()?,
+        ))
+    };
+    let byte =
+        |i: usize, max: u8| -> Option<u8> { u8::try_from(value(i)?).ok().filter(|&v| v <= max) };
+    let auto = match value(0)? {
+        0 => true,
+        WB_MANUAL => false,
+        _ => return None,
+    };
+    let temperature = u16::try_from(value(1)?)
+        .ok()
+        .filter(|t| WB_TEMPERATURE.contains(t))?;
+    let gains = match value(2)? {
+        0 => false,
+        1 => true,
+        _ => return None,
+    };
+    Some(WhiteBalance {
+        auto,
+        temperature,
+        gains,
+        blue: byte(3, u8::MAX)?,
+        red: byte(4, u8::MAX)?,
+        shift: [byte(5, WB_SHIFT_MAX)?, byte(6, WB_SHIFT_MAX)?],
+    })
+}
+
 fn hand_setting(key: u32, value: &[u8]) -> Message {
     let mut data = key.to_le_bytes().to_vec();
     data.extend_from_slice(value);
@@ -1682,6 +1745,73 @@ mod tests {
             (-14.2, 33.2, 0.0, 1.0)
         );
         assert!(read_preset_position(&stored.data, 2).is_none());
+    }
+
+    #[test]
+    fn white_balance_matches_capture() {
+        // From the 2026-11-28 capture: manual, 4400 K, R/B gains 145 and 140, no shift.
+        let wb = WhiteBalance {
+            auto: false,
+            temperature: 4400,
+            gains: true,
+            red: 0x91,
+            blue: 0x8c,
+            shift: [28, 28],
+        };
+        let mut message = white_balance(&wb);
+        (message.seq, message.channel) = (0xb4, 4);
+        assert_eq!(
+            message.encode().to_vec(),
+            padded(
+                "aa25b4040c00bcd80a02c22a1c006e6bff00000030110000010000008c000000910000001c0000001c000000"
+            )
+        );
+        let auto = WhiteBalance {
+            auto: true,
+            temperature: 5700,
+            gains: false,
+            shift: [0x23, 0x2f],
+            ..wb
+        };
+        assert_eq!(
+            white_balance(&auto).data,
+            hex("0000000044160000000000008c00000091000000230000002f000000")
+        );
+        // Out of range values are clamped.
+        let wild = WhiteBalance {
+            temperature: 60000,
+            shift: [99, 57],
+            ..auto
+        };
+        assert_eq!(
+            white_balance(&wild).data,
+            hex("0000000010270000000000008c000000910000003800000038000000")
+        );
+
+        // The reply, with the bytes the camera leaves after the data.
+        let reply = Message::decode(&padded(
+            "aa29b5040c00602f020a822a1c006e6bff00000030110000010000008c000000910000001c0000001c000000ce0946c601",
+        ))
+        .unwrap();
+        assert_eq!(read_white_balance(&reply.data), Some(wb));
+        assert_eq!(
+            read_white_balance(&hex(
+                "0000000044160000000000008c00000091000000230000002f000000"
+            )),
+            Some(auto)
+        );
+        for bad in [
+            "0100000044160000000000008c00000091000000230000002f000000",
+            "00000000cf070000000000008c00000091000000230000002f000000",
+            "0000000011270000000000008c00000091000000230000002f000000",
+            "0000000044160000020000008c00000091000000230000002f000000",
+            "0000000044160000000000000001000091000000230000002f000000",
+            "0000000044160000000000008c00000091000000390000002f000000",
+            "0000000044160000000000008c00000091000000230000002f0000",
+            "",
+        ] {
+            assert_eq!(read_white_balance(&hex(bad)), None, "{bad}");
+        }
     }
 
     /// Checks a gimbal write the way the 2026-11-22 capture showed it.

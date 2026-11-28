@@ -6,8 +6,8 @@ use super::sleep::SleepReadback;
 use super::{
     AiMode, AntiFlicker, Area, AutoZoom, COMPENSATION_MAX, Command, Composition, Exposure,
     FOCUS_MAX, Feature, Focus, GimbalCommand, Hand, ISO_MAX, ObjectFraming, PRESET_SLOTS, Preset,
-    RangeField, Shared, TrackingMode, TrackingRange, TrackingSpeed, VoiceRange, ZONE_AREAS, Zone,
-    serial, vendor,
+    RangeField, Shared, TrackingMode, TrackingRange, TrackingSpeed, VoiceRange, WhiteBalance,
+    ZONE_AREAS, Zone, serial, vendor,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -83,6 +83,7 @@ impl<T: Transport> Channel<T> {
         let zone_tracking = self.read_zone_tracking().ok();
         let exposure = self.read_exposure().ok();
         let exposure_curve = self.read_exposure_curve().ok();
+        let white_balance = self.read_white_balance().ok();
         let mut status = shared.status();
         status.ai_mode = view.and_then(|view| view.ai_mode);
         status.auto_zoom = view.and_then(|view| view.auto_zoom);
@@ -95,6 +96,7 @@ impl<T: Transport> Channel<T> {
         status.anti_flicker = view.and_then(|view| view.anti_flicker);
         status.exposure = exposure;
         status.exposure_curve = exposure_curve;
+        status.white_balance = white_balance;
         status.object_framing = view.and_then(|view| view.object_framing);
         status.tracking_speed = tracking_speed;
         status.hand = hand;
@@ -212,6 +214,12 @@ impl<T: Transport> Channel<T> {
             compensation,
             iso_limits,
         })
+    }
+
+    pub(super) fn read_white_balance(&mut self) -> Result<WhiteBalance, String> {
+        let data = self.request_from(vendor::CAMERA, vendor::READ_WHITE_BALANCE, Vec::new())?;
+        vendor::read_white_balance(&data)
+            .ok_or_else(|| "Camera returned an unknown white balance".into())
     }
 
     fn read_exposure_curve(&self) -> Result<Vec<[u8; 2]>, String> {
@@ -818,6 +826,13 @@ impl<T: Transport> Channel<T> {
                     .set_processing(Processing::PowerLine, value)?;
                 shared.status().anti_flicker = Some(flicker);
             }
+            GimbalCommand::SetWhiteBalance(wb) => {
+                let message = vendor::white_balance(&wb);
+                // The clamped values that were sent.
+                let sent = vendor::read_white_balance(&message.data);
+                self.send(message)?;
+                shared.status().white_balance = sent;
+            }
             GimbalCommand::SetHand(hand) => {
                 self.send(vendor::hand(hand))?;
                 shared.status().hand = Some(hand);
@@ -1167,6 +1182,7 @@ fn commands_loop(
                     && status.zone_tracking.is_some()
                     && status.exposure.is_some()
                     && status.exposure_curve.is_some()
+                    && status.white_balance.is_some()
                 {
                     preset_retries = 0;
                 }
@@ -1176,7 +1192,10 @@ fn commands_loop(
                     retry && status.tracking_speed.is_none(),
                     retry && status.hand.is_none(),
                     retry && status.zone_tracking.is_none(),
-                    retry && (status.exposure.is_none() || status.exposure_curve.is_none()),
+                    retry
+                        && (status.exposure.is_none()
+                            || status.exposure_curve.is_none()
+                            || status.white_balance.is_none()),
                 )
             };
             if retry_presets || retry_speed || retry_hand || retry_zone || retry_exposure {
@@ -1189,6 +1208,10 @@ fn commands_loop(
                 }
                 if let Ok(curve) = xu.read_exposure_curve() {
                     shared.status().exposure_curve = Some(curve);
+                    repaint();
+                }
+                if let Ok(wb) = xu.read_white_balance() {
+                    shared.status().white_balance = Some(wb);
                     repaint();
                 }
             }
@@ -1408,6 +1431,7 @@ pub(super) fn report(xu: &mut Channel<impl Transport>) -> Vec<String> {
                 view.map(|v| v.anti_flicker),
                 xu.read_exposure_curve()
             ),
+            Feature::WhiteBalance => format!("{:?}", xu.read_white_balance()),
             Feature::ObjectTracking => format!(
                 "{:?} (None unless an object is tracked)",
                 view.map(|v| v.object_framing)

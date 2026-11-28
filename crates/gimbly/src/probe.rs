@@ -37,8 +37,9 @@ fn next_frame(session: &camera::Session) -> Option<camera::PreviewFrame> {
     None
 }
 
-fn control_step(step: &str) -> Option<Command> {
-    let parts: Vec<_> = step.splitn(3, ':').collect();
+/// One control step; `wb` is the camera's white balance the `wb` steps change.
+fn control_step(step: &str, wb: Option<camera::WhiteBalance>) -> Option<Command> {
+    let parts: Vec<_> = step.splitn(4, ':').collect();
     let command = match parts.as_slice() {
         ["sleep"] => return Some(Command::SetSleep(true)),
         ["wake"] => return Some(Command::SetSleep(false)),
@@ -87,6 +88,26 @@ fn control_step(step: &str) -> Option<Command> {
         ["flicker", "off"] => GimbalCommand::SetAntiFlicker(AntiFlicker::Off),
         ["flicker", "50"] => GimbalCommand::SetAntiFlicker(AntiFlicker::Hz50),
         ["flicker", "60"] => GimbalCommand::SetAntiFlicker(AntiFlicker::Hz60),
+        // White balance: `wb:auto:BA:GM` (shift 0 to 56, 28 is none),
+        // `wb:4300` (kelvin) or `wb:rb:RED:BLUE`; the other values come from the camera.
+        ["wb", "auto", ba, gm] => GimbalCommand::SetWhiteBalance(camera::WhiteBalance {
+            auto: true,
+            shift: [ba.parse().ok()?, gm.parse().ok()?],
+            ..wb?
+        }),
+        ["wb", "rb", red, blue] => GimbalCommand::SetWhiteBalance(camera::WhiteBalance {
+            auto: false,
+            gains: true,
+            red: red.parse().ok()?,
+            blue: blue.parse().ok()?,
+            ..wb?
+        }),
+        ["wb", kelvin] => GimbalCommand::SetWhiteBalance(camera::WhiteBalance {
+            auto: false,
+            gains: false,
+            temperature: kelvin.parse().ok()?,
+            ..wb?
+        }),
         // Curve points as `curve:x,y;x,y`; `curve` alone clears it.
         ["curve"] => GimbalCommand::SetExposureCurve(Vec::new()),
         ["curve", points] => GimbalCommand::SetExposureCurve(
@@ -152,7 +173,7 @@ fn gimbal(session: &camera::Session, args: &[String], virtual_camera: bool) -> i
             .and_then(|f| crate::snapshot::save(&f, Path::new(dir), [0, 0, 0, 0, 0, step as u16]));
         let status = session.status();
         println!(
-            "step {step}: {saved:?}, vendor control {}, sleeping {}, AI mode {:?} {:?}, auto zoom {:?}, speed {:?}, voice range {:?}, sound source {:?}, HDR {:?}, focus {:?}, exposure {:?} mode {:?} curve {:?} anti-flicker {:?}, hand {:?} {:?}, zone {:?} {:?}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
+            "step {step}: {saved:?}, vendor control {}, sleeping {}, AI mode {:?} {:?}, auto zoom {:?}, speed {:?}, voice range {:?}, sound source {:?}, HDR {:?}, focus {:?}, exposure {:?} mode {:?} curve {:?} anti-flicker {:?}, white balance {:?}, hand {:?} {:?}, zone {:?} {:?}, zoom {:?}, FOV {:?}, presets {:?}, error {:?}",
             status.vendor_control,
             status.sleeping,
             status.ai_mode,
@@ -167,6 +188,7 @@ fn gimbal(session: &camera::Session, args: &[String], virtual_camera: bool) -> i
             status.exposure_mode,
             status.exposure_curve,
             status.anti_flicker,
+            status.white_balance,
             status.hand,
             status.hand_range,
             status.zone_tracking,
@@ -204,7 +226,7 @@ fn gimbal(session: &camera::Session, args: &[String], virtual_camera: bool) -> i
     }
     for (step, turn) in turns.iter().enumerate() {
         println!("{turn}");
-        if let Some(command) = control_step(turn) {
+        if let Some(command) = control_step(turn, session.status().white_balance) {
             session.send(command);
         } else {
             let parts: Vec<_> = turn.split(':').collect();

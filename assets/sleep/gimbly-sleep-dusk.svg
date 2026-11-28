@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+  <title>Gimbly sleep picture: dusk</title>
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1A1420"/>
+      <stop offset="0.65" stop-color="#4A2433"/>
+      <stop offset="1" stop-color="#7A3A35"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FF8A3D"/>
+      <stop offset="1" stop-color="#FF4D5E"/>
+    </linearGradient>
+    <radialGradient id="sun" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FFB36B"/>
+      <stop offset="1" stop-color="#FF6A4D" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1600" height="900" fill="url(#sky)"/>
+  <circle cx="800" cy="760" r="420" fill="url(#sun)" opacity="0.55"/>
+  <!-- hills -->
+  <path d="M0 720 Q300 620 620 700 T1200 690 T1600 650 V900 H0 Z" fill="#2A1A22"/>
+  <path d="M0 800 Q400 730 820 790 T1600 760 V900 H0 Z" fill="#170F14"/>
+  <!-- a resting gimbal on the horizon -->
+  <g transform="translate(608 230) scale(0.75)">
+    <path d="M362.1 149.9 A150 150 0 1 0 406 262 H330" fill="none" stroke="url(#accent)" stroke-width="54" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="256" cy="262" r="82" fill="#0A0B0C" stroke="#3C4046" stroke-width="6.6"/>
+    <path d="M206 266 Q256 306 306 266" fill="none" stroke="#FFB36B" stroke-width="12" stroke-linecap="round"/>
+  </g>
+  <!-- birds -->
+  <g fill="none" stroke="#170F14" stroke-width="6" stroke-linecap="round">
+    <path d="M300 260 q20 -18 40 0 q20 -18 40 0"/>
+    <path d="M400 320 q14 -12 28 0 q14 -12 28 0"/>
+    <path d="M1180 230 q18 -16 36 0 q18 -16 36 0"/>
+  </g>
+</svg>

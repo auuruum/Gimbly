@@ -57,7 +57,10 @@ Keep substituting Gimbly's frame until live video arrives.
 **Unknown:** Whether the standby picture differs on other firmware or in
 capture formats not shown in the report.
 
-**Test:** `camera::standby::tests` covers post-Resume and late standby
+**Superseded 2026-11-28:** the badge detector was replaced by the generic
+check in `camera::resume`; see the 2026-11-28 Device Sleep note.
+
+**Test (removed):** `camera::standby::tests` covered post-Resume and late standby
 frames, dark live video, and a scene with similar colors. The fixture is
 synthetic. To check with the camera, open Discord's preview for Gimbly
 Virtual Camera, then use Sleep and Resume in Gimbly. The preview should

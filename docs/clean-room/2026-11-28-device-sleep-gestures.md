@@ -116,7 +116,7 @@ then the value:
   more prompts").
 - How pictures or videos are added to the camera (the selector 4 file
   transfer was not studied). Gimbly offers only the four built-in choices
-  and draws its own stand-ins, not the camera's pictures.
+  and never shows the camera's pictures (see below).
 - Whether the camera keeps the gesture settings across power loss.
 - The exact hand gestures; Gimbly's Tips text describes the official
   app's icons and examples in our own words.
@@ -171,3 +171,59 @@ Running app, 13:34-13:39, same camera, OBSBOT Center closed:
   official app does not have; it was removed and the switch checked again.
 
 The camera and Gimbly's settings were left as they were before the test.
+
+## What the Sleep Background is for
+
+**Source and method:** 2026-11-28, the owner's screenshots of OBSBOT
+Center `v2.0.17.532` with its Video Preview open while the camera slept,
+and Gimbly runs on the same camera (firmware `6.5.11.1`, Windows 10 Pro
+19045, 1080P 60) with OBSBOT Center closed.
+
+**Observed:**
+
+- With the preview open and the camera asleep, OBSBOT Center's preview
+  showed the picture of the selected tile, the whole time. With the fourth
+  tile it showed the camera's standby badge.
+- A Gimbly build that passed the camera's frames through unchanged showed
+  the same pictures in its own preview: the badge for tile 4 and the
+  picture for tile 2. So the camera itself streams the Sleep Background
+  while it sleeps, and the official app shows the stream as it comes.
+- Earlier Gimbly showed its icon while asleep, then for about a second
+  after Resume the camera's picture (the owner's report; see also the
+  2026-11-08 sleep note), then live video.
+
+**Decision:** The camera's pictures are OBSBOT artwork and must never be
+shown or passed on by Gimbly. Gimbly replaces every frame while the camera
+sleeps with its own picture for the selected tile: black, two pictures
+drawn for Gimbly (`assets/sleep/`, "night" for tile 2 and "dusk" for
+tile 3, both stills), or the Gimbly icon on black for tile 4. Mirror flips
+Gimbly's picture. The camera's pictures were not copied, traced or saved.
+
+**Inferred:** After Resume the camera keeps sending its picture until the
+sensor runs. Gimbly keeps a coarse luma and chroma grid of each distinct
+frame it saw while asleep (at most 600) and, for ten seconds after wake,
+replaces any frame that matches one of them. This works for any tile,
+including the third, which is a video in the camera.
+
+**Unknown:**
+
+- Whether a very dark live scene right after Resume can match the black
+  tile; then Gimbly shows black a little longer, at most ten seconds.
+- Frames of the camera's picture sent before the status reports sleep
+  (Auto Sleep, a sleep from another app) are not replaced, since Gimbly
+  does not know yet that the camera sleeps.
+
+**Tests:** `camera::resume::tests` (replacement after wake, live video
+passes, bounded memory, tiny frames),
+`camera::preview::tests::sleep_frame_fits_a_wide_picture_and_survives_bad_input`,
+`camera::tests::sleep_and_resume_discard_queued_and_in_flight_preview_frames`
+and `preview_window::tests::resume_draws_the_placeholder_until_a_new_texture_arrives`.
+
+**Checked in Gimbly (2026-11-28):** preview and virtual camera running,
+Sleep and Resume from the toolbar for each tile and with Mirror on: the
+preview showed Gimbly's picture for the tile while asleep, and five
+screenshots right after Resume showed it until live video followed, never
+the camera's picture. The DirectShow output was not read by a separate
+client: FFmpeg could not open Gimbly Virtual Camera in this session
+("Unable to BindToObject"), which needs its own look. The camera was left
+at tile 4, Mirror off.

@@ -21,7 +21,6 @@ and never skip the clean-room limits below.
       product_id: 0xff04,
       name: "Tiny 3 Lite",
       features: &[Feature::Gimbal, Feature::Zoom, /* ... */],
-      standby_picture: true,
   }
   ```
 
@@ -88,9 +87,7 @@ Hand Tracking: Err("No matching camera reply for 84 20")
 ### 3. Add the model
 
 Add an entry to `MODELS` with the `pid`, the name, and only
-`Feature::Gimbal` at first. Keep `standby_picture: false` unless the
-camera shows the same standby picture as the Tiny 3 Lite (see
-[standby.rs](../crates/gimbly/src/camera/standby.rs)).
+`Feature::Gimbal` at first.
 
 **Ask the owner** before the first command that moves the camera. Then run
 the app with the preview and virtual camera open and try the joystick.

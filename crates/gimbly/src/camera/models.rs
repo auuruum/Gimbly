@@ -14,9 +14,6 @@ pub struct Model {
     /// Features checked on this model with real hardware and recorded in
     /// `docs/devices.md`. The app offers only these.
     pub features: &'static [Feature],
-    /// The camera keeps sending the standby picture that
-    /// `camera/standby.rs` recognizes for a moment after it wakes.
-    pub standby_picture: bool,
 }
 
 pub const MODELS: &[Model] = &[Model {
@@ -45,7 +42,6 @@ pub const MODELS: &[Model] = &[Model {
         Feature::DeviceSleep,
         Feature::Gestures,
     ],
-    standby_picture: true,
 }];
 
 impl Model {
@@ -273,7 +269,6 @@ mod tests {
             product_id: 0,
             name: "test",
             features: &[Feature::VoiceTracking],
-            standby_picture: false,
         };
         assert!(voice_only.allows(&GimbalCommand::SetAiMode(AiMode::Voice)));
         assert!(voice_only.allows(&GimbalCommand::SetAiMode(AiMode::Off)));

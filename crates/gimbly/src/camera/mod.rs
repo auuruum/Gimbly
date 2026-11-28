@@ -9,9 +9,9 @@ mod mjpeg;
 mod models;
 mod preview;
 mod queue;
+mod resume;
 mod serial;
 mod sleep;
-mod standby;
 mod vendor;
 
 #[cfg(windows)]
@@ -912,7 +912,7 @@ impl Shared {
 
     fn publish_preview(&self, epoch: u64, frame: PreviewFrame) -> bool {
         let status = self.status();
-        if status.video_epoch != epoch || status.sleeping {
+        if status.video_epoch != epoch {
             return false;
         }
         *self.frame() = Some(frame);
@@ -1226,7 +1226,8 @@ mod tests {
         assert!(shared.set_sleeping(true));
         let asleep = shared.status().video_epoch;
         assert!(shared.frame().is_none());
-        assert!(!shared.publish_preview(asleep, frame()));
+        // The sleeping camera's own picture is shown like any other frame.
+        assert!(shared.publish_preview(asleep, frame()));
 
         assert!(shared.set_sleeping(false));
         let awake = shared.status().video_epoch;

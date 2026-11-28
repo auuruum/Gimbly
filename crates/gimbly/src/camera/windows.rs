@@ -905,7 +905,7 @@ fn capture_loop<'scope, 'env>(
         None
     };
 
-    let mut frames = Frames::new(worker, config, model.is_some_and(|m| m.standby_picture));
+    let mut frames = Frames::new(worker, config);
     if compressed {
         frames.set_compressed(width, height, fps);
     }

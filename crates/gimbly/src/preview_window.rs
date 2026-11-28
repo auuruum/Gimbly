@@ -601,9 +601,9 @@ impl PreviewWindow {
     ) {
         ui.painter()
             .rect_filled(rect, CornerRadius::ZERO, Color32::BLACK);
-        // A sleeping camera keeps streaming its own still picture; show ours.
+        // A sleeping camera streams its Sleep Background; show it like video.
         let asleep = input.status.sleeping && input.status.vendor_control;
-        let live = input.status.state == SessionState::Streaming && !asleep;
+        let live = input.status.state == SessionState::Streaming;
         if let Some((epoch, texture)) = input.texture
             && live
             && epoch == input.status.video_epoch
@@ -838,6 +838,8 @@ mod tests {
         let status = SessionStatus {
             state: SessionState::Streaming,
             vendor_control: true,
+            // The camera's Sleep Background is drawn like live video.
+            sleeping: true,
             video_epoch: 2,
             ..Default::default()
         };

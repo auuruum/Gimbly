@@ -14,8 +14,8 @@ use egui_phosphor::regular as icon;
 
 const SLEEP_TIME_HINT: &str =
     "While no app is using the video, the camera goes to sleep after this time.";
-const SLEEP_BACKGROUND_TIPS: &str = "What the camera sends while it sleeps: black frames or one \
-    of the pictures stored in the camera. Gimbly cannot add your own pictures or videos yet.";
+const SLEEP_BACKGROUND_TIPS: &str = "What the preview and the virtual camera show while the \
+    camera sleeps: black or one of Gimbly's own pictures. Custom pictures are not supported yet.";
 const GESTURE_TIPS: &str = "Show a gesture to the camera to control it without the app.\n\n\
     1. Locked Target: hold up an open palm to start or stop tracking.\n\
     2. Zoom: point up with one hand to zoom in to the Zoom Factor, or back out.\n\

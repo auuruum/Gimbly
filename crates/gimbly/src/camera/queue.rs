@@ -52,6 +52,7 @@ fn continuous(command: &Command) -> Option<u8> {
         Command::Gimbal(GimbalCommand::SetImage(_)) => Some(11),
         Command::Gimbal(GimbalCommand::SetGestureZoom(_)) => Some(12),
         Command::Gimbal(GimbalCommand::SetVoiceZoom(_)) => Some(13),
+        Command::Gimbal(GimbalCommand::SetStatusLight(_)) => Some(14),
         _ => None,
     }
 }
@@ -169,5 +170,18 @@ mod tests {
                 focus(7),
             ]
         );
+    }
+
+    #[test]
+    fn brightness_slider_never_fills_the_queue() {
+        // Regression: dragging Brightness sent one command per frame and
+        // filled the queue ("Camera control queue is full").
+        let (sender, receiver) = channel();
+        let light = |b| Command::Gimbal(GimbalCommand::SetStatusLight(b));
+        for frame in 0..(CAPACITY * 4) {
+            assert!(sender.send(light(1 + (frame % 3) as u8)));
+        }
+        let pending: Vec<_> = receiver.drain().into_iter().collect();
+        assert_eq!(pending, [light(1 + ((CAPACITY * 4 - 1) % 3) as u8)]);
     }
 }

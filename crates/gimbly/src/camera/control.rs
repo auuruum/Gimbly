@@ -105,6 +105,7 @@ impl<T: Transport> Channel<T> {
         let presets = self.presets().ok();
         let tracking_speed = self.read_tracking_speed().ok();
         let hand = self.read_hand().ok();
+        let reversed = self.read_reversed().ok();
         let zone_tracking = self.read_zone_tracking().ok();
         let exposure = self.read_exposure().ok();
         let exposure_curve = self.read_exposure_curve().ok();
@@ -128,6 +129,9 @@ impl<T: Transport> Channel<T> {
         status.locked_target = view.and_then(|view| view.locked_target);
         status.voice_control = view.and_then(|view| view.voice_control);
         status.audio = view.and_then(|view| view.audio);
+        status.mirror = view.and_then(|view| view.mirror);
+        status.status_light = view.and_then(|view| view.status_light);
+        status.reversed = reversed;
         status.object_framing = view.and_then(|view| view.object_framing);
         status.tracking_speed = tracking_speed;
         status.hand = hand;
@@ -225,6 +229,8 @@ impl<T: Transport> Channel<T> {
             locked_target: vendor::read_locked_target(block),
             voice_control: vendor::read_voice_control(block),
             audio: vendor::read_audio(block),
+            mirror: vendor::read_mirror(block),
+            status_light: vendor::read_status_light(block),
         })
     }
 
@@ -312,6 +318,15 @@ impl<T: Transport> Channel<T> {
             vendor::hand_setting_key(vendor::HAND_SIDE),
         )?;
         vendor::read_hand(&data).ok_or_else(|| "Camera returned an unknown hand".into())
+    }
+
+    fn read_reversed(&mut self) -> Result<bool, String> {
+        let data = self.request(
+            vendor::READ_GIMBAL_SETTING,
+            vendor::GIMBAL_REVERSED.to_le_bytes().to_vec(),
+        )?;
+        vendor::read_reversed(&data)
+            .ok_or_else(|| "Camera returned an unknown reversed state".into())
     }
 
     /// Reads the Hand Tracking range, then enters the range-edit state.
@@ -956,6 +971,27 @@ impl<T: Transport> Channel<T> {
             GimbalCommand::PairVox(transmitter) => {
                 self.exchange(vendor::vox_pairing(transmitter))?;
             }
+            GimbalCommand::SetMirror(on) => {
+                self.set(vendor::SELECTOR_VIEW, &mut vendor::mirror(on))?;
+                shared.status().mirror = Some(on);
+            }
+            GimbalCommand::SetReversed(on) => {
+                self.send(vendor::reversed(on))?;
+                shared.status().reversed = Some(on);
+            }
+            GimbalCommand::SetStatusLight(brightness) => {
+                let brightness = brightness.min(super::STATUS_LIGHT_MAX);
+                self.set(vendor::SELECTOR_VIEW, &mut vendor::status_light(brightness))?;
+                let mut status = shared.status();
+                // Off keeps the brightness the camera had.
+                let kept = status
+                    .status_light
+                    .map_or(super::STATUS_LIGHT_MAX, |l| l.brightness);
+                status.status_light = Some(super::StatusLight {
+                    on: brightness > 0,
+                    brightness: if brightness > 0 { brightness } else { kept },
+                });
+            }
             GimbalCommand::SetImage(image) => {
                 let new = image.values().map(|v| v.min(IMAGE_MAX));
                 for (i, control) in IMAGE_CONTROLS.into_iter().enumerate() {
@@ -1251,6 +1287,8 @@ fn commands_loop(
                             | GimbalCommand::SetAudioMode(_)
                             | GimbalCommand::SetSleepMic(_)
                             | GimbalCommand::SetMicrophone(_)
+                            | GimbalCommand::SetMirror(_)
+                            | GimbalCommand::SetStatusLight(_)
                             | GimbalCommand::SelectPoint { .. }
                             | GimbalCommand::SelectObject(_)
                             | GimbalCommand::CancelTarget
@@ -1291,7 +1329,12 @@ fn commands_loop(
                     status.device_sleep,
                     status.locked_target,
                 );
-                let before_audio = (status.voice_control, status.audio);
+                let before_audio = (
+                    status.voice_control,
+                    status.audio,
+                    status.mirror,
+                    status.status_light,
+                );
                 let tracking_mode = status.tracking_mode;
                 // Unknown values (such as the switching value 6) keep the old state.
                 status.ai_mode = view.ai_mode.or(status.ai_mode);
@@ -1307,6 +1350,8 @@ fn commands_loop(
                 status.locked_target = view.locked_target.or(status.locked_target);
                 status.voice_control = view.voice_control.or(status.voice_control);
                 status.audio = view.audio.or(status.audio);
+                status.mirror = view.mirror.or(status.mirror);
+                status.status_light = view.status_light.or(status.status_light);
                 // Another app may turn tracking on later in a mode we cannot read.
                 if view.ai_mode.is_some_and(|mode| mode != AiMode::Human) {
                     status.tracking_mode = None;
@@ -1333,7 +1378,13 @@ fn commands_loop(
                         status.device_sleep,
                         status.locked_target,
                     )
-                    || before_audio != (status.voice_control, status.audio)
+                    || before_audio
+                        != (
+                            status.voice_control,
+                            status.audio,
+                            status.mirror,
+                            status.status_light,
+                        )
                     || tracking_mode != status.tracking_mode;
                 drop(status);
                 if changed {
@@ -1360,6 +1411,7 @@ fn commands_loop(
                 if status.presets.is_some()
                     && status.tracking_speed.is_some()
                     && status.hand.is_some()
+                    && status.reversed.is_some()
                     && status.zone_tracking.is_some()
                     && status.exposure.is_some()
                     && status.exposure_curve.is_some()
@@ -1372,7 +1424,8 @@ fn commands_loop(
                 (
                     retry && status.presets.is_none(),
                     retry && status.tracking_speed.is_none(),
-                    retry && status.hand.is_none(),
+                    // The hand and View and Gimbal Reversed share a retry.
+                    retry && (status.hand.is_none() || status.reversed.is_none()),
                     retry && status.zone_tracking.is_none(),
                     retry
                         && (status.exposure.is_none()
@@ -1408,6 +1461,10 @@ fn commands_loop(
             }
             if retry_hand && let Ok(hand) = xu.read_hand() {
                 shared.status().hand = Some(hand);
+                repaint();
+            }
+            if retry_hand && let Ok(on) = xu.read_reversed() {
+                shared.status().reversed = Some(on);
                 repaint();
             }
             if retry_presets && let Ok(presets) = xu.presets() {
@@ -1485,6 +1542,8 @@ pub(super) struct View {
     pub locked_target: Option<bool>,
     pub voice_control: Option<super::VoiceControl>,
     pub audio: Option<super::Audio>,
+    pub mirror: Option<bool>,
+    pub status_light: Option<super::StatusLight>,
 }
 
 /// Finds the control interface and unit by GUID in a USB descriptor stream.
@@ -1642,6 +1701,9 @@ pub(super) fn report(xu: &mut Channel<impl Transport>) -> Vec<String> {
             Feature::DeviceSleep => format!("{:?}", view.map(|v| v.device_sleep)),
             Feature::VoiceControl => format!("{:?}", view.map(|v| v.voice_control)),
             Feature::Audio => format!("{:?}", view.map(|v| v.audio)),
+            Feature::Mirror => format!("{:?}", view.map(|v| v.mirror)),
+            Feature::Reversed => format!("{:?}", xu.read_reversed()),
+            Feature::StatusLight => format!("{:?}", view.map(|v| v.status_light)),
             Feature::Gestures => format!(
                 "Locked Target {:?} (the other gestures are not reported)",
                 view.map(|v| v.locked_target)

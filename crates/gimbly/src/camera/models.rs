@@ -43,6 +43,9 @@ pub const MODELS: &[Model] = &[Model {
         Feature::Gestures,
         Feature::VoiceControl,
         Feature::Audio,
+        Feature::Mirror,
+        Feature::Reversed,
+        Feature::StatusLight,
     ],
 }];
 
@@ -108,10 +111,17 @@ pub enum Feature {
     /// The Audio section on the More tab and the microphone switch on the
     /// sleep screen.
     Audio,
+    /// Mirror Image on the More tab.
+    Mirror,
+    /// View and Gimbal Reversed on the More tab.
+    Reversed,
+    /// The Indicator Status section on the More tab: the status light and
+    /// its brightness.
+    StatusLight,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 23] = [
+    pub const ALL: [Feature; 26] = [
         Self::Gimbal,
         Self::Zoom,
         Self::FieldOfView,
@@ -135,6 +145,9 @@ impl Feature {
         Self::Gestures,
         Self::VoiceControl,
         Self::Audio,
+        Self::Mirror,
+        Self::Reversed,
+        Self::StatusLight,
     ];
 
     /// The name the UI and `docs/devices.md` use.
@@ -163,6 +176,9 @@ impl Feature {
             Self::Gestures => "Gesture Control",
             Self::VoiceControl => "Voice Control",
             Self::Audio => "Audio",
+            Self::Mirror => "Mirror Image",
+            Self::Reversed => "View and Gimbal Reversed",
+            Self::StatusLight => "Indicator Status",
         }
     }
 }
@@ -210,6 +226,9 @@ impl GimbalCommand {
             SetAudioInput(_) | SetAudioMode(_) | SetSleepMic(_) | SetMicrophone(_) | PairVox(_) => {
                 &[Feature::Audio]
             }
+            SetMirror(_) => &[Feature::Mirror],
+            SetReversed(_) => &[Feature::Reversed],
+            SetStatusLight(_) => &[Feature::StatusLight],
             SelectPoint { .. } | SelectObject(_) | CancelTarget | SetObjectFraming(_) => {
                 &[Feature::ObjectTracking]
             }

@@ -1238,7 +1238,8 @@ impl GimblyApp {
             };
             let ai_mode = self.status.ai_mode;
             let ready = self.ready(Feature::HumanTracking) && ai_mode.is_some();
-            // The camera reports on/off only; highlight the mode Gimbly set.
+            // The camera reports on/off only; highlight the mode Gimbly set, or
+            // Single Mode for tracking started elsewhere.
             let mode = self
                 .status
                 .tracking_mode

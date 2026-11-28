@@ -227,7 +227,8 @@ pub struct SessionStatus {
     /// AI mode the camera reports running; `None` until read.
     pub ai_mode: Option<AiMode>,
     /// Mode Gimbly last turned Human Tracking on in. The camera reports the
-    /// same state for both modes, so this is `None` when Gimbly did not set it.
+    /// same state for both modes, so tracking Gimbly did not start (such as
+    /// the Locked Target gesture) shows as Single Mode.
     pub tracking_mode: Option<TrackingMode>,
     /// Auto Zoom framing the camera reports; `None` until read.
     pub auto_zoom: Option<AutoZoom>,

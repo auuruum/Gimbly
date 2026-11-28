@@ -459,6 +459,40 @@ pub struct Settings {
     pub osc_port: u16,
     /// The preview's first-run hint (drag and double-click) was dismissed.
     pub preview_hint_seen: bool,
+    /// Gesture Control switches the camera does not report (More tab).
+    pub gestures: Gestures,
+    /// The user's own Sleep Background picture files, at most
+    /// [`crate::sleep_pictures::MAX`].
+    pub sleep_pictures: Vec<String>,
+    /// The one of [`Self::sleep_pictures`] shown while the camera sleeps,
+    /// instead of the camera's Sleep Background tile.
+    pub sleep_picture: Option<usize>,
+}
+
+/// The Gesture Control values the camera takes but never reports, so Gimbly
+/// remembers what it last sent, like the official app. Locked Target is
+/// read from the camera instead.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Gestures {
+    pub zoom: bool,
+    pub dynamic_zoom: bool,
+    pub direction_flip: bool,
+    /// The zoom ratio the Zoom gesture goes to, in [`crate::camera::GESTURE_ZOOM`].
+    pub zoom_factor: f32,
+    /// "No more prompts" was ticked in the notice shown when a gesture is turned on.
+    pub notice_off: bool,
+}
+
+impl Default for Gestures {
+    fn default() -> Self {
+        Self {
+            zoom: false,
+            dynamic_zoom: false,
+            direction_flip: false,
+            zoom_factor: crate::camera::GESTURE_ZOOM_DEFAULT,
+            notice_off: false,
+        }
+    }
 }
 
 impl Default for Settings {
@@ -480,6 +514,9 @@ impl Default for Settings {
             osc_host: String::new(),
             osc_port: 16284,
             preview_hint_seen: false,
+            gestures: Gestures::default(),
+            sleep_pictures: Vec::new(),
+            sleep_picture: None,
         }
     }
 }
@@ -605,6 +642,26 @@ impl Settings {
         if let Some(v) = get("OSC", "ReceivePort").and_then(|v| v.parse().ok()) {
             s.osc_port = v;
         }
+        let flag = |key| get("Gestures", key).is_some_and(|v| v == "true");
+        s.gestures.zoom = flag("Zoom");
+        s.gestures.dynamic_zoom = flag("DynamicZoom");
+        s.gestures.direction_flip = flag("DirectionFlip");
+        s.gestures.notice_off = flag("NoticeOff");
+        if let Some(v) = get("Gestures", "ZoomFactor")
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| crate::camera::GESTURE_ZOOM.contains(v))
+        {
+            s.gestures.zoom_factor = v;
+        }
+        s.sleep_pictures = (1..=crate::sleep_pictures::MAX)
+            .filter_map(|i| get("SleepPictures", &format!("Picture{i}")))
+            .filter(|v| !v.is_empty())
+            .cloned()
+            .collect();
+        s.sleep_picture = get("SleepPictures", "Selected")
+            .and_then(|v| v.parse::<usize>().ok())
+            .and_then(|i| i.checked_sub(1))
+            .filter(|&i| i < s.sleep_pictures.len());
         s
     }
 
@@ -635,6 +692,18 @@ impl Settings {
         out += &format!("ConnectionType={}\n", self.osc_connection.label());
         out += &format!("Host={}\n", self.osc_host);
         out += &format!("ReceivePort={}\n", self.osc_port);
+        out += "\n[Gestures]\n";
+        out += &format!("Zoom={}\n", self.gestures.zoom);
+        out += &format!("DynamicZoom={}\n", self.gestures.dynamic_zoom);
+        out += &format!("DirectionFlip={}\n", self.gestures.direction_flip);
+        out += &format!("ZoomFactor={:.2}\n", self.gestures.zoom_factor);
+        out += &format!("NoticeOff={}\n", self.gestures.notice_off);
+        out += "\n[SleepPictures]\n";
+        let selected = self.sleep_picture.map_or(0, |i| i + 1);
+        out += &format!("Selected={selected}\n");
+        for (i, path) in self.sleep_pictures.iter().enumerate() {
+            out += &format!("Picture{}={path}\n", i + 1);
+        }
         out
     }
 
@@ -672,6 +741,15 @@ mod tests {
             osc_host: "192.168.1.5".into(),
             osc_port: 9000,
             preview_hint_seen: true,
+            gestures: Gestures {
+                zoom: true,
+                dynamic_zoom: false,
+                direction_flip: true,
+                zoom_factor: 3.25,
+                notice_off: true,
+            },
+            sleep_pictures: vec![r"C:\Picturesway.png".into(), "/home/me/brb.jpg".into()],
+            sleep_picture: Some(1),
             ..Settings::default()
         };
         s.hotkeys
@@ -681,9 +759,23 @@ mod tests {
     }
 
     #[test]
+    fn a_sleep_picture_beyond_the_list_is_not_selected() {
+        let s = Settings::from_ini(
+            "[SleepPictures]
+Selected=3
+Picture1=a.png
+Picture2=
+",
+        );
+        assert_eq!(s.sleep_pictures, ["a.png"]);
+        assert_eq!(s.sleep_picture, None);
+    }
+
+    #[test]
     fn damaged_files_fall_back_to_defaults() {
-        let s =
-            Settings::from_ini("[Output]\nResolution=8K 240\nnot a line\n[OSC]\nReceivePort=abc\n");
+        let s = Settings::from_ini(
+            "[Output]\nResolution=8K 240\nnot a line\n[OSC]\nReceivePort=abc\n[Gestures]\nZoomFactor=9\n",
+        );
         assert_eq!(s, Settings::default());
     }
 

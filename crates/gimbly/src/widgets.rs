@@ -158,6 +158,24 @@ pub fn group_label(ui: &mut Ui, glyph: Option<&str>, text: &str) {
 /// title when `reset` names its tooltip. Returns the toggled open state and
 /// whether the reset icon was clicked.
 pub fn section_header(ui: &mut Ui, title: &str, open: bool, reset: Option<&str>) -> (bool, bool) {
+    let (open, reset, _) = header(ui, title, open, reset, false);
+    (open, reset)
+}
+
+/// A [`section_header`] with a question-mark button after the title instead
+/// of the reset icon. Returns the open state and whether the button was clicked.
+pub fn section_header_help(ui: &mut Ui, title: &str, open: bool) -> (bool, bool) {
+    let (open, _, help) = header(ui, title, open, None, true);
+    (open, help)
+}
+
+fn header(
+    ui: &mut Ui,
+    title: &str,
+    open: bool,
+    reset: Option<&str>,
+    help: bool,
+) -> (bool, bool, bool) {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(vec2(width, 60.0), Sense::click());
     ui.painter().rect_filled(rect, CornerRadius::ZERO, CARD);
@@ -200,13 +218,36 @@ pub fn section_header(ui: &mut Ui, title: &str, open: bool, reset: Option<&str>)
         );
         response.on_hover_text(tip).clicked()
     });
+    let help = help && {
+        let icon_rect = Rect::from_center_size(
+            pos2(title.right() + 14.0, rect.center().y),
+            Vec2::splat(20.0),
+        );
+        let response = ui.interact(icon_rect, response.id.with("help"), Sense::click());
+        let color = if hovered(ui, &response) {
+            TEXT
+        } else {
+            TEXT_DIM
+        };
+        ui.painter().text(
+            icon_rect.center(),
+            Align2::CENTER_CENTER,
+            icon::QUESTION,
+            font(14.0),
+            color,
+        );
+        response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+    };
     (
-        if response.clicked() && !reset {
+        if response.clicked() && !reset && !help {
             !open
         } else {
             open
         },
         reset,
+        help,
     )
 }
 

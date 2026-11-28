@@ -8,10 +8,9 @@ use std::{env, error::Error, fs, path::PathBuf};
 use windows_resource::Icon;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let assets =
-        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../../assets/logo");
+    let assets = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../../assets");
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    let load = |name| -> Result<usvg::Tree, Box<dyn Error>> {
+    let load = |name: &str| -> Result<usvg::Tree, Box<dyn Error>> {
         let path = assets.join(name);
         println!("cargo:rerun-if-changed={}", path.display());
         Ok(usvg::Tree::from_data(
@@ -19,10 +18,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             &usvg::Options::default(),
         )?)
     };
-    let icon = load("gimbly-icon.svg")?;
-    let logo = load("gimbly-logo-dark.svg")?;
+    let icon = load("logo/gimbly-icon.svg")?;
+    let logo = load("logo/gimbly-logo-dark.svg")?;
     render(&icon, 256)?.save_png(out.join("icon.png"))?;
     render(&logo, 640)?.save_png(out.join("logo.png"))?;
+    // Gimbly's own pictures for a sleeping camera, scaled up to the video size.
+    for name in ["night", "dusk"] {
+        let picture = load(&format!("sleep/gimbly-sleep-{name}.svg"))?;
+        render(&picture, 1280)?.save_png(out.join(format!("sleep-{name}.png")))?;
+    }
 
     // Windows needs an executable resource as well as the runtime window icon.
     // We write it ourselves so building needs no resource compiler.

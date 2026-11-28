@@ -55,16 +55,20 @@ bytes. `u32`, `i16` and `f32` are little-endian.
 
 | Offset | Meaning | Values |
 | --- | --- | --- |
-| 0-1 | block marker | `2e 00` |
+| 0 | block marker | `2e` |
+| 1 | Locked Target gesture | 0 off, 1 on |
 | 2 | asleep | 0 awake, 1 asleep |
 | 3 | Anti-Flicker | 0 off, 1 50 Hz, 2 60 Hz |
 | 6 | HDR | 0 off, 1 on |
 | 7 | Auto Exposure Mode | 0 Global, 1 Face |
+| 10-11 | Sleep Time | i16 seconds, negative while Auto Sleep is off |
 | 13 | Auto Focus Mode | 0 Global, 1 Face |
 | 14 | Auto Focus | 0 off, 1 on |
 | 15 | Manual Focus position | 0 to 100 |
 | 24 | AI mode | 0 off, 2 human, 3 hand, 7 voice, 6 switching (under 2 s) |
+| 27 | Sleep Background | 0 to 3 |
 | 28 | object framing, while AI mode is 2 | `14` Normal, `17` Close-up |
+| 29 | Sleep Background Mirror | 0 off, 1 on |
 | 31 | frame rate | fps the camera streams at: 30 (`1e`), 60 (`3c`) |
 | 42 | Auto Zoom | as in [Auto Zoom](#auto-zoom) |
 | 46 | voice bits | bit 1 Forward range, bit 0 Sound Source |
@@ -122,6 +126,30 @@ Note: [presets](clean-room/2026-11-08-presets.md).
 | Read | status block offset 2 | |
 
 Note: [sleep and wake](clean-room/2026-11-08-sleep-wake.md).
+
+## Device Sleep
+
+Selector 6 blocks; byte 1 is the length of what follows.
+
+| Action | Message | Data |
+| --- | --- | --- |
+| Auto Sleep and Sleep Time | `sel 6: 0b 02 t` | t: i16 seconds (30, 120, 600); Auto Sleep off sends the negative of the current time |
+| Sleep Background | `sel 6: 0e 02 00 n` | n: 0 black, 1 to 3 the pictures stored in the camera |
+| Sleep Background Mirror | `sel 6: 0e 02 02 v` | v: 0 off, 1 on |
+| Read | status block offsets 10-11, 27, 29 | |
+
+Note: [device sleep and gestures](clean-room/2026-11-28-device-sleep-gestures.md).
+
+## Gesture Control
+
+| Action | Message | Data |
+| --- | --- | --- |
+| Switch a gesture | `44 34 → 04` | u32 key, u8 0 off / 1 on; key 1 Locked Target, 2 Zoom, 3 Dynamic Zoom, 7 Direction Flip |
+| Zoom Factor | `44 34 → 04` | u32 8, f32 ratio 1.0 to 4.0 |
+| Read Locked Target | status block offset 1 | |
+
+The camera reports no other gesture; the official app keeps them itself.
+Note: [device sleep and gestures](clean-room/2026-11-28-device-sleep-gestures.md).
 
 ## Human Tracking
 

@@ -478,7 +478,7 @@ pub fn run_capture(
             }
         });
         // The closure owns tx, so it disconnects before the scope joins.
-        let mut frames = Frames::new(worker, config, model.is_some_and(|m| m.standby_picture));
+        let mut frames = Frames::new(worker, config);
         if config.compressed && pixel == MJPG {
             frames.set_compressed(w, h, fps);
         }

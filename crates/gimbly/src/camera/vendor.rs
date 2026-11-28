@@ -26,10 +26,10 @@
 //! | 16.. | data, then padding |
 
 use super::{
-    AiMode, AntiFlicker, AutoZoom, FOCUS_MAX, Focus, FocusMode, Fov, GimbalCommand, Hand,
-    ObjectFraming, PRESET_NAME_MAX, PRESET_SLOTS, PresetPosition, TargetBox, TrackingMode,
-    TrackingRange, TrackingSpeed, VoiceRange, WB_SHIFT_MAX, WB_TEMPERATURE, WhiteBalance,
-    ZONE_AREAS, ZOOM_RATIO_MAX, Zone,
+    AiMode, AntiFlicker, AutoZoom, DeviceSleep, FOCUS_MAX, Focus, FocusMode, Fov, GESTURE_ZOOM,
+    Gesture, GimbalCommand, Hand, ObjectFraming, PRESET_NAME_MAX, PRESET_SLOTS, PresetPosition,
+    TargetBox, TrackingMode, TrackingRange, TrackingSpeed, VoiceRange, WB_SHIFT_MAX,
+    WB_TEMPERATURE, WhiteBalance, ZONE_AREAS, ZOOM_RATIO_MAX, Zone,
 };
 
 /// GUID of the extension unit, as the UVC descriptor stores it.
@@ -762,9 +762,11 @@ pub fn read_targets(data: &[u8]) -> Option<Vec<TargetBox>> {
     valid.then_some(targets)
 }
 
+/// The sleep flag at status offset 2. Offset 1 is the Locked Target
+/// gesture (see [`read_locked_target`]), so it is 0 or 1.
 pub fn sleeping(data: &[u8]) -> Option<bool> {
     match data {
-        [46, 0, state @ 0..=1, ..] if data.len() >= 46 => Some(*state == 1),
+        [46, 0..=1, state @ 0..=1, ..] if data.len() >= 46 => Some(*state == 1),
         _ => None,
     }
 }
@@ -848,6 +850,76 @@ pub fn read_hdr(data: &[u8]) -> Option<bool> {
 pub fn read_frame_rate(data: &[u8]) -> Option<u8> {
     sleeping(data)?;
     data.get(31).copied().filter(|fps| (1..=240).contains(fps))
+}
+
+/// Auto Sleep and its time (selector 6 `0b 02` and an i16 in seconds,
+/// negative while Auto Sleep is off).
+pub fn sleep_time(seconds: i16) -> [u8; MESSAGE_LEN] {
+    let [low, high] = seconds.to_le_bytes();
+    view_block(&[0x0b, 2, low, high])
+}
+
+/// The picture the camera shows while asleep (selector 6 `0e 02 00 n`).
+pub fn sleep_background(index: u8) -> [u8; MESSAGE_LEN] {
+    view_block(&[0x0e, 2, 0, index])
+}
+
+/// Mirrors the sleep picture (selector 6 `0e 02 02 v`).
+pub fn sleep_mirror(on: bool) -> [u8; MESSAGE_LEN] {
+    view_block(&[0x0e, 2, 2, on.into()])
+}
+
+/// Device Sleep: status offsets 10-11 the sleep time (i16 seconds, negative
+/// while Auto Sleep is off), 27 the sleep picture and 29 its mirror.
+pub fn read_device_sleep(data: &[u8]) -> Option<DeviceSleep> {
+    sleeping(data)?;
+    let time = i16::from_le_bytes([*data.get(10)?, *data.get(11)?]);
+    let background = *data.get(27)?;
+    let mirror = *data.get(29)?;
+    (time != 0 && background < super::SLEEP_BACKGROUNDS && mirror <= 1).then_some(DeviceSleep {
+        time,
+        background,
+        mirror: mirror == 1,
+    })
+}
+
+/// Gesture Control: `44 34` to the gimbal with a u32 key, then the value.
+const GESTURE_SETTING: [u8; 2] = [0x44, 0x34];
+const GESTURE_ZOOM_FACTOR: u32 = 8;
+
+fn gesture_key(gesture: Gesture) -> u32 {
+    match gesture {
+        Gesture::LockedTarget => 1,
+        Gesture::Zoom => 2,
+        Gesture::DynamicZoom => 3,
+        Gesture::DirectionFlip => 7,
+    }
+}
+
+/// Turns one gesture on or off (one byte after the key).
+pub fn gesture(gesture: Gesture, on: bool) -> Message {
+    let mut data = gesture_key(gesture).to_le_bytes().to_vec();
+    data.push(on.into());
+    Message::new(GIMBAL, GESTURE_SETTING, data)
+}
+
+/// The ratio the Zoom gesture zooms to (an f32 after the key).
+pub fn gesture_zoom(ratio: f32) -> Message {
+    let ratio = if ratio.is_finite() {
+        ratio.clamp(*GESTURE_ZOOM.start(), *GESTURE_ZOOM.end())
+    } else {
+        super::GESTURE_ZOOM_DEFAULT
+    };
+    let mut data = GESTURE_ZOOM_FACTOR.to_le_bytes().to_vec();
+    data.extend(ratio.to_le_bytes());
+    Message::new(GIMBAL, GESTURE_SETTING, data)
+}
+
+/// The Locked Target gesture: status offset 1. The other gestures are not
+/// reported.
+pub fn read_locked_target(data: &[u8]) -> Option<bool> {
+    sleeping(data)?;
+    Some(*data.get(1)? == 1)
 }
 
 /// What Auto Focus looks at (`02 36` to the camera, u32 0 Global, 1 Face).
@@ -2452,5 +2524,98 @@ mod tests {
         assert!(split_serial(&mut buffer, &huge).is_empty());
         assert!(split_serial(&mut buffer, &vec![0x55; 70_000]).is_empty());
         assert!(buffer.len() <= 4 * (HEADER_LEN + 1024));
+    }
+    /// Status blocks from the 2026-11-28 Device Sleep and Gesture Control
+    /// captures, padded to 60 bytes.
+    const ASLEEP_LOCKED: &str = "2e01010100000001000378000001015a00000000017f000000004b030000003c00031000000000000800000003010100";
+    const AUTO_SLEEP_OFF: &str = "2e000001210000010001a8fd0001015a00030000017f000000004b030000553c00031000000000000800000003010100";
+    const BLACK_MIRRORED: &str = "2e00000143000001000158020001015a00030000017f000000004b000001553c00031000000000000800000003010100";
+
+    #[test]
+    fn device_sleep_matches_capture() {
+        assert_eq!(sleep_time(30).to_vec(), padded("0b021e00"));
+        assert_eq!(sleep_time(600).to_vec(), padded("0b025802"));
+        assert_eq!(sleep_time(-600).to_vec(), padded("0b02a8fd"));
+        assert_eq!(sleep_time(-120).to_vec(), padded("0b0288ff"));
+        assert_eq!(sleep_background(0).to_vec(), padded("0e020000"));
+        assert_eq!(sleep_background(3).to_vec(), padded("0e020003"));
+        assert_eq!(sleep_mirror(true).to_vec(), padded("0e020201"));
+        assert_eq!(sleep_mirror(false).to_vec(), padded("0e020200"));
+
+        let read = |text| read_device_sleep(&padded(text));
+        let sleep = |time, background, mirror| {
+            Some(DeviceSleep {
+                time,
+                background,
+                mirror,
+            })
+        };
+        assert_eq!(read(ASLEEP_LOCKED), sleep(120, 3, false));
+        assert_eq!(read(AUTO_SLEEP_OFF), sleep(-600, 3, false));
+        assert_eq!(read(BLACK_MIRRORED), sleep(600, 0, true));
+        assert!(!read(AUTO_SLEEP_OFF).unwrap().auto_sleep());
+
+        let mut block = padded(BLACK_MIRRORED);
+        block[27] = 4;
+        assert_eq!(read_device_sleep(&block), None);
+        block[27] = 0;
+        block[29] = 2;
+        assert_eq!(read_device_sleep(&block), None);
+        block[29] = 0;
+        (block[10], block[11]) = (0, 0);
+        assert_eq!(read_device_sleep(&block), None);
+        assert_eq!(read_device_sleep(&padded(BLACK_MIRRORED)[..29]), None);
+    }
+
+    #[test]
+    fn locked_target_does_not_hide_the_status_block() {
+        // Regression: offset 1 is 1 while the Locked Target gesture is on,
+        // and the whole status block was refused.
+        let block = padded(ASLEEP_LOCKED);
+        assert_eq!(sleeping(&block), Some(true));
+        assert_eq!(read_locked_target(&block), Some(true));
+        assert_eq!(read_frame_rate(&block), Some(60));
+        assert_eq!(read_locked_target(&padded(AUTO_SLEEP_OFF)), Some(false));
+        let mut odd = block;
+        odd[1] = 2;
+        assert_eq!(sleeping(&odd), None);
+        assert_eq!(read_locked_target(&odd), None);
+    }
+
+    #[test]
+    fn gestures_match_capture() {
+        // The first 16 bytes and the data; the official app does not clear
+        // the rest of the block.
+        let check = |mut message: Message, seq, channel, captured: &str| {
+            (message.seq, message.channel) = (seq, channel);
+            let captured = hex(captured);
+            assert_eq!(&message.encode()[..captured.len()], captured.as_slice());
+        };
+        check(
+            gesture(Gesture::LockedTarget, true),
+            0x40,
+            5,
+            "aa2540050c00f7370a0444340500365f0100000001",
+        );
+        check(
+            gesture(Gesture::Zoom, false),
+            0x8a,
+            0,
+            "aa258a000c00ed7b0a0444340500b39f0200000000",
+        );
+        check(
+            gesture_zoom(2.0),
+            0x93,
+            0,
+            "aa2593000c003cc10a04443408007a740800000000000040",
+        );
+        assert_eq!(gesture(Gesture::DynamicZoom, true).data, hex("0300000001"));
+        assert_eq!(
+            gesture(Gesture::DirectionFlip, true).data,
+            hex("0700000001")
+        );
+        assert_eq!(gesture_zoom(9.0).data, gesture_zoom(4.0).data);
+        assert_eq!(gesture_zoom(0.5).data, gesture_zoom(1.0).data);
+        assert_eq!(gesture_zoom(f32::NAN).data, gesture_zoom(2.0).data);
     }
 }

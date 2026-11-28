@@ -50,6 +50,7 @@ fn continuous(command: &Command) -> Option<u8> {
         Command::Gimbal(GimbalCommand::SetExposureCurve(_)) => Some(9),
         Command::Gimbal(GimbalCommand::SetWhiteBalance(_)) => Some(10),
         Command::Gimbal(GimbalCommand::SetImage(_)) => Some(11),
+        Command::Gimbal(GimbalCommand::SetGestureZoom(_)) => Some(12),
         _ => None,
     }
 }

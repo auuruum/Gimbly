@@ -707,7 +707,7 @@ fn capture(info: &DeviceInfo, config: CaptureConfig, worker: &Worker) -> Result<
                 control::zoom_loop(zoom, &control_rx, shared, repaint);
             }
         });
-        let mut frames = Frames::new(worker, config, model.is_some_and(|m| m.standby_picture));
+        let mut frames = Frames::new(worker, config);
         if jpeg.is_some() {
             frames.set_compressed(w, h, fps);
         }

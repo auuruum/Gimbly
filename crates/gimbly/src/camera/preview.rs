@@ -105,29 +105,42 @@ fn convert_with(view: &Nv12View<'_>, range: YuvRange, halve: bool) -> PreviewFra
     }
 }
 
-/// A packed NV12 frame of `width`x`height` (both even) with `icon`, a square
-/// RGBA image `icon_size` pixels wide, centred on black. It stands in for the
-/// still picture a sleeping camera keeps streaming.
+/// A packed NV12 frame of `width`x`height` (both even) with `image`, an RGBA
+/// picture `image_w`x`image_h`, fitted into `share` of the frame and centred
+/// on black. It stands in for the picture a sleeping camera streams.
 pub fn sleep_frame(
     width: usize,
     height: usize,
-    icon: &[u8],
-    icon_size: usize,
+    image: &[u8],
+    (image_w, image_h): (usize, usize),
+    share: f32,
     range: YuvRange,
 ) -> Vec<u8> {
-    let size = (width.min(height) / 4).max(2);
-    let (left, top) = ((width - size) / 2, (height - size) / 2);
-    let scale = icon_size as f32 / size as f32;
-    let last = icon_size.saturating_sub(1) as f32;
-    // Bilinear sample of the icon, premultiplied, which is its colour over black.
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+    let valid = image_w > 0 && image_h > 0 && image.len() >= image_w * image_h * 4;
+    let fit = (width as f32 * share / image_w.max(1) as f32)
+        .min(height as f32 * share / image_h.max(1) as f32);
+    let (size_w, size_h) = (
+        ((image_w as f32 * fit) as usize).clamp(1, width.max(1)),
+        ((image_h as f32 * fit) as usize).clamp(1, height.max(1)),
+    );
+    let (left, top) = ((width - size_w) / 2, (height - size_h) / 2);
+    let scale = 1.0 / fit;
+    let (last_x, last_y) = (
+        image_w.saturating_sub(1) as f32,
+        image_h.saturating_sub(1) as f32,
+    );
+    // Bilinear sample of the image, premultiplied, which is its colour over black.
     let pixel = |x: usize, y: usize| -> [f32; 3] {
-        if !(left..left + size).contains(&x) || !(top..top + size).contains(&y) {
+        if !valid || !(left..left + size_w).contains(&x) || !(top..top + size_h).contains(&y) {
             return [0.0; 3];
         }
-        let sx = (((x - left) as f32 + 0.5) * scale - 0.5).clamp(0.0, last);
-        let sy = (((y - top) as f32 + 0.5) * scale - 0.5).clamp(0.0, last);
+        let sx = (((x - left) as f32 + 0.5) * scale - 0.5).clamp(0.0, last_x);
+        let sy = (((y - top) as f32 + 0.5) * scale - 0.5).clamp(0.0, last_y);
         let (x0, y0) = (sx as usize, sy as usize);
-        let (x1, y1) = ((x0 + 1).min(icon_size - 1), (y0 + 1).min(icon_size - 1));
+        let (x1, y1) = ((x0 + 1).min(image_w - 1), (y0 + 1).min(image_h - 1));
         let (fx, fy) = (sx - x0 as f32, sy - y0 as f32);
         let mut out = [0.0; 3];
         for (ix, iy, weight) in [
@@ -136,7 +149,7 @@ pub fn sleep_frame(
             (x0, y1, (1.0 - fx) * fy),
             (x1, y1, fx * fy),
         ] {
-            let p = &icon[(iy * icon_size + ix) * 4..][..4];
+            let p = &image[(iy * image_w + ix) * 4..][..4];
             let alpha = p[3] as f32 / 255.0;
             for (o, &c) in out.iter_mut().zip(&p[..3]) {
                 *o += c as f32 * alpha * weight;
@@ -192,12 +205,27 @@ mod tests {
     fn sleep_frame_centres_the_icon_on_black() {
         // A 4x4 opaque white icon on a 16x16 frame lands on pixels 6..10.
         let icon = vec![255u8; 4 * 4 * 4];
-        let buf = sleep_frame(16, 16, &icon, 4, YuvRange::Limited);
+        let buf = sleep_frame(16, 16, &icon, (4, 4), 0.25, YuvRange::Limited);
         assert_eq!(buf.len(), 16 * 16 * 3 / 2);
         let out = convert_full(&Nv12View::packed(&buf, 16, 16).unwrap(), YuvRange::Limited);
         assert_eq!(out.pixels[0], Color32::from_rgb(0, 0, 0));
         assert_eq!(out.pixels[8 * 16 + 8], Color32::from_rgb(255, 255, 255));
         assert_eq!(out.pixels[8 * 16 + 4], Color32::from_rgb(0, 0, 0));
+    }
+
+    #[test]
+    fn sleep_frame_fits_a_wide_picture_and_survives_bad_input() {
+        // An 8x2 picture fills the width of a 16x16 frame, centred.
+        let picture = vec![255u8; 8 * 2 * 4];
+        let buf = sleep_frame(16, 16, &picture, (8, 2), 1.0, YuvRange::Limited);
+        let out = convert_full(&Nv12View::packed(&buf, 16, 16).unwrap(), YuvRange::Limited);
+        assert_eq!(out.pixels[8 * 16], Color32::from_rgb(255, 255, 255));
+        assert_eq!(out.pixels[0], Color32::from_rgb(0, 0, 0));
+        // Too few bytes or a zero size draws black instead of panicking.
+        for size in [(8, 2), (0, 0)] {
+            let buf = sleep_frame(16, 16, &picture[..10], size, 1.0, YuvRange::Limited);
+            assert!(buf[..256].iter().all(|&y| y == 16));
+        }
     }
 
     fn frame(width: usize, height: usize, y: u8, u: u8, v: u8) -> Vec<u8> {

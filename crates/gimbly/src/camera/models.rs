@@ -14,9 +14,6 @@ pub struct Model {
     /// Features checked on this model with real hardware and recorded in
     /// `docs/devices.md`. The app offers only these.
     pub features: &'static [Feature],
-    /// The camera keeps sending the standby picture that
-    /// `camera/standby.rs` recognizes for a moment after it wakes.
-    pub standby_picture: bool,
 }
 
 pub const MODELS: &[Model] = &[Model {
@@ -42,8 +39,9 @@ pub const MODELS: &[Model] = &[Model {
         Feature::Exposure,
         Feature::WhiteBalance,
         Feature::Image,
+        Feature::DeviceSleep,
+        Feature::Gestures,
     ],
-    standby_picture: true,
 }];
 
 impl Model {
@@ -97,10 +95,15 @@ pub enum Feature {
     WhiteBalance,
     /// The Image section (contrast, saturation, sharpness, hue) on the Image tab.
     Image,
+    /// The Device Sleep section on the More tab: Auto Sleep, its time, the
+    /// sleep picture and its mirror.
+    DeviceSleep,
+    /// The Gesture Control section on the More tab.
+    Gestures,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 19] = [
+    pub const ALL: [Feature; 21] = [
         Self::Gimbal,
         Self::Zoom,
         Self::FieldOfView,
@@ -120,6 +123,8 @@ impl Feature {
         Self::Exposure,
         Self::WhiteBalance,
         Self::Image,
+        Self::DeviceSleep,
+        Self::Gestures,
     ];
 
     /// The name the UI and `docs/devices.md` use.
@@ -144,6 +149,8 @@ impl Feature {
             Self::Exposure => "Exposure",
             Self::WhiteBalance => "White Balance",
             Self::Image => "Image",
+            Self::DeviceSleep => "Device Sleep",
+            Self::Gestures => "Gesture Control",
         }
     }
 }
@@ -183,6 +190,8 @@ impl GimbalCommand {
             }
             SetWhiteBalance(_) => &[Feature::WhiteBalance],
             SetImage(_) => &[Feature::Image],
+            SetSleepTime(_) | SetSleepBackground(_) | SetSleepMirror(_) => &[Feature::DeviceSleep],
+            SetGesture(..) | SetGestureZoom(_) => &[Feature::Gestures],
             SelectPoint { .. } | SelectObject(_) | CancelTarget | SetObjectFraming(_) => {
                 &[Feature::ObjectTracking]
             }
@@ -260,7 +269,6 @@ mod tests {
             product_id: 0,
             name: "test",
             features: &[Feature::VoiceTracking],
-            standby_picture: false,
         };
         assert!(voice_only.allows(&GimbalCommand::SetAiMode(AiMode::Voice)));
         assert!(voice_only.allows(&GimbalCommand::SetAiMode(AiMode::Off)));

@@ -1,6 +1,9 @@
 //! One NV12 output pipeline for preview, snapshots and the virtual camera.
 
-use super::{CaptureConfig, Command, RecordingStatus, SessionState, Worker, preview, standby};
+use super::{
+    CaptureConfig, Command, DeviceSleep, RecordingStatus, SLEEP_BACKGROUNDS, SessionState, Worker,
+    preview, resume::SleepFrames,
+};
 use crate::record::Recorder;
 use gimbly_vcam_shm::Nv12View;
 use preview::YuvRange;
@@ -10,16 +13,18 @@ use std::time::{Duration, Instant};
 /// the preview and virtual camera (about every second frame at 120 fps).
 const PICTURE_INTERVAL: Duration = Duration::from_millis(15);
 
-type Placeholder = ((usize, usize, YuvRange), Vec<u8>);
+/// Size, range, Sleep Background, mirror and custom picture the cached
+/// picture was built for.
+type Placeholder = ((usize, usize, YuvRange, u8, bool, usize), Vec<u8>);
 
 pub(super) struct Frames<'a> {
     worker: &'a Worker,
     config: CaptureConfig,
-    standby_picture: bool,
     virtual_camera: Option<crate::vcam::Output>,
     snapshot: bool,
     turned: Vec<u8>,
     placeholder: Option<Placeholder>,
+    sleep_frames: SleepFrames,
     fps_window: (Instant, u32),
     /// Width, height and rate of the camera's JPEG frames in a compressed
     /// session.
@@ -31,15 +36,15 @@ pub(super) struct Frames<'a> {
 }
 
 impl<'a> Frames<'a> {
-    pub(super) fn new(worker: &'a Worker, config: CaptureConfig, standby_picture: bool) -> Self {
+    pub(super) fn new(worker: &'a Worker, config: CaptureConfig) -> Self {
         Self {
             worker,
             config,
-            standby_picture,
             virtual_camera: None,
             snapshot: false,
             turned: Vec::new(),
             placeholder: None,
+            sleep_frames: SleepFrames::default(),
             fps_window: (Instant::now(), 0),
             compressed: None,
             recorder: None,
@@ -179,22 +184,42 @@ impl<'a> Frames<'a> {
     }
 
     /// On systems where the camera stops delivering buffers in sleep, keep
-    /// the branded output and snapshots available at the normal cadence.
+    /// Gimbly's sleep picture in the preview, snapshots and virtual camera.
     pub(super) fn idle(&mut self) {
-        let (sleeping, size) = {
+        let (sleeping, size, epoch, background) = {
             let status = self.worker.shared.status();
-            (status.sleeping, status.output)
+            (
+                status.sleeping,
+                status.output,
+                status.video_epoch,
+                status.device_sleep,
+            )
         };
         if sleeping && let Some((w, h)) = size {
-            self.publish_placeholder(w as usize, h as usize, YuvRange::Limited);
+            self.publish_placeholder(epoch, (w as usize, h as usize), background);
         }
     }
 
-    fn publish_placeholder(&mut self, width: usize, height: usize, range: YuvRange) {
-        if !self.snapshot && self.virtual_camera.is_none() {
+    fn publish_placeholder(
+        &mut self,
+        epoch: u64,
+        (width, height): (usize, usize),
+        background: Option<DeviceSleep>,
+    ) {
+        let range = YuvRange::Limited;
+        let want_preview = self.worker.shared.frame().is_none();
+        if !want_preview && !self.snapshot && self.virtual_camera.is_none() {
             return;
         }
-        if let Some(view) = placeholder(&mut self.placeholder, width, height, range) {
+        if let Some(view) = placeholder(&mut self.placeholder, width, height, range, background) {
+            if want_preview
+                && self
+                    .worker
+                    .shared
+                    .publish_preview(epoch, preview::convert(&view, range))
+            {
+                (self.worker.repaint)();
+            }
             if self.snapshot {
                 *self.worker.shared.snapshot() = Some(preview::convert_full(&view, range));
                 self.snapshot = false;
@@ -223,18 +248,19 @@ impl<'a> Frames<'a> {
     }
 
     pub(super) fn publish(&mut self, epoch: u64, full: &Nv12View<'_>, range: YuvRange) {
-        let asleep = {
+        let (asleep, background) = {
             let status = self.worker.shared.status();
             if status.video_epoch != epoch {
                 return;
             }
-            status.sleeping
+            (status.sleeping, status.device_sleep)
         };
-        let want_preview = !asleep && self.worker.shared.frame().is_none();
+        // The camera's own sleep picture never leaves Gimbly; ours replaces it.
+        let replace = self.sleep_frames.replace(asleep, full, Instant::now());
+        let want_preview = self.worker.shared.frame().is_none();
         if !want_preview && !self.snapshot && self.virtual_camera.is_none() {
             return;
         }
-        let replace = standby::use_placeholder(asleep, self.standby_picture, full);
         let crop = self
             .config
             .portrait
@@ -246,7 +272,10 @@ impl<'a> Frames<'a> {
         });
         let view = turned.as_ref().unwrap_or(view);
         let sleep = replace
-            .then(|| placeholder(&mut self.placeholder, view.width, view.height, range))
+            .then(|| {
+                let (w, h) = (view.width, view.height);
+                placeholder(&mut self.placeholder, w, h, range, background)
+            })
             .flatten();
         let view = sleep.as_ref().unwrap_or(view);
         // Transform and conversion may have overlapped a sleep transition.
@@ -294,17 +323,49 @@ impl<'a> Frames<'a> {
     }
 }
 
+/// The user's own picture, or Gimbly's picture for the Sleep Background tile
+/// the camera reports: black, two of Gimbly's own pictures, or the Gimbly
+/// icon. None of the camera's pictures are used.
 fn placeholder(
     cache: &mut Option<Placeholder>,
     w: usize,
     h: usize,
     range: YuvRange,
+    sleep: Option<DeviceSleep>,
 ) -> Option<Nv12View<'_>> {
-    let size = (w, h, range);
-    if cache.as_ref().is_none_or(|(built, _)| *built != size) {
-        let icon = crate::branding::window_icon();
-        let frame = preview::sleep_frame(w, h, &icon.rgba, icon.width as usize, range);
-        *cache = Some((size, frame));
+    let background = sleep.map_or(SLEEP_BACKGROUNDS - 1, |s| s.background);
+    let mirror = sleep.is_some_and(|s| s.mirror);
+    let custom = super::custom_sleep_picture();
+    let id = custom
+        .as_ref()
+        .map_or(0, |p| std::sync::Arc::as_ptr(p) as usize);
+    let key = (w, h, range, background, mirror, id);
+    if cache.as_ref().is_none_or(|(built, _)| *built != key) {
+        let (image, share) = match (custom, background) {
+            (Some(custom), _) => (Some(custom), 1.0),
+            (None, 0) => (None, 0.0),
+            (None, 1) => (Some(crate::branding::sleep_picture(true)), 1.0),
+            (None, 2) => (Some(crate::branding::sleep_picture(false)), 1.0),
+            (None, _) => (Some(crate::branding::window_icon()), 0.25),
+        };
+        let mut frame = match image {
+            Some(image) => preview::sleep_frame(
+                w,
+                h,
+                &image.rgba,
+                (image.width as usize, image.height as usize),
+                share,
+                range,
+            ),
+            None => preview::sleep_frame(w, h, &[], (0, 0), 0.0, range),
+        };
+        if mirror && let Some(view) = Nv12View::packed(&frame, w, h) {
+            let mut turned = Vec::new();
+            let flip = gimbly_vcam_shm::pixel::Transform::new(0, true);
+            gimbly_vcam_shm::pixel::transform_into(&view, flip, &mut turned);
+            frame = turned;
+        }
+        *cache = Some((key, frame));
     }
     Nv12View::packed(&cache.as_ref()?.1, w, h)
 }
@@ -324,7 +385,7 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             repaint: Arc::new(|| {}),
         };
-        let mut frames = Frames::new(&worker, CaptureConfig::default(), false);
+        let mut frames = Frames::new(&worker, CaptureConfig::default());
         frames.check_output(Some(Ok(false)));
         assert!(!worker.shared.status().virtual_camera);
         frames.check_output(Some(Ok(true)));

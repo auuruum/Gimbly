@@ -41,6 +41,7 @@ pub const MODELS: &[Model] = &[Model {
         Feature::Focus,
         Feature::Exposure,
         Feature::WhiteBalance,
+        Feature::Image,
     ],
     standby_picture: true,
 }];
@@ -94,10 +95,12 @@ pub enum Feature {
     Exposure,
     /// The White Balance section on the Image tab.
     WhiteBalance,
+    /// The Image section (contrast, saturation, sharpness, hue) on the Image tab.
+    Image,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 18] = [
+    pub const ALL: [Feature; 19] = [
         Self::Gimbal,
         Self::Zoom,
         Self::FieldOfView,
@@ -116,6 +119,7 @@ impl Feature {
         Self::Focus,
         Self::Exposure,
         Self::WhiteBalance,
+        Self::Image,
     ];
 
     /// The name the UI and `docs/devices.md` use.
@@ -139,6 +143,7 @@ impl Feature {
             Self::Focus => "Focus",
             Self::Exposure => "Exposure",
             Self::WhiteBalance => "White Balance",
+            Self::Image => "Image",
         }
     }
 }
@@ -177,6 +182,7 @@ impl GimbalCommand {
                 &[Feature::Exposure]
             }
             SetWhiteBalance(_) => &[Feature::WhiteBalance],
+            SetImage(_) => &[Feature::Image],
             SelectPoint { .. } | SelectObject(_) | CancelTarget | SetObjectFraming(_) => {
                 &[Feature::ObjectTracking]
             }

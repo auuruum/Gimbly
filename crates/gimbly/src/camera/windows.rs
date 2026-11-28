@@ -15,8 +15,9 @@ use gimbly_vcam_shm::Nv12View;
 use std::time::Instant;
 use windows::Win32::Media::DirectShow::{
     CameraControl_Flags_Auto, CameraControl_Flags_Manual, CameraControl_Focus, CameraControl_Zoom,
-    IAMCameraControl, IAMVideoProcAmp, VideoProcAmp_BacklightCompensation,
-    VideoProcAmp_Flags_Manual, VideoProcAmp_Gain,
+    IAMCameraControl, IAMVideoProcAmp, VideoProcAmp_BacklightCompensation, VideoProcAmp_Contrast,
+    VideoProcAmp_Flags_Manual, VideoProcAmp_Gain, VideoProcAmp_Hue, VideoProcAmp_Saturation,
+    VideoProcAmp_Sharpness,
 };
 use windows::Win32::Media::KernelStreaming::{
     IKsControl, IKsTopologyInfo, KSIDENTIFIER_0_0, KSNODETYPE_DEV_SPECIFIC, KSP_NODE,
@@ -684,6 +685,10 @@ fn video_property(control: Processing) -> i32 {
         Processing::Backlight => VideoProcAmp_BacklightCompensation.0,
         Processing::Gain => VideoProcAmp_Gain.0,
         Processing::PowerLine => 13,
+        Processing::Contrast => VideoProcAmp_Contrast.0,
+        Processing::Hue => VideoProcAmp_Hue.0,
+        Processing::Saturation => VideoProcAmp_Saturation.0,
+        Processing::Sharpness => VideoProcAmp_Sharpness.0,
     }
 }
 

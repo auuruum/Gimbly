@@ -254,6 +254,8 @@ pub struct SessionStatus {
     pub anti_flicker: Option<AntiFlicker>,
     /// White balance settings the camera reports; `None` until read.
     pub white_balance: Option<WhiteBalance>,
+    /// The Image section the camera reports; `None` until read.
+    pub image: Option<ImageAdjust>,
     /// The hand Hand Tracking follows; `None` until read.
     pub hand: Option<Hand>,
     /// The Hand Tracking range being edited. `Some` exactly while the camera
@@ -373,6 +375,8 @@ pub enum GimbalCommand {
     SetAntiFlicker(AntiFlicker),
     /// The whole White Balance section; the camera takes it in one message.
     SetWhiteBalance(WhiteBalance),
+    /// The Image section; only the values that changed are written.
+    SetImage(ImageAdjust),
     SetHand(Hand),
     /// Read the Hand Tracking range and put the camera in its edit state.
     OpenHandRange,
@@ -630,6 +634,40 @@ pub struct WhiteBalance {
     /// Auto WB's shift: B-A (blue to amber) and G-M (green to magenta),
     /// each 0 to [`WB_SHIFT_MAX`].
     pub shift: [u8; 2],
+}
+
+/// The Image section's values all run from 0 to this; [`IMAGE_DEFAULT`] is the middle.
+pub const IMAGE_MAX: u8 = 100;
+pub const IMAGE_DEFAULT: ImageAdjust = ImageAdjust {
+    contrast: 50,
+    saturation: 50,
+    sharpness: 50,
+    hue: 50,
+};
+
+/// Contrast, saturation, sharpness and hue, each 0 to [`IMAGE_MAX`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageAdjust {
+    pub contrast: u8,
+    pub saturation: u8,
+    pub sharpness: u8,
+    pub hue: u8,
+}
+
+impl ImageAdjust {
+    /// The values in the order the section shows them.
+    pub fn values(self) -> [u8; 4] {
+        [self.contrast, self.saturation, self.sharpness, self.hue]
+    }
+
+    pub fn from_values([contrast, saturation, sharpness, hue]: [u8; 4]) -> Self {
+        Self {
+            contrast,
+            saturation,
+            sharpness,
+            hue,
+        }
+    }
 }
 
 /// Anti-Flicker: the mains frequency exposure avoids beating with.

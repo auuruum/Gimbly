@@ -1269,7 +1269,11 @@ impl GimblyApp {
             let mut picked_sound = None;
             band(ui, SECTION, margin, |ui| {
                 ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
-                group_label(ui, Some(icon::PERSON_SIMPLE), "Human Tracking");
+                if human_tracking_header(ui, &self.status, ready, &tip)
+                    .is_some_and(|stop| stop.clicked())
+                {
+                    picked_mode = Some(None);
+                }
                 ui.add_space(12.0);
                 let gap = 16.0;
                 let size = vec2((ui.available_width() - gap) / 2.0, BUTTON_HEIGHT);
@@ -1616,6 +1620,39 @@ impl GimblyApp {
     }
 }
 
+/// The status poll can confirm Human Tracking started without knowing the
+/// mode, e.g. after a Locked Target gesture. Show it without guessing a mode.
+fn human_tracking_header(
+    ui: &mut Ui,
+    status: &SessionStatus,
+    ready: bool,
+    tip: &str,
+) -> Option<Response> {
+    ui.horizontal(|ui| {
+        ui.set_height(22.0);
+        group_label(ui, Some(icon::PERSON_SIMPLE), "Human Tracking");
+        if status.ai_mode != Some(AiMode::Human)
+            || status.tracking_mode.is_some()
+            || status.object_framing.is_some()
+        {
+            return None;
+        }
+        Some(
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let stop = ui
+                    .add_enabled(ready, egui::Button::new("Stop").min_size(vec2(46.0, 22.0)))
+                    .on_hover_text("Stop Human Tracking")
+                    .on_disabled_hover_text(tip);
+                ui.label(egui::RichText::new("Tracking on").size(12.0).color(ACCENT))
+                    .on_hover_text("The camera doesn't report Single or Group Mode");
+                stop
+            })
+            .inner,
+        )
+    })
+    .inner
+}
+
 fn auto_zoom_label(zoom: AutoZoom) -> &'static str {
     match zoom {
         AutoZoom::Off => "Off",
@@ -1829,5 +1866,69 @@ impl eframe::App for GimblyApp {
         self.serial_access
             .show(&ctx, self.status.serial_denied.as_ref());
         self.toast(&ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn human_tracking_started_outside_gimbly_shows_until_it_stops() {
+        let ctx = egui::Context::default();
+        let draw = |status: &SessionStatus, ready, events| {
+            let mut stop = None;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    stop = human_tracking_header(ui, status, ready, "Unavailable");
+                },
+            );
+            output.textures_delta.clear();
+            let on = output.shapes.iter().any(|shape| {
+                matches!(&shape.shape, egui::Shape::Text(text) if text.galley.text() == "Tracking on")
+            });
+            assert_eq!(on, stop.is_some());
+            stop
+        };
+        let mut status = SessionStatus {
+            ai_mode: Some(AiMode::Off),
+            locked_target: Some(true),
+            ..Default::default()
+        };
+        // Enabling the gesture doesn't mean the camera is tracking.
+        assert!(draw(&status, true, vec![]).is_none());
+        status.ai_mode = Some(AiMode::Human);
+        let stop = draw(&status, true, vec![]).expect("tracking with no known mode");
+        assert!(stop.enabled());
+        let pos = stop.rect.center();
+        let click = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        draw(
+            &status,
+            true,
+            vec![egui::Event::PointerMoved(pos), click(true)],
+        );
+        assert!(draw(&status, true, vec![click(false)]).is_some_and(|stop| stop.clicked()));
+        assert!(draw(&status, false, vec![]).is_some_and(|stop| !stop.enabled()));
+
+        // Known human modes and object tracking have their own highlighted buttons.
+        for mode in [TrackingMode::Single, TrackingMode::Group] {
+            status.tracking_mode = Some(mode);
+            assert!(draw(&status, true, vec![]).is_none());
+        }
+        status.tracking_mode = None;
+        status.object_framing = Some(ObjectFraming::Normal);
+        assert!(draw(&status, true, vec![]).is_none());
+        status.object_framing = None;
+        status.ai_mode = Some(AiMode::Off);
+        assert!(draw(&status, true, vec![]).is_none());
     }
 }

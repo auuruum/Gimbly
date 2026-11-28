@@ -144,6 +144,12 @@ Center read `84 3f` keys 5 and 6 (replies f32 1.0 and 0) but not key 4.
   Brightness dragged to 1, arrows up to 3 and down to 2, typed 5 and 0
   refused, typed 3 taken; the section folds and unfolds.
 - Linux and macOS: compiled by CI only, not run.
+- 20:04, after the owner saw "Camera control queue is full" while
+  dragging Brightness: the slider sent a write every frame and the
+  status light write was not coalesced. It now is, like the other
+  sliders (`camera::queue::tests::brightness_slider_never_fills_the_queue`);
+  a long back-and-forth drag with the preview and virtual camera on gave
+  no error.
 
 The camera was left with Mirror Image off, View and Gimbal Reversed off,
 Status Light on at 3.
